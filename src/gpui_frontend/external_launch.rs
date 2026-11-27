@@ -1862,6 +1862,13 @@ pub(super) fn bookkeep_folder(outcome: Result<CommandOutcome, CommandError>, act
 
 }
 
+pub(super) fn bookkeep_bookmark(outcome: Result<CommandOutcome, CommandError>, action: Action,
+    query: String, source: ActivationSource, limit: usize) -> WorkerResult {
+    bookkeep_action(outcome, action, query, source, limit,
+        |entry, limit| multi_launcher::history::append_history(entry, limit).map_err(|error| error.to_string()),
+        |key| multi_launcher::usage::record_usage(multi_launcher::usage::USAGE_FILE, key).map_err(|error| error.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

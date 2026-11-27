@@ -39,10 +39,21 @@ impl CommandBus {
         source: ActivationSource, preserve_command: bool, preferences: LauncherRunPreferences,
         result: anyhow::Result<()>) -> Result<CommandOutcome, CommandError> {
         if !matches!(command, super::StorageCommand::FolderAdd(_) | super::StorageCommand::FolderRemove(_)) {
-            return Err(CommandError::new("launcher", "Invalid checked folder command"));
+            return Err(CommandError::new("launcher", "Invalid checked storage authoring command"));
         }
         let invocation = CommandInvocation { command: Command::Storage(command), original_action: action.clone(), query_override: None, source };
-        super::handlers::checked_folder_outcome(&invocation, preserve_command, preferences, result)
+        super::handlers::checked_storage_authoring_outcome(&invocation, preserve_command, preferences, result)
+    }
+
+    /// Complete a checked bookmark write without repeating its filesystem effect.
+    pub fn complete_checked_bookmark(&self, command: super::StorageCommand, action: &Action,
+        source: ActivationSource, preserve_command: bool, preferences: LauncherRunPreferences,
+        result: anyhow::Result<()>) -> Result<CommandOutcome, CommandError> {
+        if !matches!(command, super::StorageCommand::BookmarkAdd(_) | super::StorageCommand::BookmarkRemove(_)) {
+            return Err(CommandError::new("launcher", "Invalid checked bookmark command"));
+        }
+        let invocation = CommandInvocation { command: Command::Storage(command), original_action: action.clone(), query_override: None, source };
+        super::handlers::checked_storage_authoring_outcome(&invocation, preserve_command, preferences, result)
     }
 
     /// Apply the normal alias-only launcher policy to a completed checked snippet write.
@@ -250,6 +261,19 @@ impl CommandBus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_bookmark_completion_uses_stock_policy() {
+        use super::{CommandBus, LauncherRunPreferences};
+        use crate::commands::{ActivationSource, HistoryPolicy, QueryPolicy, StorageCommand, VisibilityPolicy};
+        let action = crate::actions::Action { label: "Add bookmark".into(), desc: "Bookmark".into(), action: "bookmark:add:https://example.com".into(), args: None };
+        let prefs = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: true };
+        let add = CommandBus.complete_checked_bookmark(StorageCommand::BookmarkAdd("https://example.com".into()), &action, ActivationSource::Enter, true, prefs, Ok(())).unwrap();
+        assert_eq!(add.query, QueryPolicy::Set("bm add ".into())); assert_eq!(add.history, HistoryPolicy::Record);
+        assert_eq!(add.visibility, VisibilityPolicy::Keep); assert!(add.search && add.invalidate_results);
+        let remove = CommandBus.complete_checked_bookmark(StorageCommand::BookmarkRemove("https://example.com".into()), &action, ActivationSource::Click, false, prefs, Ok(())).unwrap();
+        assert_eq!(remove.query, QueryPolicy::Set(String::new())); assert_eq!(remove.visibility, VisibilityPolicy::Keep);
+    }
+
     #[test]
     fn checked_folder_completion_matches_stock_query_and_hide_policy() {
         use super::{CommandBus, LauncherRunPreferences};

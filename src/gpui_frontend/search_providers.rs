@@ -380,6 +380,18 @@ impl InstalledLauncherProviders {
         )
     }
 
+    pub(super) fn bookmark_aliases(&self) -> Option<std::collections::HashMap<String, Option<String>>> {
+        let bookmarks = self.bookmarks.as_ref()?;
+        let rows = multi_launcher::plugin::Plugin::search(bookmarks, "bm list");
+        let targets = rows.iter().map(|row| row.action.as_str()).collect::<HashSet<_>>();
+        Some(bookmarks.search_aliases_lc(&targets))
+    }
+    pub(super) fn bookmark_row_is_current(&self, query: &str, action: &Action, enabled: Option<&HashSet<String>>,
+        caps: Option<&std::collections::HashMap<String, Vec<String>>>) -> bool {
+        self.bookmarks.as_ref().is_some_and(|provider| search_routed([provider as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
+            .iter().any(|(name, candidate)| name == "bookmarks" && candidate == action))
+    }
+
     pub(super) fn folder_aliases(&self) -> Option<std::collections::HashMap<String, Option<String>>> {
         let folder = self.folders.as_ref()?;
         let rows = multi_launcher::plugin::Plugin::search(folder, "f list");
@@ -507,7 +519,7 @@ fn admitted_commands(provider: &dyn multi_launcher::plugin::Plugin) -> Vec<Actio
         .into_iter()
         .filter(|action| match provider.name() {
             "folders" => matches!(action.action.as_str(), "query:f " | "query:f list " | "query:f add " | "query:f rm "),
-            "bookmarks" => action.action == "query:bm list",
+            "bookmarks" => matches!(action.action.as_str(), "query:bm " | "query:bm list" | "query:bm add " | "query:bm rm "),
             _ => true,
         })
         .collect()
@@ -833,7 +845,7 @@ mod tests {
                 .iter()
                 .map(|a| a.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["bm list"]
+            vec!["bm", "bm list", "bm add"]
         );
         let providers: [&dyn Plugin; 2] = [&folder, &bookmark];
         let enabled = HashSet::from(["folders".to_owned(), "bookmarks".to_owned()]);

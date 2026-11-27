@@ -9,18 +9,39 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const BOOKMARKS_FILE: &str = "bookmarks.json";
 
 static BOOKMARK_CACHE: Lazy<Arc<Mutex<LruCache<String, Vec<Action>>>>> =
     Lazy::new(|| Arc::new(Mutex::new(LruCache::new(64))));
+static BOOKMARK_CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
 static BOOKMARKS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static LIVE_BOOKMARKS: Lazy<super::live_snapshot::LiveSnapshotRegistry<BookmarkEntry>> =
     Lazy::new(super::live_snapshot::LiveSnapshotRegistry::new);
 
+#[cfg(test)]
 fn invalidate_bookmark_cache() {
     if let Ok(mut cache) = BOOKMARK_CACHE.lock() {
+        BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
         cache.clear();
+    } else { BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel); }
+}
+
+fn publish_bookmarks(path: &str, entries: &[BookmarkEntry]) {
+    if let Ok(mut cache) = BOOKMARK_CACHE.lock() {
+        LIVE_BOOKMARKS.publish(path, entries);
+        BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
+        cache.clear();
+    } else {
+        LIVE_BOOKMARKS.publish(path, entries);
+        BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+fn insert_cached_if_current(cache: &Mutex<LruCache<String, Vec<Action>>>, epoch: u64, key: String, result: Vec<Action>) {
+    if let Ok(mut cache) = cache.lock() && BOOKMARK_CACHE_EPOCH.load(Ordering::Acquire) == epoch {
+        cache.insert(key, result);
     }
 }
 
@@ -77,7 +98,15 @@ impl BookmarksPlugin {
                     None
                 }
             };
-            LIVE_BOOKMARKS.get_or_create(path, startup)
+            if let Ok(mut cache) = BOOKMARK_CACHE.lock() {
+                let rehydrating = startup.is_some();
+                let data = LIVE_BOOKMARKS.get_or_create(path, startup);
+                if rehydrating { BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel); cache.clear(); }
+                data
+            } else {
+                BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
+                LIVE_BOOKMARKS.get_or_create(path, startup)
+            }
         };
         let cache = BOOKMARK_CACHE.clone();
         let data_clone = data.clone();
@@ -322,8 +351,7 @@ fn update_bookmarks_with_save(
     let mut bookmarks = load_bookmarks(path)?;
     if mutate(&mut bookmarks)? {
         save(path, &bookmarks)?;
-        LIVE_BOOKMARKS.publish(path, &bookmarks);
-        invalidate_bookmark_cache();
+        publish_bookmarks(path, &bookmarks);
     }
     Ok(bookmarks)
 }
@@ -332,6 +360,96 @@ fn bookmarks_transaction_guard() -> MutexGuard<'static, ()> {
     BOOKMARKS_TRANSACTION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Resolve an exact emitted Bookmark Search row to its unique raw record.
+pub fn checked_bookmark_search_entry(path: &str, action: &Action, removing: bool) -> anyhow::Result<BookmarkEntry> {
+    let entries = load_bookmarks(path)?;
+    let mut matches = entries.iter().filter(|entry| {
+        let expected = if removing {
+            Action { label: format!("Remove bookmark {}", entry.url), desc: "Bookmark".into(), action: format!("bookmark:remove:{}", entry.url), args: None }
+        } else {
+            let (label, desc, target) = bookmark_search_row(entry);
+            Action { label: label.into(), desc: desc.into(), action: target.into(), args: None }
+        };
+        expected == *action
+    });
+    let entry = matches.next().ok_or_else(|| anyhow::anyhow!("Bookmark result is stale; refresh Search."))?;
+    if matches.next().is_some() || entries.iter().filter(|other| other.url == entry.url).count() != 1 {
+        anyhow::bail!("Bookmark is ambiguous; resolve duplicate entries first.");
+    }
+    Ok(entry.clone())
+}
+
+fn checked_bookmark_mutate(path: &str, current: impl Fn() -> bool,
+    mutate: impl FnOnce(&mut Vec<BookmarkEntry>) -> anyhow::Result<bool>) -> anyhow::Result<Vec<BookmarkEntry>> {
+    use std::cell::Cell;
+    use std::io::ErrorKind;
+    let target = Path::new(path);
+    let _transaction = bookmarks_transaction_guard();
+    let read = || -> std::io::Result<Option<Vec<u8>>> {
+        match std::fs::read(target) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    anyhow::ensure!(current(), "Bookmark operation was superseded.");
+    let observed = read()?;
+    let mut entries = match observed.as_deref() {
+        None => Vec::new(),
+        Some(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Vec::new(),
+        Some(bytes) => match serde_json::from_slice::<Vec<BookmarkEntry>>(bytes) {
+            Ok(entries) => entries,
+            Err(_) => serde_json::from_slice::<Vec<String>>(bytes)?.into_iter()
+                .map(|url| BookmarkEntry { url, alias: None }).collect(),
+        },
+    };
+    if !mutate(&mut entries)? {
+        anyhow::ensure!(current() && read()? == observed && current(), "Bookmark store changed or operation was superseded; refresh and retry.");
+        return Ok(entries);
+    }
+    let bytes = serde_json::to_vec_pretty(&entries)?; let denied = Cell::new(false);
+    let write = crate::common::atomic_file::save_atomic_if(target, &bytes, || {
+        let valid = current() && read().is_ok_and(|latest| latest == observed) && current();
+        if !valid { denied.set(true); } valid
+    });
+    anyhow::ensure!(!denied.get(), "Bookmark store changed or operation was superseded; refresh and retry.");
+    write?; publish_bookmarks(path, &entries); Ok(entries)
+}
+
+pub enum CheckedBookmarkMutation { SetAlias(String), Remove }
+
+/// Mutate exactly the reviewed raw URL and full record; never normalize an existing record.
+pub fn checked_bookmark_update(path: &str, expected: &BookmarkEntry, mutation: CheckedBookmarkMutation,
+    current: impl Fn() -> bool) -> anyhow::Result<Vec<BookmarkEntry>> {
+    let expected = expected.clone();
+    checked_bookmark_mutate(path, current, move |entries| {
+        let mut matching = entries.iter().enumerate().filter(|(_, entry)| entry.url == expected.url);
+        let (index, entry) = matching.next().ok_or_else(|| anyhow::anyhow!("Bookmark was removed; refresh Search."))?;
+        if matching.next().is_some() || *entry != expected { anyhow::bail!("Bookmark changed or is ambiguous; refresh Search."); }
+        let alias = match mutation { CheckedBookmarkMutation::Remove => { entries.remove(index); return Ok(true); }, CheckedBookmarkMutation::SetAlias(value) => value };
+        let alias = (!alias.is_empty()).then_some(alias);
+        if entries[index].alias == alias { return Ok(false); }
+        entries[index].alias = alias; Ok(true)
+    })
+}
+
+/// Normalize a newly authored URL using stock rules. `None` preserves a saved alias.
+pub fn checked_add_bookmark(path: &str, url: &str, alias: Option<&str>, current: impl Fn() -> bool) -> anyhow::Result<Vec<BookmarkEntry>> {
+    anyhow::ensure!(!url.trim().is_empty(), "Enter a bookmark URL.");
+    let fixed = normalize_url(url); let alias = alias.map(str::to_owned);
+    checked_bookmark_mutate(path, current, move |entries| {
+        let mut matching = entries.iter().enumerate().filter(|(_, entry)| entry.url == fixed);
+        if let Some((index, _)) = matching.next() {
+            if matching.next().is_some() { anyhow::bail!("Bookmark is ambiguous; resolve duplicate entries first."); }
+            let Some(alias) = alias else { return Ok(false); };
+            let alias = (!alias.is_empty()).then_some(alias);
+            if entries[index].alias == alias { return Ok(false); }
+            entries[index].alias = alias; return Ok(true);
+        }
+        entries.push(BookmarkEntry { url: fixed, alias: alias.filter(|value| !value.is_empty()) }); Ok(true)
+    })
 }
 
 /// Append a new bookmark `url` to the file at `path`.
@@ -420,14 +538,16 @@ fn reload_bookmark_snapshot(
         LoadState::Empty => Vec::new(),
         LoadState::Loaded(bookmarks) => bookmarks,
     };
-    if let Ok(mut current) = data.lock() {
-        if *current == bookmarks {
-            return Ok(());
-        }
-        *current = bookmarks;
-    }
     if let Ok(mut cache) = cache.lock() {
+        if let Ok(mut current) = data.lock() {
+            if *current == bookmarks { return Ok(()); }
+            *current = bookmarks;
+        }
+        BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
         cache.clear();
+    } else {
+        if let Ok(mut current) = data.lock() { *current = bookmarks; }
+        BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
     }
     Ok(())
 }
@@ -448,11 +568,10 @@ impl Plugin for BookmarksPlugin {
             return res;
         }
 
+        let epoch = BOOKMARK_CACHE_EPOCH.load(Ordering::Acquire);
         let result = self.search_internal(trimmed);
 
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(key, result.clone());
-        }
+        insert_cached_if_current(&self.cache, epoch, key, result.clone());
 
         result
     }
@@ -516,6 +635,71 @@ mod tests {
             url: url.into(),
             alias: alias.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn checked_bookmarks_preserve_raw_siblings_and_reject_stale_and_corrupt() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("bookmarks.json"); let store = path.to_str().unwrap();
+        let raw = bookmark("http://example.com", Some("legacy"));
+        let secure = bookmark("https://example.com", Some("secure"));
+        save_bookmarks(store, &[raw.clone(), secure.clone()]).unwrap();
+        let row = query_bookmark_entries("bm rm example", &[raw.clone(), secure.clone()]).remove(0);
+        assert_eq!(checked_bookmark_search_entry(store, &row, true).unwrap(), raw);
+        checked_bookmark_update(store, &raw, CheckedBookmarkMutation::Remove, || true).unwrap();
+        assert_eq!(load_bookmarks(store).unwrap(), vec![secure.clone()]);
+        assert!(checked_bookmark_update(store, &raw, CheckedBookmarkMutation::Remove, || true).is_err());
+        checked_add_bookmark(store, "http://example.com", None, || true).unwrap();
+        assert_eq!(load_bookmarks(store).unwrap(), vec![secure.clone()]);
+        checked_add_bookmark(store, "http://example.com", Some(""), || true).unwrap();
+        assert_eq!(load_bookmarks(store).unwrap()[0].alias, None);
+        save_bookmarks(store, &[secure.clone(), secure.clone()]).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(checked_bookmark_update(store, &secure, CheckedBookmarkMutation::Remove, || true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(checked_add_bookmark(store, "other.example", None, || true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+    }
+
+    #[test]
+    fn checked_bookmark_rejects_external_change_at_commit() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("bookmarks.json"); let store = path.to_str().unwrap();
+        let entry = bookmark("http://example.com", Some("old")); save_bookmarks(store, &[entry.clone()]).unwrap();
+        let external = serde_json::to_vec_pretty(&vec![bookmark("https://other.example", None)]).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let result = checked_bookmark_update(store, &entry, CheckedBookmarkMutation::Remove, || {
+            let count = calls.get() + 1; calls.set(count);
+            if count == 2 { std::fs::write(&path, &external).unwrap(); }
+            true
+        });
+        assert!(result.is_err()); assert_eq!(std::fs::read(&path).unwrap(), external);
+    }
+
+    #[test]
+    fn recreate_rehydrates_and_invalidates_warmed_bookmark_cache() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("bookmarks.json"); let store = path.to_str().unwrap();
+        save_bookmarks(store, &[bookmark("https://old.example", None)]).unwrap();
+        let first = BookmarksPlugin::new_for_path(store);
+        assert!(first.search("bm list").iter().any(|row| row.action == "https://old.example"));
+        drop(first);
+        std::fs::write(&path, serde_json::to_vec(&vec![bookmark("https://new.example", None)]).unwrap()).unwrap();
+        let second = BookmarksPlugin::new_for_path(store);
+        let rows = second.search("bm list");
+        assert!(rows.iter().any(|row| row.action == "https://new.example"));
+        assert!(!rows.iter().any(|row| row.action == "https://old.example"));
+    }
+
+    #[test]
+    fn invalidation_blocks_late_bookmark_cache_insertion() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let cache = Mutex::new(LruCache::new(4));
+        let epoch = BOOKMARK_CACHE_EPOCH.load(Ordering::Acquire);
+        invalidate_bookmark_cache();
+        insert_cached_if_current(&cache, epoch, "bm x".into(), vec![Action { label: "old".into(), desc: String::new(), action: "old".into(), args: None }]);
+        assert!(cache.lock().unwrap().get(&"bm x".to_owned()).is_none());
     }
 
     #[test]

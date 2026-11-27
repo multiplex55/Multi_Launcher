@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::mpsc::{Receiver, Sender, channel};
 mod action_sheet;
 mod folder_authoring;
+mod bookmark_authoring;
 mod activity;
 mod add_action;
 mod appearance;
@@ -524,6 +525,8 @@ impl LauncherSearchCatalog {
                 let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
                 let duplicate_result = provider == "duplicate_finder" && duplicate_finder::current_provider(raw_query, &action, None, None);
+                let bookmark_command = provider == "bookmarks" && matches!(parse_action(&action), Ok(Command::Storage(StorageCommand::BookmarkDialog | StorageCommand::BookmarkAdd(_) | StorageCommand::BookmarkRemove(_))))
+                    && self.providers.bookmark_row_is_current(raw_query, &action, None, None);
                 let folder_command = provider == "folders" && matches!(parse_action(&action), Ok(Command::Storage(StorageCommand::FolderAdd(_) | StorageCommand::FolderRemove(_))));
                 let folder_size_result = provider == "folder_size" && folder_size::current_provider(raw_query, &action, None, None);
                 let file_lock_result = cfg!(windows) && provider == "file_lock" && file_lock::current_provider(raw_query, &action, None, None);
@@ -531,7 +534,7 @@ impl LauncherSearchCatalog {
                 let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || settings_result || clipboard_modify_result || folder_command || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || settings_result || clipboard_modify_result || folder_command || bookmark_command || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -541,6 +544,7 @@ impl LauncherSearchCatalog {
                         &provider_term,
                         self.match_exact || self.fuzzy_weight <= 0.0,
                         (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || folder_size_result || file_lock_result || duplicate_result || settings_result || folder_command
+                            || bookmark_authoring::normalized_add_bypass(&action, bookmark_command)
                             || (clipboard_modify_result && multi_launcher::actions::search::clipboard_modify_resolved_postfilter_bypass(raw_query, &action.action)),
                         &self.matcher,
                         self.fuzzy_weight,
@@ -2331,6 +2335,7 @@ struct RootWindow {
     settings_actions: Option<Entity<settings_actions::ActionsSettings>>,
     app_editor: add_action::AppEditorState,
     folder_authoring: folder_authoring::State,
+    bookmark_authoring: bookmark_authoring::State,
     plugin_editor: Option<Entity<plugin_editor::PluginEditorView>>,
     command_help: CommandHelpState,
     command_help_filter: Entity<InputState>,
@@ -3590,6 +3595,7 @@ enum RootCloseBlocker {
     DuplicateFinder,
     AppWrite,
     FolderAuthoring,
+    BookmarkAuthoring,
     ExternalLaunch,
     BooleanPreferenceSave,
     SettingsActionsSave,
@@ -4859,6 +4865,7 @@ impl RootWindow {
             self.external_launch.retire_focus_bound_effects();
             self.app_editor.revoke_picker_prelaunch();
             self.folder_authoring.revoke();
+            self.bookmark_authoring.revoke();
             self.retire_context_favorite();
         }
         let was_menu_open = self.file_menu_open || self.settings_menu_open || self.help_menu_open;
@@ -5565,6 +5572,7 @@ impl RootWindow {
             return Err("A plugin Search capability save is still pending.".to_owned());
         }
         if self.folder_authoring.busy() { return Err(folder_authoring::WAIT.into()); }
+        if self.bookmark_authoring.busy() { return Err(bookmark_authoring::WAIT.into()); }
         if let Some(blocker) = self.app_editor.restart_blocker(cx) {
             return Err(blocker.to_owned());
         }
@@ -5906,6 +5914,7 @@ impl RootWindow {
         self.external_launch.retire_focus_bound_effects();
         self.app_editor.revoke_picker_prelaunch();
         self.folder_authoring.revoke();
+        self.bookmark_authoring.revoke();
         self.retire_action_sheet_now(window, cx, true);
         if self.action_sheet.is_some() { return false; }
         self.retire_context_favorite();
@@ -6983,6 +6992,7 @@ impl RootWindow {
 
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
         self.folder_authoring.revoke();
+        self.bookmark_authoring.revoke();
         self.external_launch.retire_clipboard_effect();
         self.snippets_search.request_epoch.fetch_add(1, Ordering::AcqRel);
         self.snippets_search.projection = None;
@@ -7082,6 +7092,8 @@ impl RootWindow {
                         })
                 } else if provider == "favorites" {
                     favorite_search::is_executable(action) || is_supported_launcher_search_action(action)
+                } else if provider == "bookmarks" && matches!(parse_action(action), Ok(Command::Storage(StorageCommand::BookmarkDialog | StorageCommand::BookmarkAdd(_) | StorageCommand::BookmarkRemove(_)))) {
+                    self.search_catalog.providers.bookmark_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "folders" && matches!(parse_action(action), Ok(Command::Storage(StorageCommand::FolderAdd(_) | StorageCommand::FolderRemove(_)))) {
                     self.search_catalog.providers.folder_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if external_launch::AssociationKind::from_provider_name(provider).is_some() {
@@ -7456,7 +7468,7 @@ impl RootWindow {
         } else {
             self.launcher_results.move_selection(movement)
         };
-        if changed { self.folder_authoring.revoke(); }
+        if changed { self.folder_authoring.revoke(); self.bookmark_authoring.revoke(); }
         if changed && let Some(row) = self.launcher_results.selected_scroll_child() {
             self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
             self.launcher_results_scroll.scroll_to_item(row);
@@ -7578,6 +7590,7 @@ impl RootWindow {
         self.external_launch.retire_focus_bound_effects();
         self.app_editor.revoke_picker_prelaunch();
         self.folder_authoring.revoke();
+        self.bookmark_authoring.revoke();
         self.context_favorite_popup = Some(ContextFavoritePopup {
             receipt: receipt.clone(),
             position,
@@ -7672,6 +7685,7 @@ impl RootWindow {
             return false;
         };
         self.folder_authoring.revoke();
+        self.bookmark_authoring.revoke();
         if let Some(scroll_child) = reveal_row {
             self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
             self.launcher_results_scroll.scroll_to_item(scroll_child);
@@ -7862,6 +7876,11 @@ impl RootWindow {
                     if let Some(navigation) = self.settings_navigation.clone() { navigation.update(cx, |navigation, cx| navigation.set_query(term, window, cx)); }
                 }
             }
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks")
+            && matches!(parse_action(&result.action), Ok(Command::Storage(StorageCommand::BookmarkDialog | StorageCommand::BookmarkAdd(_) | StorageCommand::BookmarkRemove(_)))) {
+            self.start_bookmark_command(generation, index, &query, result.action, source, window, cx);
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders")
@@ -10248,6 +10267,7 @@ impl RootWindow {
                 self.restart_status = Some(hash_pin::UNPIN_PENDING.to_owned());
             }
             Some(RootCloseBlocker::FolderAuthoring) => { self.restart_status = Some(folder_authoring::WAIT.into()); }
+            Some(RootCloseBlocker::BookmarkAuthoring) => { self.restart_status = Some(bookmark_authoring::WAIT.into()); }
             Some(RootCloseBlocker::AppWrite) => {
                 self.restart_status = Some(self.app_editor.close_wait_status().to_owned());
             }
@@ -10363,6 +10383,7 @@ impl RootWindow {
             return Some(RootCloseBlocker::PluginPreferenceSave);
         }
         if self.folder_authoring.busy() { return Some(RootCloseBlocker::FolderAuthoring); }
+        if self.bookmark_authoring.busy() { return Some(RootCloseBlocker::BookmarkAuthoring); }
         self.external_launch
             .is_pending()
             .then_some(RootCloseBlocker::ExternalLaunch)
@@ -10981,6 +11002,7 @@ impl Render for RootWindow {
                 root.external_launch.retire_focus_bound_effects();
                 root.app_editor.revoke_picker_prelaunch();
                 root.folder_authoring.revoke();
+                root.bookmark_authoring.revoke();
             }))
             .role(Role::Group)
             .flex()
@@ -13088,6 +13110,7 @@ pub(crate) fn run_foundation_window(
                 settings_actions: None,
                 app_editor: add_action::AppEditorState::new(cx),
                 folder_authoring: folder_authoring::State::default(),
+                bookmark_authoring: bookmark_authoring::State::default(),
                 plugin_editor: None,
                 command_help: command_help_for_root,
                 command_help_filter,
@@ -13280,6 +13303,7 @@ pub(crate) fn run_foundation_window(
                                     root.external_launch.retire_focus_bound_effects();
                                     root.app_editor.revoke_picker_prelaunch();
                                     root.folder_authoring.revoke();
+                                    root.bookmark_authoring.revoke();
                                 }
                             });
                         }
@@ -13540,6 +13564,7 @@ pub(crate) fn run_foundation_window(
                         root.external_launch.retire_focus_bound_effects();
                         root.app_editor.revoke_picker_prelaunch();
                         root.folder_authoring.revoke();
+                        root.bookmark_authoring.revoke();
                         if let Some(view) = root.json_view.clone() {
                             if !view.read(cx).popout { view.update(cx, |view, cx| view.retire_jump(cx)); }
                         }
@@ -13662,6 +13687,9 @@ pub(crate) fn run_foundation_window(
                             cx.notify();
                         });
                         false
+                    }
+                    Some(RootCloseBlocker::BookmarkAuthoring) => {
+                        let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(bookmark_authoring::WAIT.into()); cx.notify(); }); false
                     }
                     Some(RootCloseBlocker::FolderAuthoring) => {
                         let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(folder_authoring::WAIT.into()); cx.notify(); }); false

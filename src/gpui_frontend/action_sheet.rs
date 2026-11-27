@@ -172,7 +172,7 @@ impl RootWindow {
     }
 
     pub(super) fn open_action_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.folder_authoring.revoke();
+        self.folder_authoring.revoke(); self.bookmark_authoring.revoke();
         if self.search_input_operation(window, cx).is_none()
             || self.action_sheet.is_some()
             || window.has_active_dialog(cx)
@@ -193,7 +193,7 @@ impl RootWindow {
         else {
             return;
         };
-        if matches!(&action.origin, LauncherResultOrigin::Provider(name) if name != "folders" && super::external_launch::AssociationKind::from_provider_name(name).is_some())
+        if matches!(&action.origin, LauncherResultOrigin::Provider(name) if name != "folders" && name != "bookmarks" && super::external_launch::AssociationKind::from_provider_name(name).is_some())
         {
             return;
         }
@@ -206,9 +206,24 @@ impl RootWindow {
         .is_some();
         let result = action;
         let action = &result.action;
+        let folder_provider = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders");
+        let bookmark_provider = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks");
+        if folder_provider && !self.search_catalog.providers.folder_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+            || bookmark_provider && !self.search_catalog.providers.bookmark_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+            return;
+        }
+        // Provider rows resolve against their live owner, scoped to the exact selected target.
+        // A saved or foreign URL must not acquire an authoring target through this path.
+        let targets = HashSet::from([action.action.as_str()]);
+        let (live_folders, live_bookmarks) = self.search_catalog.providers.current_search_aliases(&targets);
+        let empty = HashMap::new();
+        let folder_aliases = if folder_provider { live_folders.as_ref().unwrap_or(&empty) }
+            else if bookmark_provider { &empty } else { &self.search_catalog.folder_aliases_lc };
+        let bookmark_aliases = if bookmark_provider { live_bookmarks.as_ref().unwrap_or(&empty) }
+            else if folder_provider { &empty } else { &self.search_catalog.bookmark_aliases_lc };
         let resolver = ActionTargetResolverContext::new(
-            &self.search_catalog.folder_aliases_lc,
-            &self.search_catalog.bookmark_aliases_lc,
+            folder_aliases,
+            bookmark_aliases,
             if indexed {
                 &[]
             } else {
@@ -226,6 +241,10 @@ impl RootWindow {
             UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite {
                 action: candidate,
             }) => candidate == action && context.can_add_favorite,
+            UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url }) =>
+                matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks") && *url == action.action,
+            UniversalActionOperation::Command { command: Command::Storage(StorageCommand::BookmarkRemove(url)), .. } =>
+                matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks") && *url == action.action,
             UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path }) =>
                 matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders") && *path == action.action,
             UniversalActionOperation::Command { command: Command::Storage(StorageCommand::FolderRemove(path)), .. } =>
@@ -498,6 +517,14 @@ impl RootWindow {
                         action,
                     }) if action == sheet.result.action => {
                         root.open_result_favorites(action, Some(sheet.return_focus), window, cx)
+                    }
+                    UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url })
+                        if url == sheet.result.action.action => {
+                        root.start_bookmark_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), false, source, window, cx);
+                    }
+                    UniversalActionOperation::Command { command: Command::Storage(StorageCommand::BookmarkRemove(url)), .. }
+                        if url == sheet.result.action.action => {
+                        root.start_bookmark_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, window, cx);
                     }
                     UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path })
                         if path == sheet.result.action.action => {
