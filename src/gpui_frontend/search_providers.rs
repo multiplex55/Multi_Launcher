@@ -11,6 +11,20 @@ pub(super) fn clipboard_catalog_is_current(
 
 struct CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin);
 
+pub(super) struct QuickNotesBare;
+impl multi_launcher::plugin::Plugin for QuickNotesBare {
+    fn name(&self) -> &str { "notes" }
+    fn description(&self) -> &str { "Notes (prefix: `note`)" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["note", "notes"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        if query.trim().eq_ignore_ascii_case("note") || query.trim().eq_ignore_ascii_case("notes") {
+            vec![multi_launcher::plugins::note::quick_notes_action()]
+        } else { Vec::new() }
+    }
+    fn commands(&self) -> Vec<Action> { vec![multi_launcher::plugins::note::quick_notes_command()] }
+}
+
 impl multi_launcher::plugin::Plugin for CalculatorMetadata {
     fn name(&self) -> &str { "calculator" }
     fn description(&self) -> &str { "Evaluate inline expressions and browse Calculator history" }
@@ -225,6 +239,7 @@ pub(super) struct InstalledLauncherProviders {
     file_search: FileSearchBarePlugin,
     folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
     duplicate_finder: multi_launcher::plugins::duplicate_finder::DuplicateFinderPlugin,
+    quick_notes: QuickNotesBare,
     #[cfg(windows)]
     file_lock: multi_launcher::plugins::file_lock::FileLockPlugin,
     calculator: CalculatorMetadata,
@@ -314,6 +329,7 @@ impl InstalledLauncherProviders {
             ),
             folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
             duplicate_finder: multi_launcher::plugins::duplicate_finder::DuplicateFinderPlugin,
+            quick_notes: QuickNotesBare,
             #[cfg(windows)]
             file_lock: multi_launcher::plugins::file_lock::FileLockPlugin,
             calculator: CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin::default()),
@@ -354,6 +370,7 @@ impl InstalledLauncherProviders {
             Some(&self.file_search as &dyn multi_launcher::plugin::Plugin),
             Some(&self.folder_size as &dyn multi_launcher::plugin::Plugin),
             Some(&self.duplicate_finder as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.quick_notes as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]
             Some(&self.file_lock as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),

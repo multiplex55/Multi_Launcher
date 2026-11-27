@@ -1654,6 +1654,135 @@ fn note_content_for_persistence(note: &Note) -> String {
     content
 }
 
+/// Stock Quick Notes search corpus; callers can cache this for filtering.
+pub fn quick_note_search_text(note: &Note) -> String {
+    let mut text = note.content.to_lowercase();
+    if let Some(alias) = &note.alias { text.push('\n'); text.push_str(&alias.to_lowercase()); }
+    for alias in &note.aliases { text.push('\n'); text.push_str(&alias.to_lowercase()); }
+    text.push('\n');
+    text.push_str(&note.slug.to_lowercase());
+    for tag in &note.tags { text.push('\n'); text.push_str(&tag.to_lowercase()); }
+    text
+}
+
+pub fn quick_note_preview(content: &str) -> String {
+    const LIMIT: usize = 120;
+
+    let mut preview = String::with_capacity(LIMIT + 3);
+    let mut char_count = 0;
+    let mut pending_space = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("# ") || trimmed.starts_with("Alias:") {
+            continue;
+        }
+        if !preview.is_empty() {
+            pending_space = true;
+        }
+
+        for character in line.chars() {
+            if character.is_whitespace() {
+                pending_space |= !preview.is_empty();
+                continue;
+            }
+            if pending_space {
+                if char_count == LIMIT {
+                    if preview.ends_with(' ') {
+                        preview.pop();
+                    }
+                    preview.push('…');
+                    return preview;
+                }
+                preview.push(' ');
+                char_count += 1;
+                pending_space = false;
+            }
+            if char_count == LIMIT {
+                preview.push('…');
+                return preview;
+            }
+            preview.push(character);
+            char_count += 1;
+        }
+    }
+    preview
+}
+
+
+/// A checked Quick Notes write distinguishes an accepted disk commit from a
+/// cache publication failure, so callers never retry an already committed add.
+pub enum QuickNoteWrite {
+    Published(Note),
+    Committed { note: Note, cache_error: anyhow::Error },
+}
+
+pub enum QuickNoteDraft<'a> {
+    New(&'a str),
+    Edit { original: &'a Note, content: &'a str },
+}
+
+/// Write a Quick Notes draft under the canonical note mutation lock.
+pub fn write_quick_note_if(
+    draft: QuickNoteDraft<'_>,
+    is_current: impl Fn() -> bool,
+) -> anyhow::Result<QuickNoteWrite> {
+    let _mutation = NOTE_MUTATION_LOCK.lock()
+        .map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
+    anyhow::ensure!(is_current(), "Note write superseded");
+    let mut notes = load_notes()?;
+    let (path, slug, content) = match draft {
+        QuickNoteDraft::New(text) => {
+            anyhow::ensure!(!text.trim().is_empty(), "Text required");
+            let title = text.lines().next().unwrap_or("untitled");
+            let mut note = note_from_persisted_content(PathBuf::new(), String::new(), text.to_owned());
+            note.title = title.to_owned();
+            note.alias = None;
+            let content = note_content_for_persistence(&note);
+            reset_slug_lookup();
+            for note in &notes { register_slug(&note.slug); }
+            let dir = notes_dir();
+            let mut staged = tempfile::NamedTempFile::new_in(&dir)?;
+            staged.write_all(content.as_bytes())?;
+            staged.flush()?;
+            staged.as_file().sync_all()?;
+            loop {
+                let slug = unique_slug(title);
+                anyhow::ensure!(!slug.is_empty(), "Note title must produce a file name");
+                let path = dir.join(format!("{slug}.md"));
+                anyhow::ensure!(is_current(), "Note write superseded");
+                match staged.persist_noclobber(&path) {
+                    Ok(_) => break (path, slug, content),
+                    Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => staged = error.file,
+                    Err(error) => return Err(error.error.into()),
+                }
+            }
+        }
+        QuickNoteDraft::Edit { original, content } => {
+            anyhow::ensure!(!content.trim().is_empty(), "Text required");
+            let matches: Vec<_> = notes.iter().filter(|note| note.slug == original.slug && note.path == original.path).collect();
+            anyhow::ensure!(matches.len() == 1 && matches[0].content == original.content, "Note changed or was removed; reopen it before saving");
+            let expected = original.content.as_bytes();
+            let path = original.path.clone();
+            let slug = original.slug.clone();
+            let mut note = original.clone();
+            note.content = content.to_owned();
+            note.title = content.lines().next().unwrap_or(&note.title).to_owned();
+            let content = note_content_for_persistence(&note);
+            crate::common::atomic_file::save_atomic_if(&path, content.as_bytes(), || {
+                std::fs::read(&path).is_ok_and(|bytes| bytes == expected) && is_current()
+            })?;
+            notes.retain(|note| note.path != path);
+            (path, slug, content)
+        }
+    };
+    let note = note_from_persisted_content(path, slug, content);
+    notes.push(note.clone());
+    match publish_note_cache(notes) {
+        Ok(_) => Ok(QuickNoteWrite::Published(note)),
+        Err(cache_error) => Ok(QuickNoteWrite::Committed { note, cache_error }),
+    }
+}
+
 fn save_note_locked(
     note: &mut Note,
     overwrite: bool,
@@ -2041,14 +2170,29 @@ impl NotePlugin {
     }
 
     pub fn new() -> Self {
-        let _ = refresh_cache();
+        Self::new_with_wake(|_| {})
+    }
+
+    /// Construct the canonical watcher with a coalescible notification after
+    /// an external change publishes a new note revision.
+    pub fn new_with_wake(wake: impl Fn(Result<(), String>) + Send + 'static) -> Self {
+        let mut refresh_failed = match refresh_cache() {
+            Ok(()) => false,
+            Err(error) => { wake(Err(format!("{error:#}"))); true }
+        };
         let _ = refresh_template_cache();
         let data = CACHE.clone();
         let templates = TEMPLATE_CACHE.clone();
         let dir = notes_dir();
         let _ = std::fs::create_dir_all(&dir);
         let watch_target = dir.clone();
-        let coordinator = NoteReloadCoordinator::start(refresh_cache).ok();
+        let coordinator = NoteReloadCoordinator::start(move || {
+            let before = note_version();
+            match refresh_cache() {
+                Ok(()) => { if refresh_failed || note_version() != before { wake(Ok(())); } refresh_failed = false; Ok(()) }
+                Err(error) => { refresh_failed = true; wake(Err(format!("{error:#}"))); Err(error) }
+            }
+        }).ok();
         let requester = coordinator.as_ref().map(NoteReloadCoordinator::requester);
         #[cfg(test)]
         let release = crate::performance::track_c_watcher_lifecycle::capture(
@@ -2454,7 +2598,7 @@ fn note_command_suggestions(
     templates_enabled: bool,
 ) -> Vec<Action> {
     let mut commands = vec![
-        note_command_action("note", "query:note"),
+        quick_notes_command(),
         note_command_action("note new", "query:note new "),
         note_command_action("note add", "query:note add "),
         note_command_action("note create", "query:note create "),
@@ -2555,6 +2699,15 @@ fn note_suggestions_for_query_prefix(
         .collect()
 }
 
+/// The stock bare query opens Quick Notes; typed note operations remain separate.
+pub fn quick_notes_action() -> Action {
+    Action { label: "note: edit notes".into(), desc: "Note".into(), action: "note:dialog".into(), args: None }
+}
+
+pub fn quick_notes_command() -> Action {
+    note_command_action("note", "query:note")
+}
+
 impl Plugin for NotePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
@@ -2563,12 +2716,7 @@ impl Plugin for NotePlugin {
         {
             let rest = rest.trim();
             if rest.is_empty() {
-                let mut actions = vec![Action {
-                    label: "note: edit notes".into(),
-                    desc: "Note".into(),
-                    action: "note:dialog".into(),
-                    args: None,
-                }];
+                let mut actions = vec![quick_notes_action()];
                 actions.extend(note_root_suggestions(
                     self.backlinks_enabled,
                     self.templates_enabled,
@@ -5354,6 +5502,54 @@ Body",
         } else {
             unsafe { std::env::remove_var("ML_NOTES_DIR") };
         }
+    }
+
+    #[test]
+    fn checked_quick_note_add_and_stale_edit_preserve_disk_bytes() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let existing = dir.path().join("alpha.md");
+        std::fs::write(&existing, b"# Alpha\n\noriginal").unwrap();
+        let original = load_notes().unwrap().remove(0);
+        let created = match write_quick_note_if(QuickNoteDraft::New("Alpha\nbody"), || true).unwrap() {
+            QuickNoteWrite::Published(note) | QuickNoteWrite::Committed { note, .. } => note,
+        };
+        assert_ne!(created.path, existing);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"# Alpha\n\noriginal");
+        assert_eq!(std::fs::read(&created.path).unwrap(), b"# Alpha\n\nAlpha\nbody");
+        std::fs::write(&existing, b"# Alpha\n\nexternal").unwrap();
+        assert!(write_quick_note_if(QuickNoteDraft::Edit { original: &original, content: "changed" }, || true).is_err());
+        assert_eq!(std::fs::read(&existing).unwrap(), b"# Alpha\n\nexternal");
+    }
+
+    #[test]
+    fn checked_quick_note_preserves_metadata_bytes_and_late_guards() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let source = "# Title\r\n  Aliases: alternate\r\nbody\r\n";
+        let calls = std::cell::Cell::new(0);
+        let collision = dir.path().join("title.md");
+        let result = write_quick_note_if(QuickNoteDraft::New(source), || {
+            let next = calls.get() + 1;
+            calls.set(next);
+            if next == 2 { std::fs::write(&collision, b"foreign").unwrap(); }
+            true
+        }).unwrap();
+        let note = match result {
+            QuickNoteWrite::Published(note) | QuickNoteWrite::Committed { note, .. } => note,
+        };
+        assert_ne!(note.path, collision);
+        assert_eq!(std::fs::read(collision).unwrap(), b"foreign");
+        assert_eq!(std::fs::read(&note.path).unwrap(), source.as_bytes());
+        let calls = std::cell::Cell::new(0);
+        assert!(write_quick_note_if(QuickNoteDraft::Edit { original: &note, content: "changed" }, || {
+            calls.set(calls.get() + 1);
+            calls.get() == 1
+        }).is_err());
+        assert!(calls.get() >= 2);
+        assert_eq!(std::fs::read(&note.path).unwrap(), source.as_bytes());
     }
 
     #[test]

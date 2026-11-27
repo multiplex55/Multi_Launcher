@@ -32,7 +32,7 @@ Priority values encode user tier and preferred order, for example P0.02. For an 
 | Network tools | `network` | G24 | P3.10 | 1 → 2 | — | Network commands and read-only status | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Shell | `shell` | G24 | P3.10 | 1 → 2 | — | Existing typed shell commands and host | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | History provider | `history` | G05 | P0.01 | 1 → 3 | — | Stock history provider beyond launcher query history | — | — | Shared Search and typed dispatch | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
-| Notes | `notes` | G12 | P0.09 | 1 → 3 | — | Open/search/create/edit/save notes and Quick Notes | — | — | Canonical notes and documents | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Notes | `notes` | G12 | P0.09 | 2 → 3 | Retained Quick Notes filter and checked inline Add/Edit | Full note Search/Open, essential Markdown modes and native replay | [Quick Notes](CHECKPOINTS.md#p009-retained-quick-notes) | Queued | Canonical notes and documents | Original secondary criteria | [Quick Notes](CHECKPOINTS.md#p009-retained-quick-notes) |
 | Todo List | `todo` | G23 | P2.13 | 1 → 2–3 | — | Canonical tasks and organizer controls | — | — | Stock organizer/widget/activity service | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Calendar | `calendar` | G23 | P2.12 | 1 → 2–3 | — | Canonical calendar views and editing | — | — | Stock organizer/widget/activity service | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Clipboard Snippets | `snippets` | G13 | P0.08 | 2 → 3 | Canonical CRUD/Search and prompt Run/Copy | Matched ordinary authoring and live clipboard Run | [N](#evidence-keys) | Queued | Canonical data and clipboard services | Later original secondary criteria | [N](#evidence-keys) |
@@ -143,7 +143,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 | P0.06 Omni Search | omni_search | G05 | 2 → 3 | Checked combined Search and activation for apps, Folders and Bookmarks. Native replay and other categories are open. | [Omni checkpoint](CHECKPOINTS.md#p006-checked-omni-search) |
 | P0.07 Clipboard Modify | clipboard_modify | G13 | 2 → 3 | Canonical pipelines and acquired clipboard effects | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.08 Clipboard Snippets | snippets | G13 | 2 → 3 | Canonical watched store and prompt | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
-| P0.09 Notes, Quick Notes and Markdown | notes, markdown_studio | G12 | 1 → 3 | Canonical document store and dirty-state ownership | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.09 Notes, Quick Notes and Markdown | notes, markdown_studio | G12 | 2 → 3 | Checked Quick Notes over the canonical store. Full Note Editor, Markdown modes and replay remain open. | [Quick Notes](CHECKPOINTS.md#p009-retained-quick-notes) |
 | P0.10 MultiManager | MultiManager | G24 | 1 → 3 | Workspace store and native window operations | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.11 Calculation Pad | calculator entry family | G15 | 1 → 3 | Stock Pad session and persistence | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.12 Keyboard and numpad | — | G05 | 2 → 3 | Input routing and native keypad receipts | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
@@ -173,11 +173,11 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 
 Count built-in rows once by registration identifier. Report Stage 1–5 separately, real GPUI functionality, Search admission only, and unstarted routes. Report P0 workflow readiness separately using its 19-row register. For tier counts, use built-in rows plus separately identified non-plugin workflow rows, tallying those two denominators explicitly where overlapping workflows would otherwise be double counted. A target met means the listed interim stage passed with applicable evidence. Pending means no active implementation, and blocked requires a concrete dependency. Original GUI and acceptance counts stay in [Progress](PROGRESS.md) and the [parity matrix](PARITY_MATRIX.md).
 
-Windows snapshot after P0.06 Omni Search. **91 built-ins**, with **60 Stage 1, 24 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **31** have real GPUI functionality within the stated route. **0** have Search admission alone. **60** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **11 at Stage 2** and **3 at Stage 3 or higher**.
+Windows snapshot after P0.09 retained Quick Notes. **91 built-ins**, with **59 Stage 1, 25 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **32** have real GPUI functionality within the stated route. **0** have Search admission alone. **59** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **12 at Stage 2** and **3 at Stage 3 or higher**.
 
 | Priority tier · built-ins only | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 | 21 | 2 | 12 | 7 | 0 |
+| P0 | 21 | 2 | 13 | 6 | 0 |
 | P1 | 16 | 4 | 6 | 6 | 0 |
 | P2 | 27 | 5 | 0 | 22 | 0 |
 | P3 | 25 | 1 | 0 | 24 | 0 |
@@ -187,7 +187,7 @@ The P2 interim floor is Stage 2. P4's existing functional Clipboard History is p
 
 | Priority tier · separate workflow view | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 · readiness workflows | 19 | 3 | 11 | 5 | 0 |
+| P0 · readiness workflows | 19 | 3 | 12 | 4 | 0 |
 | P1 · Dashboard, useful widgets and File Preview | 4 | 0 | 1 | 3 | 0 |
 | P2 · represented by its built-ins | 0 | 0 | 0 | 0 | 0 |
 | P3 · other workspace and companion groups above | 5 | 0 | 0 | 5 | 0 |

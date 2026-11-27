@@ -208,46 +208,7 @@ fn display_title(note: &Note) -> &str {
 }
 
 fn short_preview(content: &str) -> String {
-    const LIMIT: usize = 120;
-
-    let mut preview = String::with_capacity(LIMIT + 3);
-    let mut char_count = 0;
-    let mut pending_space = false;
-    for line in content.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("# ") || trimmed.starts_with("Alias:") {
-            continue;
-        }
-        if !preview.is_empty() {
-            pending_space = true;
-        }
-
-        for character in line.chars() {
-            if character.is_whitespace() {
-                pending_space |= !preview.is_empty();
-                continue;
-            }
-            if pending_space {
-                if char_count == LIMIT {
-                    if preview.ends_with(' ') {
-                        preview.pop();
-                    }
-                    preview.push('…');
-                    return preview;
-                }
-                preview.push(' ');
-                char_count += 1;
-                pending_space = false;
-            }
-            if char_count == LIMIT {
-                preview.push('…');
-                return preview;
-            }
-            preview.push(character);
-            char_count += 1;
-        }
-    }
-    preview
+    crate::plugins::note::quick_note_preview(content)
 }
 
 fn edit_footer_button_height(ui: &egui::Ui) -> f32 {
@@ -314,21 +275,7 @@ fn build_search_index(entries: &[Note]) -> Vec<String> {
     let output = entries
         .iter()
         .map(|note| {
-            let mut text = note.content.to_lowercase();
-            if let Some(alias) = &note.alias {
-                text.push('\n');
-                text.push_str(&alias.to_lowercase());
-            }
-            for alias in &note.aliases {
-                text.push('\n');
-                text.push_str(&alias.to_lowercase());
-            }
-            text.push('\n');
-            text.push_str(&note.slug.to_lowercase());
-            for tag in &note.tags {
-                text.push('\n');
-                text.push_str(&tag.to_lowercase());
-            }
+            let text = crate::plugins::note::quick_note_search_text(note);
             #[cfg(test)]
             if observing {
                 output_bytes = output_bytes.saturating_add(text.len() as u64);

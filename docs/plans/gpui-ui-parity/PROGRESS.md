@@ -2,9 +2,9 @@
 
 ## Current direction
 
-Use the [mandatory startup and resumption sequence](../../CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption), including the authoritative [User Priorities](USER_PRIORITIES.md), [Plugin Maturity Register](PLUGIN_MATURITY_REGISTER.md) and [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md). Pass A has focused evidence for P0.02 App Editor Browse, P0.03 and P0.04 canonical Folder and Bookmark authoring, P0.05 Explorer drop, and P0.06 Omni Search. Essential native replay is still open, including the ordinary P0.07 and P0.08 clipboard paths. The next independent checkpoint is P0.09 retained Quick Notes. Historical checkpoint continuations below record the order at the time.
+Use the [mandatory startup and resumption sequence](../../CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption), including the authoritative [User Priorities](USER_PRIORITIES.md), [Plugin Maturity Register](PLUGIN_MATURITY_REGISTER.md) and [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md). Pass A has focused evidence for P0.02 App Editor Browse, P0.03 and P0.04 canonical Folder and Bookmark authoring, P0.05 Explorer drop, P0.06 Omni Search, and P0.09 retained Quick Notes. Essential native replay is still open, including the ordinary P0.07 and P0.08 clipboard paths. Continue P0.09 with the full existing-note editor. Historical checkpoint continuations below record the order at the time.
 
-Daily-driver readiness has 19 P0 workflows, with 11 at Stage 2 and 3 at Stage 3 or higher. The 91 Windows built-ins include 31 with real GPUI routes, comprising 24 at Stage 2 and 7 at Stage 3. The remaining 60 are Stage 1. Stage 4 and 5 and Search-admission-only counts are zero. The [maturity register](PLUGIN_MATURITY_REGISTER.md#reporting-baseline) holds tier totals. The [readiness register](DAILY_DRIVER_READINESS.md#current-readiness) lists daily-driver blockers and essential replay by workflow.
+Daily-driver readiness has 19 P0 workflows, with 12 at Stage 2 and 3 at Stage 3 or higher. The 91 Windows built-ins include 32 with real GPUI routes, comprising 25 at Stage 2 and 7 at Stage 3. The remaining 59 are Stage 1. Stage 4 and 5 and Search-admission-only counts are zero. The [maturity register](PLUGIN_MATURITY_REGISTER.md#reporting-baseline) holds tier totals. The [readiness register](DAILY_DRIVER_READINESS.md#current-readiness) lists daily-driver blockers and essential replay by workflow.
 
 ## Earlier checkpoint receipts
 
@@ -173,13 +173,13 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Migration branch / execution parent | `feat/gpui-ui-parity` / `98bbc0ccc22a297e8eafae7e844c2f7e45854856` |
 | Runtime-confirmed complete GUI inventory | Not yet established |
 | Source-backed GUI records with tracked criteria | 219 unique entries in the [parity matrix](PARITY_MATRIX.md), including 39 Dashboard widgets, 17 built-in Settings owners and one dynamic-library capability slot. |
-| GUI matrix stages | 187 Specified, 31 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
+| GUI matrix stages | 186 Specified, 32 In implementation, 1 Validation pending, 0 fully accepted. Individual records track the implemented and verified behaviors. |
 | Shared-engine evidence | Both frontends use the shared Search composition, typed command outcomes, Hash session and canonical action mutations. See the validation log for covered routes and gaps. |
 | Tests/builds/native checks run for the implementation | [Validation log](VALIDATION_LOG.md) |
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Implement P0.09 retained Quick Notes over the canonical Note store. P0.02–P0.06 authoring, Explorer drop and Omni Search, Settings, G01, G04, G07, G10, G13 and G14 replay, mixed DPI and known-duration F2 remain open. [User priority order](USER_PRIORITIES.md) |
+| Current next action | Continue P0.09 with the checked full existing-note editor and essential Markdown modes. P0.02–P0.06 authoring, Explorer drop and Omni Search, Settings, G01, G04, G07, G10, G13 and G14 replay, mixed DPI and known-duration F2 remain open. [User priority order](USER_PRIORITIES.md) |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

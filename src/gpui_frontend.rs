@@ -14,6 +14,7 @@ mod file_search;
 mod folder_size;
 mod file_lock;
 mod duplicate_finder;
+mod quick_notes;
 mod file_search_handoff;
 mod file_search_preview;
 mod settings_actions;
@@ -560,6 +561,7 @@ impl LauncherSearchCatalog {
                 let calculator_result = calculator_search::classify(&provider, raw_query, &action).is_some()
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
                 let duplicate_result = provider == "duplicate_finder" && duplicate_finder::current_provider(raw_query, &action, None, None);
+                let quick_notes_result = provider == "notes" && quick_notes::current_provider(raw_query, &action, None, None);
                 let bookmark_command = provider == "bookmarks" && matches!(parse_action(&action), Ok(Command::Storage(StorageCommand::BookmarkDialog | StorageCommand::BookmarkAdd(_) | StorageCommand::BookmarkRemove(_))))
                     && self.providers.bookmark_row_is_current(raw_query, &action, None, None);
                 let folder_command = provider == "folders" && matches!(parse_action(&action), Ok(Command::Storage(StorageCommand::FolderAdd(_) | StorageCommand::FolderRemove(_))));
@@ -569,7 +571,7 @@ impl LauncherSearchCatalog {
                 let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -578,7 +580,7 @@ impl LauncherSearchCatalog {
                         raw_query,
                         &provider_term,
                         self.match_exact || self.fuzzy_weight <= 0.0,
-                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || folder_size_result || file_lock_result || duplicate_result || settings_result || folder_command
+                        (date_result && multi_launcher::actions::search::date_resolved_postfilter_bypass(raw_query, &action.action)) || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || settings_result || folder_command
                             || bookmark_authoring::normalized_add_bypass(&action, bookmark_command)
                             || (clipboard_modify_result && multi_launcher::actions::search::clipboard_modify_resolved_postfilter_bypass(raw_query, &action.action)),
                         &self.matcher,
@@ -2471,6 +2473,7 @@ struct RootWindow {
     folder_size_view: Option<Entity<folder_size::FolderSizeView>>,
     file_lock_view: Option<Entity<file_lock::FileLockView>>,
     duplicate_finder_view: Option<Entity<duplicate_finder::DuplicateFinderView>>,
+    quick_notes_view: Option<Entity<quick_notes::QuickNotesView>>,
     file_lock_popup: Option<utility_mount::UtilityPopup>,
     file_lock_retiring: Vec<RetiringHashWindow>,
     folder_size_popup: Option<utility_mount::UtilityPopup>,
@@ -3371,10 +3374,11 @@ fn intercept_root_pane_escape(
     let folder_size = context_stack_has_primary(&event.context_stack, "FolderSizePane");
     let file_lock = context_stack_has_primary(&event.context_stack, "FileLockPane");
     let duplicate_finder = context_stack_has_primary(&event.context_stack, "DuplicateFinderPane");
+    let quick_notes = context_stack_has_primary(&event.context_stack, "QuickNotesPane");
     if event.keystroke.key != "escape"
         || receipt.virtual_key != 0x1b
         || receipt.modifiers.modified()
-        || (!plugin_editor && !folder_size && !file_lock && !duplicate_finder && !context_stack_has_primary(&event.context_stack, "FileSearchPane"))
+        || (!plugin_editor && !folder_size && !file_lock && !duplicate_finder && !quick_notes && !context_stack_has_primary(&event.context_stack, "FileSearchPane"))
     {
         return false;
     }
@@ -3410,6 +3414,12 @@ fn intercept_root_pane_escape(
     if plugin_editor {
         let view = state.plugin_editor.clone();
         return view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, Some(receipt.held))));
+    }
+    if quick_notes {
+        let view = state.quick_notes_view.clone();
+        let handled = view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, receipt.held)));
+        if handled && !receipt.held { root.update(cx, |root, _| root.pane_escape_latched = true); }
+        return handled;
     }
     if duplicate_finder {
         let view = state.duplicate_finder_view.clone();
@@ -3464,6 +3474,7 @@ fn root_tab_traversed_to_search(
         && !context_stack_has_primary(context_stack, "FolderSizePane")
         && !context_stack_has_primary(context_stack, "FileLockPane")
         && !context_stack_has_primary(context_stack, "DuplicateFinderPane")
+        && !context_stack_has_primary(context_stack, "QuickNotesPane")
         && !context_stack_has_primary(context_stack, "DownloadsTriagePane")
         && !context_stack_has_primary(context_stack, "PluginEditorPane")
         && !context_stack_has_primary(context_stack, "PopupMenu")
@@ -3631,6 +3642,7 @@ enum RootCloseBlocker {
     FolderSize,
     FileLock,
     DuplicateFinder,
+    QuickNotes,
     AppWrite,
     FolderAuthoring,
     ExternalDrop,
@@ -5606,6 +5618,7 @@ impl RootWindow {
         if self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(folder_size::WAIT.into()); }
         if self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(file_lock::WAIT.into()); }
         if self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(duplicate_finder::WAIT.into()); }
+        if self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(quick_notes::WAIT.into()); }
         if self.calculator_search.active {
             return Err(calculator_search::SEARCH_PENDING_STATUS.to_owned());
         }
@@ -7154,6 +7167,8 @@ impl RootWindow {
                     settings_navigation::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()).is_some()
                 } else if provider == "duplicate_finder" {
                     duplicate_finder::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                } else if provider == "notes" {
+                    quick_notes::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "file_lock" {
                     cfg!(windows) && file_lock::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "folder_size" {
@@ -7982,6 +7997,12 @@ impl RootWindow {
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "duplicate_finder") {
             if duplicate_finder::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
                 self.open_duplicate_finder(window, cx);
+            }
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "notes") {
+            if quick_notes::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                self.open_quick_notes(window, cx);
             }
             return;
         }
@@ -10312,6 +10333,7 @@ impl RootWindow {
             Some(RootCloseBlocker::FolderSize) => { self.restart_status = Some(folder_size::WAIT.to_owned()); }
             Some(RootCloseBlocker::FileLock) => { self.restart_status = Some(file_lock::WAIT.to_owned()); }
             Some(RootCloseBlocker::DuplicateFinder) => { self.restart_status = Some(duplicate_finder::WAIT.to_owned()); }
+            Some(RootCloseBlocker::QuickNotes) => { self.restart_status = Some(quick_notes::WAIT.to_owned()); }
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
@@ -10422,6 +10444,7 @@ impl RootWindow {
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
         if self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::DuplicateFinder); }
+        if self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::QuickNotes); }
         if self.file_lock_retiring.iter().any(|window| window.native_window.is_none()) || self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FileLock); }
         if self.folder_size_retiring.iter().any(|window| window.native_window.is_none())
             || self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FolderSize); }
@@ -11370,6 +11393,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.duplicate_finder_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.quick_notes_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -13286,6 +13312,7 @@ pub(crate) fn run_foundation_window(
                 folder_size_view: None,
                 file_lock_view: None,
                 duplicate_finder_view: None,
+                quick_notes_view: None,
                 file_lock_popup: None,
                 file_lock_retiring: Vec::new(),
                 folder_size_popup: None,
@@ -13809,6 +13836,7 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::FolderSize) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(folder_size::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::FileLock) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(file_lock::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::DuplicateFinder) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(duplicate_finder::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::QuickNotes) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(quick_notes::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }
@@ -16849,9 +16877,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
