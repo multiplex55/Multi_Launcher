@@ -76,6 +76,7 @@ fn sheet_key_owned(key: &str, modified: bool, nested_popup: bool, navigation_foc
 
 impl RootWindow {
     fn sheet_receipt_current(&self, sheet: &Sheet, window: &Window, cx: &Context<Self>) -> bool {
+        if self.dashboard_body_owned(cx) { return false; }
         #[cfg(windows)]
         if !self.native_window.is_some_and(|native| {
             self.root_visibility
@@ -176,6 +177,7 @@ impl RootWindow {
     }
 
     pub(super) fn open_action_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dashboard_body_owned(cx) { return; }
         self.folder_authoring.revoke(); self.bookmark_authoring.revoke(); self.external_drop.revoke();
         if self.search_input_operation(window, cx).is_none()
             || self.action_sheet.is_some()

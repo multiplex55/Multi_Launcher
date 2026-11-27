@@ -164,7 +164,7 @@ fn apply_row_action(cfg: &mut QuickToolsConfig, action: QuickToolRowAction) -> b
     }
 }
 
-fn effective_columns(preferred: usize, available_width: f32, spacing: f32) -> usize {
+pub fn effective_columns(preferred: usize, available_width: f32, spacing: f32) -> usize {
     let columns_that_fit = ((available_width + spacing) / (MIN_QUICK_TOOL_CELL_WIDTH + spacing))
         .floor()
         .max(1.0) as usize;
@@ -379,7 +379,8 @@ impl QuickToolsWidget {
         })
     }
 
-    fn action_for(entry: &QuickToolEntry) -> Option<WidgetAction> {
+    /// Project a configured tool to the same action used by the dashboard.
+    pub fn action_for(entry: &QuickToolEntry) -> Option<WidgetAction> {
         let query = entry.query.trim();
         if query.is_empty() {
             return None;

@@ -157,9 +157,9 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 
 | Other major application workflow | Registration | Original goal | Priority and stage → target | Working route and next action | Dependencies, verification and deferred criteria |
 | --- | --- | --- | --- | --- | --- |
-| Dashboard | — | G23 | P1.01 · 1 → 3 | Port reusable dashboard host and working widget dispatch. | Stock registry and shared catalogs. GPUI verification pending. [Dashboard](gui/dashboard.md) |
+| Dashboard | — | G23 | P1.01 · 2 → 3 | Retained blank-query host, watched stock layout, Active Timers and manual Quick Tools. | Stock registry and shared timer and Query owners. Paired replay, Editor and remaining widgets are open. [Dashboard checkpoint](CHECKPOINTS.md#p101-retained-dashboard-with-active-timers-and-manual-quick-tools) |
 | Dashboard Editor | — | G23 | P1.02 · 1 → 3 | Port editable layout, widget placement and checked saves. | Canonical dashboard persistence and actual host. [G23](goals/G23-dashboard-and-organizers.md) |
-| Frequently useful Dashboard widgets | Widget registry | G23 | P1.03 · 1 → 3 | Deliver widgets supporting P0 and P1 workflows. | Dashboard host and each widget's engine. Full widget matrix follows. [G23](goals/G23-dashboard-and-organizers.md) |
+| Frequently useful Dashboard widgets | Widget registry | G23 | P1.03 · 2 → 3 | Live Active Timers and manual Quick Tools. Continue useful P0 and P1 widgets. | Checked shared scheduler and Query routing. Paired replay, remaining widget controls and the full matrix are open. [Dashboard checkpoint](CHECKPOINTS.md#p101-retained-dashboard-with-active-timers-and-manual-quick-tools) |
 | File Preview | file_search child | G07 | P1.04 · 2 → 3 | Actual text and metadata preview, retained transfer. Replay hosts and actions natively. | Shared preview loader, exact selection and clipboard. [File Preview](gui/file-preview.md) |
 | Mermaid Viewer | diagram_studio child | G17 | P3.04 · 1 → 2 | Port actual Mermaid viewer and stock conversion/output. | Existing diagram workspace. [G17](goals/G17-diagram-studio.md) |
 | Date & Time Studio | Date provider family | G16 | P3.06 · 1 → 2 | Port actual workspace. Inline date results tracked separately. | Shared date engine and scoped settings. [G16](goals/G16-tables-and-conversion.md) |
@@ -173,7 +173,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 
 Count built-in rows once by registration identifier. Report Stage 1–5 separately, real GPUI functionality, Search admission only, and unstarted routes. Report P0 workflow readiness separately using its 19-row register. For tier counts, use built-in rows plus separately identified non-plugin workflow rows, tallying those two denominators explicitly where overlapping workflows would otherwise be double counted. A target met means the listed interim stage passed with applicable evidence. Pending means no active implementation, and blocked requires a concrete dependency. Original GUI and acceptance counts stay in [Progress](PROGRESS.md) and the [parity matrix](PARITY_MATRIX.md).
 
-Windows snapshot after P0.06 checked Calendar and Omni. **91 built-ins**, with **54 Stage 1, 30 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **37** have real GPUI functionality within the stated route. **0** have Search admission alone. **54** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **16 at Stage 2** and **3 at Stage 3 or higher**.
+Windows snapshot after P1.01 retained Dashboard. **91 built-ins**, with **54 Stage 1, 30 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **37** have real GPUI functionality within the stated route. **0** have Search admission alone. **54** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **16 at Stage 2** and **3 at Stage 3 or higher**.
 
 | Priority tier · built-ins only | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
@@ -188,7 +188,7 @@ The P2 interim floor is Stage 2. P4's existing functional Clipboard History is p
 | Priority tier · separate workflow view | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
 | P0 · readiness workflows | 19 | 3 | 16 | 0 | 0 |
-| P1 · Dashboard, useful widgets and File Preview | 4 | 0 | 1 | 3 | 0 |
+| P1 · Dashboard, useful widgets and File Preview | 4 | 0 | 3 | 1 | 0 |
 | P2 · represented by its built-ins | 0 | 0 | 0 | 0 | 0 |
 | P3 · other workspace and companion groups above | 5 | 0 | 0 | 5 | 0 |
 | P4 · Radial companion group | 1 | 0 | 0 | 1 | 0 |

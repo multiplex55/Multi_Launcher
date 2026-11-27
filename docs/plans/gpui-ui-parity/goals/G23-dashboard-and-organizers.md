@@ -46,7 +46,7 @@ Inbox includes search/filter/read/pin/clear, source indicators, related actions/
 
 ### G23-B — Complete dashboard and editor
 
-**Status: not started.** **Owner:** GPUI widget factories, settings adapters, and dashboard editor.
+**Status: in implementation.** The retained Dashboard, Active Timers and manual Quick Tools passed focused verification. Paired Windows replay and the Editor remain open. [Dashboard checkpoint](../CHECKPOINTS.md#p101-retained-dashboard-with-active-timers-and-manual-quick-tools) **Owner:** GPUI widget factories, settings adapters, and dashboard editor.
 
 **Work:** implement every registered widget, settings form, layout/editor interaction, empty/error/loading state, and route into owner tools. Preserve visibility-driven updates and caches.
 

@@ -160,7 +160,7 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [OCR Region Selection](gui/ocr-selection.md) | OCR-SELECTION-01–OCR-SELECTION-02 | G22 | Specified | Source shared selector and exact capture lifecycle mapped. Native and GPUI remain pending. |
 | [OCR Results](gui/ocr-results.md) | OCR-RESULT-01–OCR-RESULT-02 | G22 | Specified | Source editor, explicit Copy and generation cancellation mapped. Native and GPUI remain pending. |
 | [Mouse Settings](gui/mouse-settings.md) | MOUSE-SETTINGS-01–MOUSE-SETTINGS-02 | G22 | Specified | Source retained appearance form and independent session effect controls mapped. Native and GPUI remain pending. |
-| [Dashboard](gui/dashboard.md) | DASHBOARD-01–DASHBOARD-02 | G23 | Specified | Native blank-query composition and generated Quick Tools query passed. Remaining widgets and GPUI pending. |
+| [Dashboard](gui/dashboard.md) | DASHBOARD-01–DASHBOARD-02 | G23 | In implementation | GPUI retained blank-query host uses the watched stock layout and current slot actions. Active Timers and manual Quick Tools have focused evidence. Paired replay, remaining widgets and Editor are open. |
 | [Dashboard Editor](gui/dashboard-editor.md) | DASHBOARD-EDITOR-01–DASHBOARD-EDITOR-02 | G23 | Specified | Native editor route, selected callback and clean close passed. Save, rehost and GPUI remain pending. |
 | [Dashboard Remove Slot](gui/dashboard-remove-slot-confirmation.md) | DASHBOARD-REMOVE-01 | G23 | Specified | Native exact slot review and Cancel passed. Confirm and GPUI remain pending. |
 | [Dashboard Reset Widget](gui/dashboard-reset-widget-confirmation.md) | DASHBOARD-RESET-01 | G23 | Specified | Native exact selected widget review and Cancel passed. Confirm and GPUI remain pending. |
@@ -181,9 +181,9 @@ A GUI cannot be accepted while a mandatory row is merely Implemented or Validati
 | [Recent Commands](gui/dashboard-widget-recent_commands.md) | DASH-RECENT-CMD-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
 | [Frequent Commands](gui/dashboard-widget-frequent_commands.md) | DASH-FREQUENT-CMD-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
 | [Recent Notes](gui/dashboard-widget-recent_notes.md) | DASH-RECENT-NOTES-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
-| [Active Timers](gui/dashboard-widget-timers.md) | DASH-TIMERS-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
+| [Active Timers](gui/dashboard-widget-timers.md) | DASH-TIMERS-01 | G23 | In implementation | GPUI shows live running countdowns from the shared session and opens the unscheduled New Timer draft. Paired replay, recent completions and widget row actions remain open. |
 | [Clipboard and Snippets](gui/dashboard-widget-clipboard_snippets.md) | DASH-CLIP-SNIP-01 | G23 | Specified | Source current widget, settings and action behavior mapped. Native and GPUI remain pending. |
-| [Quick Tools](gui/dashboard-widget-quick_tools.md) | DASH-QUICK-01 | G23 | Specified | Native configured manual query and Properties callback passed. Auto submit and GPUI remain pending. |
+| [Quick Tools](gui/dashboard-widget-quick_tools.md) | DASH-QUICK-01 | G23 | In implementation | GPUI manual actions fill the exact Query through checked slot and entry receipts. Paired replay, Auto Submit, widget Jump and Properties remain open. |
 | [Plugin Home](gui/dashboard-widget-plugin_home.md) | DASH-PLUGIN-HOME-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
 | [Command History](gui/dashboard-widget-command_history.md) | DASH-CMD-HISTORY-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |
 | [Dashboard Diagnostics](gui/dashboard-widget-diagnostics.md) | DASH-DIAGNOSTICS-01 | G23 | Specified | Source registered widget, refresh or action behavior mapped. Native and GPUI remain pending. |

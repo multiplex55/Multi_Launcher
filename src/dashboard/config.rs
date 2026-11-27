@@ -142,6 +142,21 @@ impl DashboardConfig {
         Ok(cfg)
     }
 
+    /// Load one exact snapshot for a live reload; a removed file is distinct
+    /// from an empty file so callers can retain their last-good layout.
+    pub(crate) fn load_for_reload(path: &Path, registry: &WidgetRegistry) -> anyhow::Result<Option<Self>> {
+        let _transaction = dashboard_config_transaction_guard();
+        let state = Self::load_typed(path)?;
+        if matches!(&state, LoadState::Missing) {
+            return Ok(None);
+        }
+        let (cfg, warnings) = Self::plan_from_state(state, registry);
+        for warning in warnings {
+            tracing::warn!("{warning}");
+        }
+        Ok(Some(cfg))
+    }
+
     pub fn load_typed(path: impl AsRef<Path>) -> Result<LoadState<Self>, PersistenceError> {
         load_json(path)
     }
@@ -195,12 +210,16 @@ impl DashboardConfig {
     }
 
     fn load_plan(path: &Path, registry: &WidgetRegistry) -> anyhow::Result<(Self, Vec<String>)> {
-        let mut config = match Self::load_typed(path)? {
-            LoadState::Missing | LoadState::Empty => return Ok((Self::default(), Vec::new())),
+        Ok(Self::plan_from_state(Self::load_typed(path)?, registry))
+    }
+
+    fn plan_from_state(state: LoadState<Self>, registry: &WidgetRegistry) -> (Self, Vec<String>) {
+        let mut config = match state {
+            LoadState::Missing | LoadState::Empty => return (Self::default(), Vec::new()),
             LoadState::Loaded(config) => config,
         };
         let warnings = config.sanitize(registry);
-        Ok((config, warnings))
+        (config, warnings)
     }
 
     /// Remove unsupported widgets and normalize empty settings.

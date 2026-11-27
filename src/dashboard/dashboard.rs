@@ -1,7 +1,8 @@
 use crate::dashboard::config::{DashboardConfig, OverflowMode};
 use crate::dashboard::data_cache::DashboardDataCache;
 use crate::dashboard::diagnostics::{DashboardDiagnostics, DashboardDiagnosticsSnapshot};
-use crate::dashboard::layout::{NormalizedSlot, normalize_slots};
+use crate::dashboard::layout::NormalizedSlot;
+use crate::dashboard::layout_snapshot::DashboardLayout;
 use crate::dashboard::repaint::{RepaintDemand, aggregate_demands};
 use crate::dashboard::widgets::{Widget, WidgetAction, WidgetRegistry};
 use crate::{
@@ -131,15 +132,7 @@ impl Dashboard {
         event_cb: Option<std::sync::Arc<dyn Fn(DashboardEvent) + Send + Sync>>,
     ) -> Self {
         let path = config_path.as_ref().to_path_buf();
-        let (config, slots, warnings) = match Self::load_internal(&path, &registry) {
-            Ok(loaded) => loaded,
-            Err(error) => {
-                let config = DashboardConfig::default();
-                let (slots, mut warnings) = normalize_slots(&config, &registry);
-                warnings.insert(0, format!("failed to load dashboard config: {error}"));
-                (config, slots, warnings)
-            }
-        };
+        let DashboardLayout { config, slots, warnings } = DashboardLayout::initial(&path, &registry);
         let mut dashboard = Self {
             config_path: path,
             config,
@@ -154,18 +147,6 @@ impl Dashboard {
         };
         dashboard.rebuild_runtime_slots(slots);
         dashboard
-    }
-
-    fn load_internal(
-        path: &Path,
-        registry: &WidgetRegistry,
-    ) -> anyhow::Result<(DashboardConfig, Vec<NormalizedSlot>, Vec<String>)> {
-        let cfg = DashboardConfig::load(path, registry)?;
-        let (slots, mut warnings) = normalize_slots(&cfg, registry);
-        if slots.is_empty() {
-            warnings.push("dashboard has no valid slots".into());
-        }
-        Ok((cfg, slots, warnings))
     }
 
     fn rebuild_runtime_slots(&mut self, slots: Vec<NormalizedSlot>) {
@@ -207,15 +188,8 @@ impl Dashboard {
     }
 
     pub fn reload(&mut self) {
-        if !self.config_path.exists() {
-            self.warnings = vec![format!(
-                "dashboard config {} was removed; retaining last-good state",
-                self.config_path.display()
-            )];
-            return;
-        }
-        match Self::load_internal(&self.config_path, &self.registry) {
-            Ok((config, slots, warnings)) => {
+        match DashboardLayout::reload(&self.config_path, &self.registry) {
+            Ok(DashboardLayout { config, slots, warnings }) => {
                 let changed = self.config != config || self.slots != slots;
                 self.config = config;
                 self.warnings = warnings;
@@ -224,7 +198,7 @@ impl Dashboard {
                 }
             }
             Err(error) => {
-                self.warnings = vec![format!("failed to load dashboard config: {error}")];
+                self.warnings = vec![error.to_string()];
             }
         }
     }

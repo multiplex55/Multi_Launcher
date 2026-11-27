@@ -51,7 +51,7 @@ mod weather_site;
 mod window_list;
 mod windows_overview;
 
-pub use active_timers::ActiveTimersWidget;
+pub use active_timers::{ActiveTimersConfig, ActiveTimersWidget};
 pub use browser_tabs::BrowserTabsWidget;
 pub use calendar::CalendarWidget;
 pub use clipboard_recent::ClipboardRecentWidget;
@@ -73,7 +73,7 @@ pub use pinned_query_results::{ClickBehavior, PinnedQueryResultsConfig, PinnedQu
 pub use plugin_home::PluginHomeWidget;
 pub use process_list::ProcessesWidget;
 pub use query_list::QueryListWidget;
-pub use quick_tools::QuickToolsWidget;
+pub use quick_tools::{QuickToolEntry, QuickToolsConfig, QuickToolsWidget, effective_columns};
 pub use recent_commands::RecentCommandsWidget;
 pub use recent_notes::RecentNotesWidget;
 pub use recycle_bin::RecycleBinWidget;

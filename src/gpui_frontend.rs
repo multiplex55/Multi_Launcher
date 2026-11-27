@@ -59,6 +59,7 @@ mod timer_view;
 mod todo_view;
 mod calendar_view;
 mod calendar_results;
+mod dashboard;
 mod gesture_editor;
 mod gesture_query;
 mod invocation;
@@ -2549,6 +2550,11 @@ struct RootWindow {
     calendar_owner: Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, String>>>>,
     calendar_wake: Arc<HashWakeSignal>,
     calendar_results: calendar_results::Owner,
+    dashboard_source: Arc<dashboard::Source>,
+    dashboard_timer_rows: Vec<multi_launcher::plugins::timer_session::TimerRow>,
+    dashboard_ticking: bool,
+    dashboard_epoch: u64,
+    dashboard_ui: dashboard::UiState,
     gesture_editor: Option<Entity<gesture_editor::GestureEditor>>,
     timer_session: Option<Arc<multi_launcher::plugins::timer_session::TimerSession>>,
     timer_wake: Arc<HashWakeSignal>,
@@ -5023,6 +5029,7 @@ impl RootWindow {
     }
 
     fn revoke_focus_bound_utility_operations(&mut self, cx: &mut Context<Self>) {
+        self.dashboard_epoch = self.dashboard_epoch.wrapping_add(1);
         if let Some(view) = &self.gesture_editor {
             view.update(cx, |view, _| view.revoke_enabled_operation());
         }
@@ -7458,6 +7465,7 @@ impl RootWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dashboard_body_owned(cx) { self.fresh_search_enter = None; return; }
         self.fresh_search_enter = fresh_search_enter_marker(
             self.search_input_is_live(window, cx),
             event.keystroke.key.as_str(),
@@ -7506,6 +7514,7 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.dashboard_body_owned(cx) { self.retire_search_jump_mode(); return false; }
         if !self.search_jump_mode.should_process_key_down(receipt) {
             return false;
         }
@@ -7738,6 +7747,7 @@ impl RootWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.dashboard_body_owned(cx) { return false; }
         let Some(_operation) = self.search_input_operation(window, cx) else {
             return false;
         };
@@ -7778,6 +7788,7 @@ impl RootWindow {
         window: &Window,
         cx: &Context<Self>,
     ) -> bool {
+        if self.dashboard_body_owned(cx) { return false; }
         #[cfg(windows)]
         if !self.native_window.is_some_and(|native| {
             self.root_visibility.is_current_visible_revision(receipt.visibility_revision, native)
@@ -7817,6 +7828,7 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dashboard_body_owned(cx) { return; }
         let query = self.query.read(cx).value().to_string();
         let Some(result) = self
             .launcher_results
@@ -7965,6 +7977,7 @@ impl RootWindow {
         window: &Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.dashboard_body_owned(cx) { return false; }
         let Some(_operation) = self.search_input_operation(window, cx) else {
             return false;
         };
@@ -8149,6 +8162,7 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.dashboard_body_owned(cx) { return; }
         let query = self.query.read(cx).value().to_string();
         let Some(result) = self
             .launcher_results
@@ -10885,8 +10899,10 @@ impl Render for RootWindow {
             .collect::<Vec<_>>();
         let result_layout = self.launcher_results.layout;
         let result_generation = self.launcher_results.generation;
-        let result_count = self.launcher_results.actions.len();
-        let jump_mode_enabled = self.search_jump_mode.enabled;
+        let dashboard_body = self.render_dashboard(search_width, metrics.item_spacing_x, window, cx);
+        let result_count = if dashboard_body.is_some() { 0 } else { self.launcher_results.actions.len() };
+        let jump_mode_enabled = self.search_jump_mode.enabled && dashboard_body.is_none();
+        if dashboard_body.is_some() { self.retire_search_jump_mode(); }
         let jump_geometry_draft = jump_mode_enabled.then(|| {
             Rc::new(RefCell::new(JumpGeometryDraft::new(result_generation)))
         });
@@ -11403,6 +11419,7 @@ impl Render for RootWindow {
                             .line_height(px(metrics.small_text_size * 1.2))
                     }))
             }))
+            .children(dashboard_body)
             .children((result_count > 0).then(|| {
                 div()
                     .id("launcher-search-results")
@@ -13349,6 +13366,7 @@ pub(crate) fn run_foundation_window(
     root_placement: root_placement::RootPlacement,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     mouse_gesture_settings: Result<multi_launcher::plugins::mouse_gestures::MouseGestureSettings, String>,
+    dashboard_settings: multi_launcher::settings::DashboardSettings,
     app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     external_launch_preferences: ExternalLaunchPreferences,
     coordinate_tool_preferences: CoordinateToolPreferences,
@@ -13499,6 +13517,10 @@ pub(crate) fn run_foundation_window(
     let timer_wake = Arc::new(HashWakeSignal::default());
     let todo_wake = Arc::new(HashWakeSignal::default());
     let calendar_wake = Arc::new(HashWakeSignal::default());
+    let dashboard_wake = Arc::new(HashWakeSignal::default());
+    let dashboard_source = Arc::new(dashboard::Source::start(dashboard_settings, dashboard_wake.clone()));
+    let dashboard_source_for_root = dashboard_source.clone();
+    let dashboard_wake_for_root = dashboard_wake.clone();
     let calendar_wake_for_root = calendar_wake.clone();
     let calendar_slot_for_root = calendar_slot.clone();
     let calendar_start = {
@@ -13844,6 +13866,11 @@ pub(crate) fn run_foundation_window(
                 calendar_owner: calendar_slot_for_root.clone(),
                 calendar_wake: calendar_wake_for_root.clone(),
                 calendar_results: calendar_results::Owner::default(),
+                dashboard_source: dashboard_source_for_root.clone(),
+                dashboard_timer_rows: Vec::new(),
+                dashboard_ticking: false,
+                dashboard_epoch: 0,
+                dashboard_ui: dashboard::UiState::default(),
                 gesture_editor: None,
                 gesture_owner: gesture_owner_for_run.clone(),
                 gesture_wake: gesture_wake_for_run.clone(),
@@ -13907,7 +13934,7 @@ pub(crate) fn run_foundation_window(
                 })
             });
             appearance_subscription_sink.borrow_mut().push(sheet_subscription);
-            root.update(cx, |root, cx| { root.start_omni_watch(cx); root.rebuild_omni_catalog(cx); root.start_application_index(cx); root.start_notes_owner(cx); root.start_todo_wake(cx); root.start_calendar_wake(cx); });
+            root.update(cx, |root, cx| { root.start_omni_watch(cx); root.rebuild_omni_catalog(cx); root.start_application_index(cx); root.start_notes_owner(cx); root.start_todo_wake(cx); root.start_calendar_wake(cx); root.start_dashboard_wake(dashboard_wake_for_root.clone(), cx); });
             #[cfg(windows)]
             {
                 let keypad_subscription = root.update(cx, |_, cx| {
@@ -14048,6 +14075,7 @@ pub(crate) fn run_foundation_window(
                         match event {
                             InputEvent::Change => {
                                 let query_text = query.read(cx).value().to_string();
+                                root.dashboard_epoch = root.dashboard_epoch.wrapping_add(1);
                                 if root.calendar_results.accept_change(&query_text, root.launcher_results.generation) {
                                     root.query_history.synchronize(&query_text);
                                     cx.notify();
@@ -14063,6 +14091,7 @@ pub(crate) fn run_foundation_window(
                             }
                             InputEvent::PressEnter { secondary, shift } => {
                                 let marker = root.fresh_search_enter.take();
+                                if root.dashboard_body_owned(cx) { return; }
                                 if *secondary || *shift {
                                     return;
                                 }
@@ -14216,6 +14245,7 @@ pub(crate) fn run_foundation_window(
                             }); });
                         }
                     } else {
+                        root.dashboard_epoch = root.dashboard_epoch.wrapping_add(1);
                         root.external_launch.retire_focus_bound_effects();
                         root.external_launch.retire_omni_before_effect();
                         root.app_editor.revoke_picker_prelaunch();
@@ -15315,6 +15345,7 @@ pub(crate) fn run_foundation_window(
     });
 
     restart_admission.fence();
+    dashboard_source.shutdown();
     for worker in notes_worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain(..) { let _ = worker.join(); }
     notes_owner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
     todo_wake.close();
