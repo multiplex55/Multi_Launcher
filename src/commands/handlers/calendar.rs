@@ -9,7 +9,7 @@ use crate::commands::{
 use crate::plugins::calendar::{
     CALENDAR_DATA, CALENDAR_STATE_FILE, add_event, expand_instances, format_event_label,
     parse_calendar_add, parse_calendar_search, parse_date_reference, parse_duration_spec,
-    search_events, snooze_event, update_state,
+    search_events_in, snooze_event, update_state, CalendarEvent,
 };
 
 pub(crate) fn handle_calendar(
@@ -56,24 +56,16 @@ fn jump(host: &mut dyn CommandHost, reference: &str) -> CommandOutcome {
     let mut outcome = CommandOutcome::default();
     match parse_date_reference(reference, now.date()) {
         Some(date) => {
-            if let Err(error) = update_state(CALENDAR_STATE_FILE, |state| {
+            let error = update_state(CALENDAR_STATE_FILE, |state| {
                 state.last_opened = Some(now);
                 state.last_viewed_day = Some(date);
                 Ok(())
-            }) {
-                outcome
-                    .toasts
-                    .push(ToastPolicy::Error(format!("Calendar state error: {error}")));
-            }
-            if host.calendar_dashboard_enabled() {
+            }).err().map(|error| error.to_string());
+            let dashboard = host.calendar_dashboard_enabled();
+            outcome = calendar_jump_outcome(date, !dashboard && host.launcher_should_refocus(), error.as_deref());
+            if dashboard {
                 refresh_query(&mut outcome, String::new());
-            } else {
-                outcome.focus = host.launcher_should_refocus();
             }
-            outcome.toasts.push(ToastPolicy::Success(format!(
-                "Jumped to {}",
-                date.format("%Y-%m-%d")
-            )));
         }
         None => {
             outcome.toasts.push(ToastPolicy::Error(format!(
@@ -82,6 +74,14 @@ fn jump(host: &mut dyn CommandHost, reference: &str) -> CommandOutcome {
             outcome.focus = host.launcher_should_refocus();
         }
     }
+    outcome
+}
+
+/// Stock Dashboard-off Jump presentation after a checked state update.
+pub fn calendar_jump_outcome(date: chrono::NaiveDate, refocus: bool, state_error: Option<&str>) -> CommandOutcome {
+    let mut outcome = CommandOutcome { focus: refocus, ..CommandOutcome::default() };
+    if let Some(error) = state_error { outcome.toasts.push(ToastPolicy::Error(format!("Calendar state error: {error}"))); }
+    outcome.toasts.push(ToastPolicy::Success(format!("Jumped to {}", date.format("%Y-%m-%d"))));
     outcome
 }
 
@@ -118,10 +118,19 @@ fn add(host: &mut dyn CommandHost, input: &str) -> CommandOutcome {
 }
 
 fn search(host: &mut dyn CommandHost, input: &str) -> CommandOutcome {
+    if let Err(error) = parse_calendar_search(input) {
+        return CommandOutcome { focus: host.launcher_should_refocus(), toasts: vec![ToastPolicy::Error(error)], ..CommandOutcome::default() };
+    }
+    let events = CALENDAR_DATA.read().map(|data| data.clone()).unwrap_or_default();
+    calendar_search_outcome(&events, input, false)
+}
+
+/// Build the stock replacement results from a caller-owned event snapshot.
+pub fn calendar_search_outcome(events: &[CalendarEvent], input: &str, refocus: bool) -> CommandOutcome {
     let mut outcome = CommandOutcome::default();
     match parse_calendar_search(input) {
         Ok(request) => {
-            let actions = search_events(&request)
+            let actions = search_events_in(events, &request)
                 .into_iter()
                 .map(|event| Action {
                     label: format_event_label(&event),
@@ -140,7 +149,7 @@ fn search(host: &mut dyn CommandHost, input: &str) -> CommandOutcome {
         }
         Err(error) => {
             outcome.toasts.push(ToastPolicy::Error(error));
-            outcome.focus = host.launcher_should_refocus();
+            outcome.focus = refocus;
         }
     }
     outcome
@@ -152,10 +161,15 @@ fn upcoming() -> CommandOutcome {
         .read()
         .map(|data| data.clone())
         .unwrap_or_default();
-    let instances = expand_instances(&events, now, now + Duration::days(7), 50);
+    calendar_upcoming_outcome(&events, now)
+}
+
+/// Build stock seven-day replacement results with an explicit clock.
+pub fn calendar_upcoming_outcome(events: &[CalendarEvent], now: chrono::NaiveDateTime) -> CommandOutcome {
+    let instances = expand_instances(events, now, now + Duration::days(7), 50);
     let titles: HashMap<_, _> = events
-        .into_iter()
-        .map(|event| (event.id, event.title))
+        .iter()
+        .map(|event| (event.id.clone(), event.title.clone()))
         .collect();
     let actions = instances
         .into_iter()
@@ -236,6 +250,25 @@ mod tests {
         LauncherCommandHost, NoteCommandHost, TableUtilityCommandHost, TodoCommandHost,
         XmlToolkitCommandHost,
     };
+
+    #[test]
+    fn snapshot_calendar_projection_preserves_same_day_and_recurring_rows() {
+        let events: Vec<CalendarEvent> = serde_json::from_str(r#"[
+          {"id":"daily","title":"Daily meeting","start":"2026-09-06T09:30:00","created_at":"2026-09-01T00:00:00","recurrence":{"frequency":"Daily","end":{"AfterCount":{"count":3}}}},
+          {"id":"once","title":"Daily review","start":"2026-09-06T11:00:00","created_at":"2026-09-01T00:00:00"}
+        ]"#).unwrap();
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 9, 6).unwrap().and_hms_opt(8, 0, 0).unwrap();
+        let search = calendar_search_outcome(&events, "Daily", true);
+        let ResultsPolicy::Replace(search_rows) = search.results else { panic!("expected search rows") };
+        assert_eq!(search_rows.len(), 2);
+        assert_eq!(search_rows[0].action, "calendar:jump:2026-09-06");
+        assert_eq!(search_rows[1].action, "calendar:jump:2026-09-06");
+        let upcoming = calendar_upcoming_outcome(&events, now);
+        let ResultsPolicy::Replace(rows) = upcoming.results else { panic!("expected upcoming rows") };
+        assert!(rows.iter().filter(|row| row.action == "calendar:jump:2026-09-06").count() >= 2);
+        assert!(rows.iter().any(|row| row.action == "calendar:jump:2026-09-07"));
+        assert_eq!(upcoming.history, crate::commands::HistoryPolicy::Skip);
+    }
 
     #[derive(Default)]
     struct Host {

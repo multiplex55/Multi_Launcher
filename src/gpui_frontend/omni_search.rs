@@ -38,9 +38,13 @@ pub(super) struct Projection {
     rows: HashMap<u64, Vec<OmniRow>>,
     notes: Option<Arc<super::search_providers::NoteSnapshot>>,
     todos: Option<(Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, Arc<multi_launcher::plugins::todo::CheckedTodoSnapshot>)>,
-    todo_revision: (Arc<AtomicU64>, u64),
+    calendar: Option<(Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, Arc<multi_launcher::plugins::calendar::CheckedCalendarSnapshot>)>,
+    settings_revision: (Arc<AtomicU64>, u64),
 }
 impl Projection {
+    pub fn calendar_stamp(&self) -> Option<(Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, Arc<multi_launcher::plugins::calendar::CheckedCalendarSnapshot>)> {
+        self.calendar.clone()
+    }
     pub fn source_for(&self, action: &Action) -> Option<OmniSource> {
         let source = self
             .rows
@@ -69,9 +73,15 @@ impl Projection {
         Some((snapshot.version, snapshot.by_slug.get(&slug)?.clone()))
     }
     pub fn todo_for(&self, action: &Action) -> Option<(Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, multi_launcher::plugins::todo::CheckedTodoReceipt, Arc<AtomicU64>, u64)> {
-        if self.todo_revision.0.load(Ordering::Acquire) != self.todo_revision.1 { return None; }
+        if self.settings_revision.0.load(Ordering::Acquire) != self.settings_revision.1 { return None; }
         let (owner, snapshot) = self.todos.as_ref()?;
-        Some((owner.clone(), owner.receipt(snapshot, action)?, self.todo_revision.0.clone(), self.todo_revision.1))
+        Some((owner.clone(), owner.receipt(snapshot, action)?, self.settings_revision.0.clone(), self.settings_revision.1))
+    }
+    pub fn calendar_for(&self, action: &Action) -> Option<(Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, Arc<multi_launcher::plugins::calendar::CheckedCalendarSnapshot>, Arc<AtomicU64>, u64)> {
+        if self.settings_revision.0.load(Ordering::Acquire) != self.settings_revision.1 || self.source_for(action) != Some(OmniSource::Calendar) { return None; }
+        let (owner, snapshot) = self.calendar.as_ref()?;
+        if !snapshot.actionable || !Arc::ptr_eq(&owner.snapshot(), snapshot) { return None; }
+        Some((owner.clone(), snapshot.clone(), self.settings_revision.0.clone(), self.settings_revision.1))
     }
 }
 
@@ -107,7 +117,7 @@ pub(super) fn supported_child(source: &OmniSource, action: &Action) -> bool {
             ))
         ),
         OmniSource::Todo => matches!(parse_action(action), Ok(Command::Todo(multi_launcher::commands::TodoCommand::Done { .. }))),
-        OmniSource::Calendar => false,
+        OmniSource::Calendar => matches!(parse_action(action), Ok(Command::Calendar(multi_launcher::commands::CalendarCommand::Open { .. } | multi_launcher::commands::CalendarCommand::Search { .. } | multi_launcher::commands::CalendarCommand::Upcoming))),
     }
 }
 
@@ -120,7 +130,8 @@ pub(super) struct Provider {
     catalog: RwLock<Option<Arc<OmniAppCatalog>>>,
     projected: Mutex<Option<Arc<Projection>>>,
     todos: RwLock<Option<Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, String>>>>>>,
-    todo_revision: Arc<AtomicU64>,
+    calendar: RwLock<Option<Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, String>>>>>>,
+    settings_revision: Arc<AtomicU64>,
 }
 
 impl Provider {
@@ -139,18 +150,22 @@ impl Provider {
             catalog: RwLock::new(None),
             projected: Mutex::new(None),
             todos: RwLock::new(None),
-            todo_revision: Arc::new(AtomicU64::new(1)),
+            calendar: RwLock::new(None),
+            settings_revision: Arc::new(AtomicU64::new(1)),
         }
     }
     pub fn attach_todos(&self, owner: Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, String>>>>) {
         if let Ok(mut slot) = self.todos.write() { *slot = Some(owner); }
+    }
+    pub fn attach_calendar(&self, owner: Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, String>>>>) {
+        if let Ok(mut slot) = self.calendar.write() { *slot = Some(owner); }
     }
     pub fn configure(&self, value: Option<&serde_json::Value>) {
         if let Some(settings) = value.and_then(|value| serde_json::from_value(value.clone()).ok())
             && let Ok(mut current) = self.settings.write()
         {
             *current = settings;
-            self.todo_revision.fetch_add(1, Ordering::AcqRel);
+            self.settings_revision.fetch_add(1, Ordering::AcqRel);
         }
     }
     pub fn install(&self, catalog: Option<Arc<OmniAppCatalog>>) {
@@ -282,6 +297,21 @@ impl RootWindow {
         else {
             return;
         };
+        if *child == OmniSource::Calendar {
+            if !settings.include_calendar { return; }
+            let Some((owner, snapshot, scope, revision)) = self.search_catalog.providers.omni.projection(&query).and_then(|projection| projection.calendar_for(&result.action)) else { return; };
+            let Some(catalog) = self.omni_search.current_authority() else { return; };
+            match parse_action(&result.action) {
+                Ok(Command::Calendar(multi_launcher::commands::CalendarCommand::Open { .. })) => {
+                    self.open_calendar_view(query, result.action.clone(), result.origin.clone(), Some((snapshot, scope, revision, catalog)), window, cx);
+                }
+                Ok(Command::Calendar(command @ (multi_launcher::commands::CalendarCommand::Search { .. } | multi_launcher::commands::CalendarCommand::Upcoming))) => {
+                    self.start_calendar_query(result.action.clone(), command, owner, snapshot, scope, revision, catalog, query, native, window, cx);
+                }
+                _ => {}
+            }
+            return;
+        }
         if *child == OmniSource::Todo {
             if !settings.include_todos { return; }
             let Some((owner, receipt, scope, revision)) = self.search_catalog.providers.omni.projection(&query).and_then(|projection| projection.todo_for(&result.action)) else { return; };
@@ -490,7 +520,7 @@ impl Plugin for Provider {
         ]
     }
     fn search(&self, query: &str) -> Vec<Action> {
-        let (settings, todo_revision) = self.settings.read().map(|settings| (settings.clone(), self.todo_revision.load(Ordering::Acquire))).unwrap_or_else(|_| (OmniSearchSettings::default(), self.todo_revision.load(Ordering::Acquire)));
+        let (settings, settings_revision) = self.settings.read().map(|settings| (settings.clone(), self.settings_revision.load(Ordering::Acquire))).unwrap_or_else(|_| (OmniSearchSettings::default(), self.settings_revision.load(Ordering::Acquire)));
         let catalog = self.catalog.read().ok().and_then(|value| value.clone());
         let notes = if settings.include_notes {
             self.notes.lock().ok().and_then(|owner| owner.clone())
@@ -501,6 +531,8 @@ impl Plugin for Provider {
         let todo_owner = settings.include_todos.then(|| self.todos.read().ok().and_then(|slot| slot.clone()).and_then(|slot| slot.lock().ok().and_then(|owner| owner.as_ref().and_then(|result| result.as_ref().ok()).cloned()))).flatten();
         let todo_snapshot = todo_owner.as_ref().map(|owner| owner.snapshot());
         let todo_provider = todo_snapshot.as_ref().map(|snapshot| TodoProjection(snapshot.clone()));
+        let calendar_owner = settings.include_calendar.then(|| self.calendar.read().ok().and_then(|slot| slot.clone()).and_then(|slot| slot.lock().ok().and_then(|owner| owner.as_ref().and_then(|result| result.as_ref().ok()).cloned()))).flatten();
+        let calendar_snapshot = calendar_owner.as_ref().map(|owner| owner.snapshot());
         let mut rows = project_omni(
             query,
             &settings,
@@ -510,7 +542,7 @@ impl Plugin for Provider {
                 apps: catalog.as_deref(),
                 notes: notes.as_deref().map(|owner| owner as &dyn Plugin),
                 todos: todo_provider.as_ref().map(|provider| provider as &dyn Plugin),
-                calendar: None,
+                calendar: calendar_snapshot.as_ref().filter(|snapshot| snapshot.actionable).map(|_| &multi_launcher::plugins::calendar::CalendarPlugin as &dyn Plugin),
             },
         );
         if note_snapshot.as_ref().is_none_or(|snapshot| {
@@ -534,7 +566,8 @@ impl Plugin for Provider {
                 rows: indexed,
                 notes: note_snapshot,
                 todos: todo_owner.zip(todo_snapshot),
-                todo_revision: (self.todo_revision.clone(), todo_revision),
+                calendar: calendar_owner.zip(calendar_snapshot),
+                settings_revision: (self.settings_revision.clone(), settings_revision),
             }));
         }
         actions
@@ -561,6 +594,29 @@ mod tests {
         collections::{HashMap, HashSet},
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn calendar_omni_projects_stock_routes_without_direct_calendar_gate() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = multi_launcher::platform::app_data::AppDataRoot::from_settings_path(temp.path().join("settings.json")).unwrap();
+        let owner = multi_launcher::plugins::calendar::CheckedCalendarOwner::start(&root, Arc::new(|| {})).unwrap();
+        let provider = Provider::new(None, None, Arc::new(Mutex::new(None)), Arc::new(super::super::search_providers::NoteSnapshots::default()));
+        provider.attach_calendar(Arc::new(Mutex::new(Some(Ok(owner.clone())))));
+        let enabled = HashSet::from(["omni_search".to_owned()]);
+        for query in ["o", "o list"] {
+            let rows = super::super::search_providers::search_routed([&provider as &dyn Plugin], query, Some(&enabled), None);
+            assert!(rows.iter().any(|(_, action)| action.action == "calendar:open"));
+            assert!(rows.iter().any(|(_, action)| action.action == "calendar:upcoming"));
+        }
+        let rows = provider.search("o café");
+        let row = rows.iter().find(|action| action.action == "calendar:search:café").unwrap();
+        let projection = provider.projection("o café").unwrap();
+        assert!(projection.calendar_for(row).is_some());
+        provider.configure(Some(&serde_json::json!({"include_calendar": false})));
+        assert!(projection.calendar_for(row).is_none());
+        assert!(provider.search("o café").iter().all(|action| !action.action.starts_with("calendar:")));
+        owner.shutdown();
+    }
 
     #[test]
     fn todo_projection_uses_snapshot_and_own_omni_gate() {

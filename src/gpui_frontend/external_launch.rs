@@ -550,6 +550,7 @@ pub(super) enum RunCommand {
     Favorite(ExternalCommand),
     TempfileMutation { command: multi_launcher::commands::StorageCommand, row: multi_launcher::actions::tempfiles::ListedTempFile, guard: OmniGuard },
     Todo { owner: Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, receipt: multi_launcher::plugins::todo::CheckedTodoReceipt, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard },
+    CalendarJump { owner: Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, snapshot: Arc<multi_launcher::plugins::calendar::CheckedCalendarSnapshot>, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard, day: chrono::NaiveDate },
     Copy(String),
     WindowSwitch(multi_launcher::window_activation::CheckedWindowSwitch),
     WindowClose(multi_launcher::window_close::CheckedWindowClose),
@@ -779,8 +780,8 @@ impl ExternalLaunch {
             clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
-            omni_lease: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } => Some(guard.lease.clone()), _ => None },
-            omni_gate: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
+            omni_lease: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_gate: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
         });
         Some(ticket)
     }
@@ -1003,6 +1004,14 @@ fn execute_request(
             let invocation = multi_launcher::commands::CommandInvocation { command, original_action: request.action.clone(), query_override: None, source: request.source };
             Ok(multi_launcher::commands::handlers::checked_todo_done_outcome(&invocation, &request.query))
         }
+        RunCommand::CalendarJump { owner, snapshot, scope, revision, guard, day } => {
+            let checked = AtomicBool::new(false); let entered = AtomicBool::new(false);
+            let now = chrono::Local::now().naive_local();
+            owner.write_state_if_current(snapshot, *day, now, || todo_effect_current(&checked, &entered,
+                || scope.load(Ordering::Acquire) == *revision && guard.current(), || guard.effect_current()))
+                .map_err(|error| CommandError::new("calendar", error.to_string()).with_gui_failure_policy())?;
+            Ok(multi_launcher::commands::handlers::calendar_jump_outcome(*day, true, None))
+        }
         RunCommand::WindowSwitch(checked) => {
             let effect = multi_launcher::window_activation::activate_checked_window_switch(checked.clone())
                 .map_err(anyhow::Error::new);
@@ -1125,7 +1134,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1576,6 +1585,9 @@ impl RootWindow {
     pub(super) fn start_omni_todo(&mut self, action: Action, owner: Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, receipt: multi_launcher::plugins::todo::CheckedTodoReceipt, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
         self.start_run(action, RunCommand::Todo { owner, receipt, scope, revision, guard }, query, source, None, window, cx);
     }
+    pub(super) fn start_calendar_jump(&mut self, action: Action, owner: Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, snapshot: Arc<multi_launcher::plugins::calendar::CheckedCalendarSnapshot>, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard, day: chrono::NaiveDate, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_run(action, RunCommand::CalendarJump { owner, snapshot, scope, revision, guard, day }, query, source, None, window, cx);
+    }
 
     fn start_run(
         &mut self,
@@ -1627,12 +1639,13 @@ impl RootWindow {
                 lease.store(false, Ordering::Release);
             }
         }
-        if let RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } = &request.command {
+        if let RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
             if let Some(focus) = window.focused(cx) {
                 let lease = guard.lease.clone();
                 let effect_gate = guard.effect_gate.clone();
+                let strict_focus = matches!(&request.command, RunCommand::CalendarJump { .. });
                 let subscription = cx.on_blur(&focus, window, move |_, _, _| {
-                    if effect_gate.revoke_pending() { lease.store(false, Ordering::Release); }
+                    if effect_gate.revoke_pending() || strict_focus { lease.store(false, Ordering::Release); }
                 });
                 if let Some(pending) = self.external_launch.pending.as_mut().filter(|pending| pending.ticket == ticket) {
                     pending.focus_guard = Some(subscription);
@@ -1661,6 +1674,7 @@ impl RootWindow {
                     if root.external_launch.take_deferred_notes_wake() {
                         root.search_catalog.providers.notes_wake.notify();
                         root.todo_wake.notify();
+                        root.calendar_wake.notify();
                     }
                     if root.window_search.take_deferred_update() {
                         root.root_visibility.notify_window_search();
@@ -1761,7 +1775,7 @@ impl RootWindow {
             RunCommand::ClipboardExecute { current, .. } => current() && window.is_window_active(),
             RunCommand::SnippetRun { current, .. } => current() && window.is_window_active(),
             RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => guard.receipt_current(),
-            RunCommand::Todo { guard, scope, revision, .. } => guard.current() && scope.load(Ordering::Acquire) == *revision,
+            RunCommand::Todo { guard, scope, revision, .. } | RunCommand::CalendarJump { guard, scope, revision, .. } => guard.current() && scope.load(Ordering::Acquire) == *revision,
             _ => true,
         };
         let local_focus_owned = self.external_owner_is_current(receipt.stamp.focus.as_ref(), window, cx);

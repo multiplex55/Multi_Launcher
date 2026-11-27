@@ -414,7 +414,12 @@ impl RootWindow {
             self.todo_view = Some(view);
         }
         let id = window.window_handle().window_id();
-        let index = self.clipboard_scroll_item(id, cx)
+        self.root_scroll.scroll_to_top_of_item(self.todo_scroll_item(id, cx));
+        cx.notify();
+    }
+
+    pub(super) fn todo_scroll_item(&self, id: WindowId, cx: &App) -> usize {
+        self.clipboard_scroll_item(id, cx)
             + usize::from(
                 self.clipboard_history
                     .as_ref()
@@ -463,8 +468,6 @@ impl RootWindow {
                     .as_ref()
                     .is_some_and(|v| v.read(cx).open),
             )
-            + usize::from(self.timer_view.as_ref().is_some_and(|v| v.read(cx).open));
-        self.root_scroll.scroll_to_top_of_item(index);
-        cx.notify();
+            + usize::from(self.timer_view.as_ref().is_some_and(|v| v.read(cx).open))
     }
 }

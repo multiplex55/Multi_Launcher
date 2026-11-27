@@ -52,7 +52,7 @@ fn primary_allowed(
     let saved_shortcut = result.saved_shortcut().is_some();
     #[cfg(not(windows))]
     let saved_shortcut = false;
-    !matches!(parse_action(candidate), Ok(Command::Todo(multi_launcher::commands::TodoCommand::Done { .. })))
+    !matches!(parse_action(candidate), Ok(Command::Todo(multi_launcher::commands::TodoCommand::Done { .. }) | Command::Calendar(_)))
         && candidate == &result.action
         && (parse_installed_search_invocation(candidate.clone(), ActivationSource::Enter).is_ok()
             || matches!(&result.origin, LauncherResultOrigin::Omni(source) if super::omni_search::supported_child(source, candidate))
@@ -560,6 +560,13 @@ mod tests {
     fn todo_toggle_is_not_an_action_sheet_primary() {
         let action = Action { label: "[ ] task".into(), desc: "Todo".into(), action: "todo:done:0".into(), args: None };
         let result = LauncherSearchResult { action: action.clone(), origin: LauncherResultOrigin::Omni(multi_launcher::plugins::omni_search::OmniSource::Todo), display_label: None, hide_description: false };
+        assert!(!primary_allowed(&result, &action, false, &[]));
+    }
+
+    #[test]
+    fn calendar_jump_is_not_an_action_sheet_primary() {
+        let action = Action { label: "Meeting".into(), desc: "Calendar".into(), action: "calendar:jump:2026-09-06".into(), args: None };
+        let result = LauncherSearchResult { action: action.clone(), origin: LauncherResultOrigin::CalendarJump { serial: 1, index: 0 }, display_label: None, hide_description: false };
         assert!(!primary_allowed(&result, &action, false, &[]));
     }
 

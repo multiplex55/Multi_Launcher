@@ -8,3 +8,7 @@ G23 owns `calendar-event-details`. The agenda opens the independent retained Det
 | CALENDAR-DETAILS-02 | Preserve the bounded snooze control and current source checks. Close retires the exact child. Use a synthetic local event without reminders for passive baseline checks. |
 
 Select `stale_details_occurrence_cannot_delete_or_duplicate_the_changed_series`, `duplicate_and_delete_use_transaction_and_reject_corruption` and `detached_calendar_retains_occurrence_and_saves_and_deletes_only_on_accepted_passes`. `G23-EGUI-CALENDAR-TODO` verifies the native exact agenda occurrence, notes and Edit handoff. Mutations and GPUI remain pending.
+
+## GPUI read-only occurrence details
+
+A Day agenda row opens details for the exact current occurrence. Source changes and dismissal retire the captured receipt. Read-only details show the stock event information. Edit, other actions and paired Windows replay remain open. [Omni Calendar checkpoint](../CHECKPOINTS.md#p006-checked-omni-calendar-and-day-agenda)

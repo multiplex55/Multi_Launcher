@@ -55,6 +55,8 @@ mod clipboard_modify_view;
 mod tempfile_view;
 mod timer_view;
 mod todo_view;
+mod calendar_view;
+mod calendar_results;
 mod gesture_editor;
 mod gesture_query;
 mod invocation;
@@ -243,6 +245,7 @@ enum LauncherResultOrigin {
     Saved,
     Indexed { generation: u64, index: usize },
     Omni(multi_launcher::plugins::omni_search::OmniSource),
+    CalendarJump { serial: u64, index: usize },
     OmniNote { version: u64, note: Arc<multi_launcher::plugins::note::Note> },
     Note { version: u64, note: Arc<multi_launcher::plugins::note::Note> },
     CachedCommand,
@@ -2531,6 +2534,10 @@ struct RootWindow {
     todo_view: Option<Entity<todo_view::TodoView>>,
     todo_owner: Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, String>>>>,
     todo_wake: Arc<HashWakeSignal>,
+    calendar_view: Option<Entity<calendar_view::CalendarView>>,
+    calendar_owner: Arc<Mutex<Option<Result<Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, String>>>>,
+    calendar_wake: Arc<HashWakeSignal>,
+    calendar_results: calendar_results::Owner,
     gesture_editor: Option<Entity<gesture_editor::GestureEditor>>,
     timer_session: Option<Arc<multi_launcher::plugins::timer_session::TimerSession>>,
     timer_wake: Arc<HashWakeSignal>,
@@ -7189,6 +7196,8 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
+        self.calendar_results.retire();
+        if let Some(view) = &self.calendar_view { view.update(cx, |view, _| view.search_refreshed(&query, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())); }
         self.external_launch.retire_omni();
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
@@ -7218,6 +7227,10 @@ impl RootWindow {
             self.enabled_plugins.as_ref(),
             self.enabled_capabilities.as_ref(),
         );
+        if omni_search::is_omni_query(&query) {
+            let stamp = self.search_catalog.providers.omni.projection(&query).and_then(|projection| projection.calendar_stamp());
+            self.calendar_results.source_projected(stamp);
+        }
         self.clipboard_modify_startup.projection = self.search_catalog.providers
             .take_clipboard_modify_projection().map(|(effective, catalog)| (query.clone(), effective, catalog));
         self.snippets_search.projection = self.search_catalog.providers.take_snippets_projection()
@@ -7296,6 +7309,8 @@ impl RootWindow {
                     timer_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "todo" {
                     todo_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                } else if provider == "calendar" {
+                    calendar_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "mouse_gestures" {
                     gesture_editor::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "snippets" {
@@ -8092,6 +8107,10 @@ impl RootWindow {
         if !self.launcher_result_activation_is_live(origin, window, cx) {
             return;
         }
+        if matches!(&result.origin, LauncherResultOrigin::CalendarJump { .. }) {
+            self.activate_calendar_jump(&result, query, source, window, cx);
+            return;
+        }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "tempfile")
             && tempfile_search::supported_query(&query) {
             if !tempfile_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
@@ -8205,6 +8224,12 @@ impl RootWindow {
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "todo") {
             if todo_view::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
                 self.open_todo_view(window, cx);
+            }
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "calendar") {
+            if calendar_view::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                self.open_calendar_view(query, result.action.clone(), result.origin.clone(), None, window, cx);
             }
             return;
         }
@@ -11683,6 +11708,9 @@ impl Render for RootWindow {
         if let Some(view) = self.todo_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
+        if let Some(view) = self.calendar_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
         if let Some(view) = self.gesture_editor.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
@@ -13279,9 +13307,11 @@ pub(crate) fn run_foundation_window(
     );
     let external_launch_preferences_for_root = external_launch_preferences;
     let todo_slot = Arc::new(Mutex::new(None));
+    let calendar_slot = Arc::new(Mutex::new(None));
     let launcher_search_catalog =
         LauncherSearchCatalog::new(search_startup, enabled_plugins.as_ref());
     launcher_search_catalog.providers.omni.attach_todos(todo_slot.clone());
+    launcher_search_catalog.providers.omni.attach_calendar(calendar_slot.clone());
     let search_jump_geometry_frame_for_root =
         Rc::new(RefCell::new(None::<JumpGeometryFrame>));
     let hash_tool_key = UtilityToolKey::parse("hash-generator")
@@ -13396,6 +13426,18 @@ pub(crate) fn run_foundation_window(
     let gesture_wake_for_run = gesture_wake.clone();
     let timer_wake = Arc::new(HashWakeSignal::default());
     let todo_wake = Arc::new(HashWakeSignal::default());
+    let calendar_wake = Arc::new(HashWakeSignal::default());
+    let calendar_wake_for_root = calendar_wake.clone();
+    let calendar_slot_for_root = calendar_slot.clone();
+    let calendar_start = {
+        let slot = calendar_slot.clone(); let wake = calendar_wake.clone(); let root = app_data_root.clone();
+        std::thread::spawn(move || {
+            let notify = wake.clone();
+            let owner = multi_launcher::plugins::calendar::CheckedCalendarOwner::start(&root, Arc::new(move || notify.notify())).map_err(|error| error.to_string());
+            *slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(owner);
+            wake.notify();
+        })
+    };
     let todo_wake_for_root = todo_wake.clone();
     let todo_slot_for_root = todo_slot.clone();
     let todo_start = {
@@ -13718,6 +13760,10 @@ pub(crate) fn run_foundation_window(
                 todo_view: None,
                 todo_owner: todo_slot_for_root.clone(),
                 todo_wake: todo_wake_for_root.clone(),
+                calendar_view: None,
+                calendar_owner: calendar_slot_for_root.clone(),
+                calendar_wake: calendar_wake_for_root.clone(),
+                calendar_results: calendar_results::Owner::default(),
                 gesture_editor: None,
                 gesture_owner: gesture_owner_for_run.clone(),
                 gesture_wake: gesture_wake_for_run.clone(),
@@ -13781,7 +13827,7 @@ pub(crate) fn run_foundation_window(
                 })
             });
             appearance_subscription_sink.borrow_mut().push(sheet_subscription);
-            root.update(cx, |root, cx| { root.start_omni_watch(cx); root.rebuild_omni_catalog(cx); root.start_application_index(cx); root.start_notes_owner(cx); root.start_todo_wake(cx); });
+            root.update(cx, |root, cx| { root.start_omni_watch(cx); root.rebuild_omni_catalog(cx); root.start_application_index(cx); root.start_notes_owner(cx); root.start_todo_wake(cx); root.start_calendar_wake(cx); });
             #[cfg(windows)]
             {
                 let keypad_subscription = root.update(cx, |_, cx| {
@@ -13922,6 +13968,12 @@ pub(crate) fn run_foundation_window(
                         match event {
                             InputEvent::Change => {
                                 let query_text = query.read(cx).value().to_string();
+                                if root.calendar_results.accept_change(&query_text, root.launcher_results.generation) {
+                                    root.query_history.synchronize(&query_text);
+                                    cx.notify();
+                                    return;
+                                }
+                                root.calendar_results.retire();
                                 root.launcher_search_error = None;
                                 root.query_history.synchronize(&query_text);
                                 root.search_completion
@@ -14799,6 +14851,13 @@ pub(crate) fn run_foundation_window(
                                 if let Some(view) = root.activity_view.clone().filter(|view| view.read(cx).open) {
                                     view.update(cx, |view, cx| view.resume(cx));
                                 }
+                                if root.calendar_results.invalidate_source() {
+                                    let current = root.query.read(cx).value().to_string();
+                                    let layout = root.search_catalog.resolve_result_layout(&current, root.enabled_plugins.as_ref());
+                                    root.launcher_results.replace(current, Vec::new(), layout, root.search_catalog.page_jump);
+                                    root.fresh_search_enter = None;
+                                    root.launcher_results_scroll = ScrollHandle::new();
+                                }
                                 let query = root.query.read(cx).value().to_string();
                                 if (window_search::query_is_windows(&query)
                                     && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
@@ -15174,6 +15233,9 @@ pub(crate) fn run_foundation_window(
 
     restart_admission.fence();
     todo_wake.close();
+    calendar_wake.close();
+    let _ = calendar_start.join();
+    if let Some(Ok(owner)) = calendar_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() { owner.shutdown(); }
     let _ = todo_start.join();
     if let Some(Ok(owner)) = todo_slot.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
         owner.shutdown();
@@ -17468,9 +17530,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "todo", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "calendar", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "todo", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "todo", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["MultiManager", "activity", "base_convert", "calculator", "calendar", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "mouse_gestures", "notes", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "timer", "todo", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()

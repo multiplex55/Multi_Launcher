@@ -1,5 +1,7 @@
 //! Calendar data models and utilities.
 mod inbox_reminders;
+mod checked;
+pub use checked::{CheckedCalendarOwner, CheckedCalendarSnapshot};
 pub(crate) use inbox_reminders::{CalendarInboxReminders, related_inbox_calendar_occurrence};
 use crate::actions::Action;
 use crate::common::entity_ref::{EntityKind, EntityRef};
@@ -255,7 +257,19 @@ pub fn load_events(path: &str) -> anyhow::Result<Vec<CalendarEvent>> {
 pub fn load_events_typed(
     path: impl AsRef<Path>,
 ) -> Result<LoadState<Vec<CalendarEvent>>, PersistenceError> {
-    load_json(path)
+    load_events_with_bytes(path.as_ref()).map(|(events, _)| events)
+}
+
+fn load_events_with_bytes(path: &Path) -> Result<(LoadState<Vec<CalendarEvent>>, Option<Vec<u8>>), PersistenceError> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(source) if source.kind() == std::io::ErrorKind::NotFound => return Ok((LoadState::Missing, None)),
+        Err(source) => return Err(PersistenceError::Read { path: path.to_path_buf(), source }),
+    };
+    let events = if bytes.iter().all(u8::is_ascii_whitespace) { LoadState::Empty } else {
+        LoadState::Loaded(serde_json::from_slice(&bytes).map_err(|source| PersistenceError::MalformedJson { path: path.to_path_buf(), source })?)
+    };
+    Ok((events, Some(bytes)))
 }
 
 fn load_events_unlocked(path: &str) -> Result<Vec<CalendarEvent>, PersistenceError> {
@@ -1079,9 +1093,14 @@ pub(crate) fn snooze_event_at(path: &str, event_id: &str, duration: Duration) ->
 
 pub fn search_events(request: &CalendarSearchRequest) -> Vec<CalendarEvent> {
     let data = CALENDAR_DATA.read().map(|d| d.clone()).unwrap_or_default();
+    search_events_in(&data, request)
+}
+
+/// Stock search over an already-owned immutable event snapshot.
+pub fn search_events_in(data: &[CalendarEvent], request: &CalendarSearchRequest) -> Vec<CalendarEvent> {
     let query = request.query.to_lowercase();
     let mut results: Vec<CalendarEvent> = data
-        .into_iter()
+        .iter()
         .filter(|event| {
             if let Some(after) = request.after
                 && event.start.date() < after
@@ -1108,7 +1127,7 @@ pub fn search_events(request: &CalendarSearchRequest) -> Vec<CalendarEvent> {
             let notes = event.notes.as_deref().unwrap_or("").to_lowercase();
             title.contains(&query) || notes.contains(&query)
         })
-        .collect();
+        .cloned().collect();
     results.sort_by_key(|event| event.start);
     results
 }

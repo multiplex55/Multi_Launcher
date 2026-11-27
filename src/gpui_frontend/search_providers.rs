@@ -14,6 +14,17 @@ pub(super) struct CalculatorMetadata(multi_launcher::plugins_builtin::Calculator
 
 pub(super) struct MultiManagerBare;
 pub(super) struct TimerBare;
+pub(super) struct CalendarBare;
+impl multi_launcher::plugin::Plugin for CalendarBare {
+    fn name(&self) -> &str { "calendar" }
+    fn description(&self) -> &str { "View the calendar" }
+    fn capabilities(&self) -> &[&str] { &["search"] }
+    fn query_prefixes(&self) -> &[&str] { &["cal"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        if !query.trim().eq_ignore_ascii_case("cal") { return Vec::new(); }
+        multi_launcher::plugin::Plugin::search(&multi_launcher::plugins::calendar::CalendarPlugin, query)
+    }
+}
 pub(super) struct TodoViewBare;
 impl multi_launcher::plugin::Plugin for TodoViewBare {
     fn name(&self) -> &str { "todo" }
@@ -340,6 +351,7 @@ pub(super) struct InstalledLauncherProviders {
     xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
     regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
     timer: TimerBare,
+    calendar: CalendarBare,
     todo_view: TodoViewBare,
     mouse_gestures: MouseGestureEdit,
     clipboard: ClipboardBare,
@@ -443,6 +455,7 @@ impl InstalledLauncherProviders {
             xml_toolkit: multi_launcher::plugins::xml_toolkit::XmlToolkitPlugin,
             regex_tester: multi_launcher::plugins::regex_tester::RegexTesterPlugin,
             timer: TimerBare,
+            calendar: CalendarBare,
             todo_view: TodoViewBare,
             mouse_gestures: MouseGestureEdit,
             clipboard: ClipboardBare,
@@ -494,6 +507,7 @@ impl InstalledLauncherProviders {
             Some(&self.xml_toolkit as &dyn multi_launcher::plugin::Plugin),
             Some(&self.regex_tester as &dyn multi_launcher::plugin::Plugin),
             Some(&self.timer as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.calendar as &dyn multi_launcher::plugin::Plugin),
             Some(&self.todo_view as &dyn multi_launcher::plugin::Plugin),
             Some(&self.mouse_gestures as &dyn multi_launcher::plugin::Plugin),
             Some(&self.clipboard as &dyn multi_launcher::plugin::Plugin),
