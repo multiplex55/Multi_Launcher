@@ -25,7 +25,7 @@ Priority values encode user tier and preferred order, for example P0.02. For an 
 | Folder Search and management | `folders` | G05/G06 | P0.03 | 2 → 3 | Watched Search, checked open, canonical Add, Set Alias and reviewed Remove | Matched native authoring and same-store readback | [S](#evidence-keys) | Matched Search/open only | Shared Search and typed dispatch · Canonical stores and Settings | Path Repair and original secondary criteria | [S](#evidence-keys) |
 | File Search and Preview | `file_search` | G07 | P1.04 | 2 → 3 | Filename, Content, preview and checked file actions | Common form/menus, matched host/Preview/clipboard | [F](#evidence-keys) | Matched primary routes, newer replay open | Shared file search and Preview | Later original secondary criteria | [F](#evidence-keys) |
 | Diff | `diff` | G08 | P2.05 | 1 → 2–3 | — | Text and file comparison workspace | — | — | Stock Diff engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
-| Omni Search | `omni_search` | G05 | P0.06 | 1 → 3 | — | Checked combined app, folder and bookmark provenance | — | — | Shared Search and typed dispatch | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| Omni Search | `omni_search` | G05 | P0.06 | 2 → 3 | Checked saved and indexed apps, Folder and Bookmark results | Matched native replay, Notes, Todo and Calendar sources and the category editor | [Omni checkpoint](CHECKPOINTS.md#p006-checked-omni-search) | Queued | Shared Search and typed dispatch | Original secondary criteria | [Omni checkpoint](CHECKPOINTS.md#p006-checked-omni-search) |
 | System commands | `system` | G24 | P3.10 | 1 → 2 | — | Typed safe system routes and confirmations | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Process Search | `processes` | G24 | P3.10 | 1 → 2 | — | Current process inventory and authority | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | System Information | `sysinfo` | G24 | P3.10 | 1 → 2 | — | System information workspace | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
@@ -140,7 +140,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 | P0.03 Folders and aliases | folders | G05/G06 | 2 → 3 | Folder store and Explorer | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.04 Bookmarks and aliases | bookmarks | G05/G06 | 2 → 3 | Bookmark store and checked URL open | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.05 Windows Explorer drag-and-drop | — | G01/G05/G06 | 2 → 3 | Checked OLE ExternalPaths receiver, canonical Folder writes and Add App staging. Cross-window native replay pending. | [Explorer drop](CHECKPOINTS.md#p005-native-explorer-drop) |
-| P0.06 Omni Search | omni_search | G05 | 1 → 3 | Combined Search with source provenance | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.06 Omni Search | omni_search | G05 | 2 → 3 | Checked combined Search and activation for apps, Folders and Bookmarks. Native replay and other categories are open. | [Omni checkpoint](CHECKPOINTS.md#p006-checked-omni-search) |
 | P0.07 Clipboard Modify | clipboard_modify | G13 | 2 → 3 | Canonical pipelines and acquired clipboard effects | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.08 Clipboard Snippets | snippets | G13 | 2 → 3 | Canonical watched store and prompt | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.09 Notes, Quick Notes and Markdown | notes, markdown_studio | G12 | 1 → 3 | Canonical document store and dirty-state ownership | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
@@ -173,11 +173,11 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 
 Count built-in rows once by registration identifier. Report Stage 1–5 separately, real GPUI functionality, Search admission only, and unstarted routes. Report P0 workflow readiness separately using its 19-row register. For tier counts, use built-in rows plus separately identified non-plugin workflow rows, tallying those two denominators explicitly where overlapping workflows would otherwise be double counted. A target met means the listed interim stage passed with applicable evidence. Pending means no active implementation, and blocked requires a concrete dependency. Original GUI and acceptance counts stay in [Progress](PROGRESS.md) and the [parity matrix](PARITY_MATRIX.md).
 
-Windows baseline on 2026-11-26 after the active G10 checkpoint. **91 built-ins**, with **61 Stage 1, 23 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **30** have real GPUI functionality within the stated route. **0** have Search admission alone. **61** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **10 at Stage 2** and **3 at Stage 3 or higher**.
+Windows snapshot after P0.06 Omni Search. **91 built-ins**, with **60 Stage 1, 24 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **31** have real GPUI functionality within the stated route. **0** have Search admission alone. **60** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **11 at Stage 2** and **3 at Stage 3 or higher**.
 
 | Priority tier · built-ins only | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 | 21 | 2 | 11 | 8 | 0 |
+| P0 | 21 | 2 | 12 | 7 | 0 |
 | P1 | 16 | 4 | 6 | 6 | 0 |
 | P2 | 27 | 5 | 0 | 22 | 0 |
 | P3 | 25 | 1 | 0 | 24 | 0 |
@@ -187,7 +187,7 @@ The P2 interim floor is Stage 2. P4's existing functional Clipboard History is p
 
 | Priority tier · separate workflow view | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 · readiness workflows | 19 | 3 | 10 | 6 | 0 |
+| P0 · readiness workflows | 19 | 3 | 11 | 5 | 0 |
 | P1 · Dashboard, useful widgets and File Preview | 4 | 0 | 1 | 3 | 0 |
 | P2 · represented by its built-ins | 0 | 0 | 0 | 0 | 0 |
 | P3 · other workspace and companion groups above | 5 | 0 | 0 | 5 | 0 |

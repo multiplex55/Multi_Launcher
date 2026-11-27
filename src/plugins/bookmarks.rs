@@ -89,6 +89,15 @@ impl BookmarksPlugin {
     }
 
     fn new_for_path(path: &str) -> Self {
+        Self::new_for_path_with_wake(path, None)
+    }
+
+    /// Reuse the canonical watcher while notifying a retained frontend of valid reloads.
+    pub fn new_with_wake(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self::new_for_path_with_wake(BOOKMARKS_FILE, Some(wake))
+    }
+
+    fn new_for_path_with_wake(path: &str, wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
         let data = {
             let _transaction = bookmarks_transaction_guard();
             let startup = match load_bookmarks(path) {
@@ -115,8 +124,10 @@ impl BookmarksPlugin {
             let path = path.clone();
             let cache_clone = cache.clone();
             move || {
-                if let Err(error) = reload_bookmark_snapshot(&path, &data_clone, &cache_clone) {
-                    tracing::error!(%error, "invalid bookmark reload retained last-good state");
+                match reload_bookmark_snapshot(&path, &data_clone, &cache_clone) {
+                    Ok(true) => { if let Some(wake) = &wake { wake(); } }
+                    Ok(false) => {}
+                    Err(error) => tracing::error!(%error, "invalid bookmark reload retained last-good state"),
                 }
             }
         })
@@ -529,7 +540,7 @@ fn reload_bookmark_snapshot(
     path: &str,
     data: &Arc<Mutex<Vec<BookmarkEntry>>>,
     cache: &Arc<Mutex<LruCache<String, Vec<Action>>>>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let _transaction = bookmarks_transaction_guard();
     let bookmarks = match load_bookmarks_typed(path)? {
         LoadState::Missing => {
@@ -540,7 +551,7 @@ fn reload_bookmark_snapshot(
     };
     if let Ok(mut cache) = cache.lock() {
         if let Ok(mut current) = data.lock() {
-            if *current == bookmarks { return Ok(()); }
+            if *current == bookmarks { return Ok(false); }
             *current = bookmarks;
         }
         BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
@@ -549,7 +560,7 @@ fn reload_bookmark_snapshot(
         if let Ok(mut current) = data.lock() { *current = bookmarks; }
         BOOKMARK_CACHE_EPOCH.fetch_add(1, Ordering::AcqRel);
     }
-    Ok(())
+    Ok(true)
 }
 
 impl Default for BookmarksPlugin {
@@ -1017,7 +1028,8 @@ mod tests {
 
         let recovered = vec![bookmark("https://recovered.example", Some("Recovered"))];
         std::fs::write(&path, serde_json::to_vec_pretty(&recovered).unwrap()).unwrap();
-        reload_bookmark_snapshot(path.to_str().unwrap(), &data, &cache).unwrap();
+        assert!(reload_bookmark_snapshot(path.to_str().unwrap(), &data, &cache).unwrap());
+        assert!(!reload_bookmark_snapshot(path.to_str().unwrap(), &data, &cache).unwrap());
         assert_eq!(*data.lock().unwrap(), recovered);
     }
 

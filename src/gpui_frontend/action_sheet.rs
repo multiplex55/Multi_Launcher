@@ -54,6 +54,7 @@ fn primary_allowed(
     let saved_shortcut = false;
     candidate == &result.action
         && (parse_installed_search_invocation(candidate.clone(), ActivationSource::Enter).is_ok()
+            || matches!(&result.origin, LauncherResultOrigin::Omni(source) if super::omni_search::supported_child(source, candidate))
             || result.saved_external().is_some()
             || saved_shortcut
             || result.saved_document().is_some()
@@ -299,6 +300,7 @@ impl RootWindow {
         let root = cx.entity().downgrade();
         let first = Cell::new(true);
         self.external_launch.retire_focus_bound_effects();
+        self.external_launch.retire_omni();
         window.open_dialog(cx, move |dialog, window, cx| {
             if first.replace(false) {
                 filter.focus_handle(cx).focus(window, cx);

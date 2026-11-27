@@ -466,6 +466,15 @@ impl FoldersPlugin {
     }
 
     fn new_for_path(path: &str) -> Self {
+        Self::new_for_path_with_wake(path, None)
+    }
+
+    /// Reuse the canonical watcher while notifying a retained frontend of valid reloads.
+    pub fn new_with_wake(wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        Self::new_for_path_with_wake(FOLDERS_FILE, Some(wake))
+    }
+
+    fn new_for_path_with_wake(path: &str, wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
         let data = {
             let _transaction = folders_transaction_guard();
             let startup = match load_folders(path) {
@@ -482,8 +491,10 @@ impl FoldersPlugin {
         let watcher = watch_json(&path, {
             let path = path.clone();
             move || {
-                if let Err(error) = reload_folder_snapshot(&path, &data_clone) {
-                    tracing::error!(%error, "invalid folder reload retained last-good state");
+                match reload_folder_snapshot(&path, &data_clone) {
+                    Ok(true) => { if let Some(wake) = &wake { wake(); } }
+                    Ok(false) => {}
+                    Err(error) => tracing::error!(%error, "invalid folder reload retained last-good state"),
                 }
             }
         })
@@ -605,7 +616,7 @@ pub(crate) fn query_folder_entries(query: &str, entries: &[FolderEntry]) -> Vec<
     )
 }
 
-fn reload_folder_snapshot(path: &str, data: &Arc<Mutex<Vec<FolderEntry>>>) -> anyhow::Result<()> {
+fn reload_folder_snapshot(path: &str, data: &Arc<Mutex<Vec<FolderEntry>>>) -> anyhow::Result<bool> {
     let _transaction = folders_transaction_guard();
     let folders = match load_folders_typed_unfenced(path)? {
         LoadState::Missing => anyhow::bail!("folders file was removed; retaining last-good state"),
@@ -617,8 +628,9 @@ fn reload_folder_snapshot(path: &str, data: &Arc<Mutex<Vec<FolderEntry>>>) -> an
     {
         *current = folders;
         bump_folders_version();
+        return Ok(true);
     }
-    Ok(())
+    Ok(false)
 }
 
 impl Default for FoldersPlugin {
@@ -1057,7 +1069,8 @@ mod tests {
 
         let recovered = vec![folder("Recovered", "C:\\recovered", Some("Recovered"))];
         std::fs::write(&path, serde_json::to_vec_pretty(&recovered).unwrap()).unwrap();
-        reload_folder_snapshot(path.to_str().unwrap(), &data).unwrap();
+        assert!(reload_folder_snapshot(path.to_str().unwrap(), &data).unwrap());
+        assert!(!reload_folder_snapshot(path.to_str().unwrap(), &data).unwrap());
         assert_eq!(*data.lock().unwrap(), recovered);
     }
 

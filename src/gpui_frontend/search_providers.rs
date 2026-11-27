@@ -235,8 +235,14 @@ pub(super) struct InstalledLauncherProviders {
     unit_convert: multi_launcher::plugins::unit_convert::UnitConvertPlugin,
     #[cfg(windows)]
     downloads_triage: multi_launcher::plugins::downloads_triage::DownloadsTriagePlugin,
-    folders: Option<multi_launcher::plugins::folders::FoldersPlugin>,
-    bookmarks: Option<multi_launcher::plugins::bookmarks::BookmarksPlugin>,
+    folders: Option<Arc<multi_launcher::plugins::folders::FoldersPlugin>>,
+    bookmarks: Option<Arc<multi_launcher::plugins::bookmarks::BookmarksPlugin>>,
+    pub(super) omni: super::omni_search::Provider,
+    pub(super) omni_wake: Arc<super::HashWakeSignal>,
+}
+
+impl Drop for InstalledLauncherProviders {
+    fn drop(&mut self) { self.omni_wake.close(); }
 }
 
 impl InstalledLauncherProviders {
@@ -260,14 +266,18 @@ impl InstalledLauncherProviders {
     }
     #[cfg(not(test))]
     pub(super) fn new(enabled_plugins: Option<&HashSet<String>>) -> Self {
+        let wake = Arc::new(super::HashWakeSignal::default());
+        let folder_wake = wake.clone();
+        let bookmark_wake = wake.clone();
         Self::with_providers(
             enabled_plugins
-                .is_none_or(|enabled| enabled.contains("folders"))
-                .then(multi_launcher::plugins::folders::FoldersPlugin::new),
+                .is_none_or(|enabled| enabled.contains("folders") || enabled.contains("omni_search"))
+                .then(|| multi_launcher::plugins::folders::FoldersPlugin::new_with_wake(Arc::new(move || folder_wake.notify()))),
             enabled_plugins
-                .is_none_or(|enabled| enabled.contains("bookmarks"))
-                .then(multi_launcher::plugins::bookmarks::BookmarksPlugin::new),
+                .is_none_or(|enabled| enabled.contains("bookmarks") || enabled.contains("omni_search"))
+                .then(|| multi_launcher::plugins::bookmarks::BookmarksPlugin::new_with_wake(Arc::new(move || bookmark_wake.notify()))),
             enabled_plugins.is_none_or(|enabled| enabled.contains("favorites")),
+            wake,
         )
     }
 
@@ -275,8 +285,14 @@ impl InstalledLauncherProviders {
         folders: Option<multi_launcher::plugins::folders::FoldersPlugin>,
         bookmarks: Option<multi_launcher::plugins::bookmarks::BookmarksPlugin>,
         watch_favorites: bool,
+        omni_wake: Arc<super::HashWakeSignal>,
     ) -> Self {
+        let folders = folders.map(Arc::new);
+        let bookmarks = bookmarks.map(Arc::new);
+        let omni = super::omni_search::Provider::new(folders.clone(), bookmarks.clone());
         Self {
+            omni,
+            omni_wake,
             hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
             settings: multi_launcher::plugins::settings::SettingsPlugin,
             help: multi_launcher::plugins::help::HelpPlugin,
@@ -315,7 +331,7 @@ impl InstalledLauncherProviders {
 
     #[cfg(test)]
     pub(super) fn test_without_persisted_providers() -> Self {
-        Self::with_providers(None, None, false)
+        Self::with_providers(None, None, false, Arc::new(super::HashWakeSignal::default()))
     }
 
     pub(super) fn plugins<'a>(
@@ -323,6 +339,7 @@ impl InstalledLauncherProviders {
     ) -> impl Iterator<Item = &'a dyn multi_launcher::plugin::Plugin> {
         [
             Some(&self.hash_generator as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.omni as &dyn multi_launcher::plugin::Plugin),
             Some(&self.settings as &dyn multi_launcher::plugin::Plugin),
             Some(&self.help as &dyn multi_launcher::plugin::Plugin),
             Some(&self.favorites as &dyn multi_launcher::plugin::Plugin),
@@ -349,10 +366,10 @@ impl InstalledLauncherProviders {
             Some(&self.downloads_triage as &dyn multi_launcher::plugin::Plugin),
             self.folders
                 .as_ref()
-                .map(|p| p as &dyn multi_launcher::plugin::Plugin),
+                .map(|p| p.as_ref() as &dyn multi_launcher::plugin::Plugin),
             self.bookmarks
                 .as_ref()
-                .map(|p| p as &dyn multi_launcher::plugin::Plugin),
+                .map(|p| p.as_ref() as &dyn multi_launcher::plugin::Plugin),
         ]
         .into_iter()
         .flatten()
@@ -382,26 +399,26 @@ impl InstalledLauncherProviders {
 
     pub(super) fn bookmark_aliases(&self) -> Option<std::collections::HashMap<String, Option<String>>> {
         let bookmarks = self.bookmarks.as_ref()?;
-        let rows = multi_launcher::plugin::Plugin::search(bookmarks, "bm list");
+        let rows = multi_launcher::plugin::Plugin::search(bookmarks.as_ref(), "bm list");
         let targets = rows.iter().map(|row| row.action.as_str()).collect::<HashSet<_>>();
         Some(bookmarks.search_aliases_lc(&targets))
     }
     pub(super) fn bookmark_row_is_current(&self, query: &str, action: &Action, enabled: Option<&HashSet<String>>,
         caps: Option<&std::collections::HashMap<String, Vec<String>>>) -> bool {
-        self.bookmarks.as_ref().is_some_and(|provider| search_routed([provider as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
+        self.bookmarks.as_ref().is_some_and(|provider| search_routed([provider.as_ref() as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
             .iter().any(|(name, candidate)| name == "bookmarks" && candidate == action))
     }
 
     pub(super) fn folder_aliases(&self) -> Option<std::collections::HashMap<String, Option<String>>> {
         let folder = self.folders.as_ref()?;
-        let rows = multi_launcher::plugin::Plugin::search(folder, "f list");
+        let rows = multi_launcher::plugin::Plugin::search(folder.as_ref(), "f list");
         let targets = rows.iter().map(|row| row.action.as_str()).collect::<HashSet<_>>();
         Some(folder.search_aliases_lc(&targets))
     }
 
     pub(super) fn folder_row_is_current(&self, query: &str, action: &Action, enabled: Option<&HashSet<String>>,
         caps: Option<&std::collections::HashMap<String, Vec<String>>>) -> bool {
-        self.folders.as_ref().is_some_and(|provider| search_routed([provider as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
+        self.folders.as_ref().is_some_and(|provider| search_routed([provider.as_ref() as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
             .iter().any(|(name, candidate)| name == "folders" && candidate == action))
     }
 

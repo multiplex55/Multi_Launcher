@@ -1,5 +1,5 @@
 //! Single-flight ownership for ordinary external launcher actions.
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 use gpui_kit::{AppContext as _, Context, FocusHandle, Focusable as _, WeakEntity, Window, WindowId};
 use multi_launcher::actions::Action;
@@ -533,6 +533,7 @@ pub(super) enum DiagnosticKind {
 #[derive(Clone)]
 pub(super) enum RunCommand {
     External { command: ExternalCommand, association: Option<AssociationKind> },
+    Omni { command: ExternalCommand, target: OmniTarget, guard: OmniGuard },
     Indexed { command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority },
     Favorite(ExternalCommand),
     Copy(String),
@@ -561,6 +562,47 @@ pub(super) enum RunCommand {
         lease: Arc<std::sync::atomic::AtomicBool>,
     },
     Diagnostic { kind: DiagnosticKind, message: String },
+}
+
+#[derive(Clone)]
+pub(super) enum OmniTarget {
+    Saved(Option<AssociationKind>),
+    Indexed(super::indexed_applications::LaunchAuthority),
+    Folder,
+    Bookmark,
+}
+
+#[derive(Clone)]
+pub(super) struct OmniGuard {
+    pub catalog: Arc<AtomicBool>,
+    pub lease: Arc<AtomicBool>,
+    pub effect_entered: Arc<AtomicBool>,
+    pub visibility: super::RootVisibility,
+    pub revision: u64,
+    pub native: super::NativeWindow,
+    pub admission: Arc<super::RestartAdmission>,
+}
+impl OmniGuard {
+    fn current(&self) -> bool {
+        self.catalog.load(Ordering::Acquire) && self.lease.load(Ordering::Acquire)
+            && !self.admission.is_fenced()
+            && super::current_foreground_identity() == Some(self.native.identity)
+            && super::json_utility::native_host_current(&self.visibility, self.revision, Some(self.native), false)
+    }
+    fn effect_current(&self) -> bool {
+        claim_omni_effect(&self.effect_entered, || self.current())
+    }
+    fn receipt_current(&self) -> bool {
+        self.catalog.load(Ordering::Acquire) && self.lease.load(Ordering::Acquire)
+            && !self.admission.is_fenced()
+            && super::json_utility::native_host_current(&self.visibility, self.revision, Some(self.native), false)
+    }
+}
+
+fn claim_omni_effect(entered: &AtomicBool, current: impl FnOnce() -> bool) -> bool {
+    if !current() { return false; }
+    entered.store(true, Ordering::Release);
+    true
 }
 
 #[derive(Clone)]
@@ -596,6 +638,8 @@ struct Pending {
     clipboard_lease: Option<Arc<std::sync::atomic::AtomicBool>>,
     focus_guard: Option<gpui_kit::Subscription>,
     snippet_effect: bool,
+    omni_lease: Option<Arc<AtomicBool>>,
+    omni_effect_entered: Option<Arc<AtomicBool>>,
 }
 
 #[derive(Default)]
@@ -628,6 +672,18 @@ impl ExternalLaunch {
         if let Some(pending) = self.pending.as_ref().filter(|pending| pending.snippet_effect) {
             if let Some(lease) = &pending.clipboard_lease { lease.store(false, Ordering::Release); }
         }
+    }
+
+    pub(super) fn retire_omni(&self) {
+        if let Some(lease) = self.pending.as_ref().and_then(|pending| pending.omni_lease.as_ref()) {
+            lease.store(false, Ordering::Release);
+        }
+    }
+
+    pub(super) fn retire_omni_before_effect(&self) {
+        if let Some(pending) = &self.pending
+            && pending.omni_effect_entered.as_ref().is_some_and(|entered| !entered.load(Ordering::Acquire))
+            && let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
     }
 
     pub(super) fn set_snippet_preview_lease(&mut self, lease: Arc<std::sync::atomic::AtomicBool>) {
@@ -673,6 +729,8 @@ impl ExternalLaunch {
             clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
+            omni_lease: match &request.command { RunCommand::Omni { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_effect_entered: match &request.command { RunCommand::Omni { guard, .. } => Some(guard.effect_entered.clone()), _ => None },
         });
         Some(ticket)
     }
@@ -728,6 +786,63 @@ struct IndexedHost<'a> {
     authority: &'a super::indexed_applications::LaunchAuthority,
 }
 
+fn checked_indexed_effect(action: &Action, authority: &super::indexed_applications::LaunchAuthority,
+    current: impl Fn() -> bool, effect_current: impl Fn() -> bool) -> anyhow::Result<()> {
+    super::indexed_applications::checked_launch_with(
+        action, &authority.roots, || current() && authority.is_current(),
+        |target| multi_launcher::actions::exec::launch_with_identity_if_current(target, None, || authority.is_current() && effect_current()).map(|_| ()),
+        |path| {
+            #[cfg(windows)]
+            { multi_launcher::actions::exec::launch_shortcut_if_current(path, || authority.is_current() && effect_current()) }
+            #[cfg(not(windows))]
+            { let _ = path; anyhow::bail!("Indexed shortcuts require Windows") }
+        },
+        |path| multi_launcher::actions::exec::launch_association_if_current(path, || authority.is_current() && effect_current()),
+    )
+}
+
+struct OmniHost<'a> { host: &'a Host, target: &'a OmniTarget, guard: &'a OmniGuard }
+impl ExternalCommandHost for OmniHost<'_> {
+    fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
+        anyhow::ensure!(self.guard.current(), "Omni result is no longer current");
+        anyhow::ensure!(command.namespace.is_none() && command.target == action.action && command.args == action.args, "Invalid Omni target");
+        let current = || self.guard.current();
+        match self.target {
+            OmniTarget::Folder | OmniTarget::Bookmark => {
+                let kind = if matches!(self.target, OmniTarget::Folder) { AssociationKind::Folder } else { AssociationKind::Bookmark };
+                checked_association_with(kind, action, command, multi_launcher::plugins::folders::FOLDERS_FILE,
+                    multi_launcher::plugins::bookmarks::BOOKMARKS_FILE,
+                    |target| multi_launcher::actions::exec::launch_association_if_current(target, || {
+                        current() && match kind {
+                            AssociationKind::Folder => multi_launcher::plugins::folders::folder_search_result_is_current(multi_launcher::plugins::folders::FOLDERS_FILE, action).unwrap_or(false)
+                                && std::path::Path::new(target).is_dir(),
+                            AssociationKind::Bookmark => multi_launcher::plugins::bookmarks::bookmark_search_result_is_current(multi_launcher::plugins::bookmarks::BOOKMARKS_FILE, action).unwrap_or(false),
+                            _ => false,
+                        } && self.guard.effect_current()
+                    }))
+            }
+            OmniTarget::Indexed(authority) => checked_indexed_effect(action, authority, current, || self.guard.effect_current()),
+            OmniTarget::Saved(Some(AssociationKind::SavedFolder)) => super::saved_folder::checked_association_with(action, command,
+                |target| multi_launcher::actions::exec::launch_association_if_current(target, || self.guard.effect_current())),
+            OmniTarget::Saved(Some(AssociationKind::SavedDocument)) => checked_document_association_with(action, command,
+                |target| multi_launcher::actions::exec::launch_association_if_current(target, || self.guard.effect_current())),
+            OmniTarget::Saved(Some(AssociationKind::SavedUrl)) => checked_saved_url_with(action, command,
+                |target| multi_launcher::actions::exec::launch_association_if_current(target, || self.guard.effect_current())),
+            #[cfg(windows)]
+            OmniTarget::Saved(Some(AssociationKind::SavedShortcut)) => {
+                anyhow::ensure!(saved_shortcut(action).as_ref() == Some(command), "Invalid saved shortcut");
+                multi_launcher::actions::exec::launch_shortcut_if_current(&command.target, || self.guard.effect_current())
+            }
+            OmniTarget::Saved(None) => multi_launcher::actions::exec::launch_with_identity_if_current(
+                &command.target, command.args.as_deref(), || self.guard.effect_current()).map(|_| ()),
+            OmniTarget::Saved(Some(_)) => anyhow::bail!("Unsupported Omni target"),
+        }
+    }
+    fn external_clear_query_after_run(&self) -> bool { self.host.external_clear_query_after_run() }
+    fn external_hide_after_run(&self) -> bool { self.host.external_hide_after_run() }
+    fn external_launcher_should_refocus(&self) -> bool { self.host.external_launcher_should_refocus() }
+}
+
 struct FavoriteHost<'a> { host: &'a Host }
 impl ExternalCommandHost for FavoriteHost<'_> {
     fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
@@ -741,23 +856,7 @@ impl ExternalCommandHost for FavoriteHost<'_> {
 impl ExternalCommandHost for IndexedHost<'_> {
     fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
         anyhow::ensure!(command.namespace.is_none() && command.args.is_none() && command.target == action.action, "Invalid indexed application command");
-        super::indexed_applications::checked_launch_with(
-            action,
-            &self.authority.roots,
-            || self.authority.is_current(),
-            |target| multi_launcher::actions::exec::launch_with_identity_if_current(
-                target, None, || self.authority.is_current(),
-            ).map(|_| ()),
-            |path| {
-                #[cfg(windows)]
-                { multi_launcher::actions::exec::launch_shortcut_if_current(path, || self.authority.is_current()) }
-                #[cfg(not(windows))]
-                { let _ = path; anyhow::bail!("Indexed shortcuts require Windows") }
-            },
-            |path| multi_launcher::actions::exec::launch_association_if_current(
-                path, || self.authority.is_current(),
-            ),
-        )
+        checked_indexed_effect(action, self.authority, || true, || true)
     }
     fn external_clear_query_after_run(&self) -> bool { self.host.external_clear_query_after_run() }
     fn external_hide_after_run(&self) -> bool { self.host.external_hide_after_run() }
@@ -815,6 +914,9 @@ fn execute_request(
     match &request.command {
         RunCommand::External { command, .. } => CommandBus.dispatch_external(
             command, &request.action, request.source, None, host,
+        ),
+        RunCommand::Omni { command, target, guard } => CommandBus.dispatch_external(
+            command, &request.action, request.source, None, &mut OmniHost { host, target, guard },
         ),
         RunCommand::Indexed { command, authority } => {
             CommandBus.dispatch_external(command, &request.action, request.source, None,
@@ -943,7 +1045,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::Omni { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1381,6 +1483,11 @@ impl RootWindow {
         self.start_run(action, RunCommand::Copy(text), query, source, None, window, cx);
     }
 
+    pub(super) fn start_omni_launch(&mut self, action: Action, command: ExternalCommand, target: OmniTarget,
+        guard: OmniGuard, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_run(action, RunCommand::Omni { command, target, guard }, query, source, None, window, cx);
+    }
+
     fn start_run(
         &mut self,
         action: Action,
@@ -1430,6 +1537,18 @@ impl RootWindow {
             } else {
                 lease.store(false, Ordering::Release);
             }
+        }
+        if let RunCommand::Omni { guard, .. } = &request.command {
+            if let Some(focus) = window.focused(cx) {
+                let lease = guard.lease.clone();
+                let effect_entered = guard.effect_entered.clone();
+                let subscription = cx.on_blur(&focus, window, move |_, _, _| {
+                    if !effect_entered.load(Ordering::Acquire) { lease.store(false, Ordering::Release); }
+                });
+                if let Some(pending) = self.external_launch.pending.as_mut().filter(|pending| pending.ticket == ticket) {
+                    pending.focus_guard = Some(subscription);
+                }
+            } else { guard.lease.store(false, Ordering::Release); }
         }
         if matches!(&request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. }) {
             if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, cx| { view.retire_read_for_effect(); cx.notify(); }); }
@@ -1548,6 +1667,7 @@ impl RootWindow {
             RunCommand::ClipboardUndo(current, _) => current() && window.is_window_active(),
             RunCommand::ClipboardExecute { current, .. } => current() && window.is_window_active(),
             RunCommand::SnippetRun { current, .. } => current() && window.is_window_active(),
+            RunCommand::Omni { guard, .. } => guard.receipt_current(),
             _ => true,
         };
         let local_focus_owned = self.external_owner_is_current(receipt.stamp.focus.as_ref(), window, cx);
@@ -1872,6 +1992,26 @@ pub(super) fn bookkeep_bookmark(outcome: Result<CommandOutcome, CommandError>, a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omni_final_effect_rechecks_current_and_marks_only_entered_calls() {
+        let entered = AtomicBool::new(false);
+        let current = AtomicBool::new(true);
+        let calls = std::cell::Cell::new(0);
+        let run = |revoke: bool| {
+            if revoke { current.store(false, Ordering::Release); }
+            if claim_omni_effect(&entered, || current.load(Ordering::Acquire)) {
+                calls.set(calls.get() + 1);
+            }
+        };
+        run(true);
+        assert_eq!(calls.get(), 0);
+        assert!(!entered.load(Ordering::Acquire));
+        current.store(true, Ordering::Release);
+        run(false);
+        assert_eq!(calls.get(), 1);
+        assert!(entered.load(Ordering::Acquire));
+    }
 
     #[test]
     fn auxiliary_clipboard_reservation_is_exclusive_and_exactly_retired() {

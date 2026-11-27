@@ -4851,6 +4851,7 @@ fn main() -> anyhow::Result<()> {
             ),
             actions: actions_vec,
             calculator_settings: settings.plugin_settings.get("calculator").cloned(),
+            omni_settings: settings.plugin_settings.get("omni_search").cloned(),
             match_exact: settings.match_exact,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,

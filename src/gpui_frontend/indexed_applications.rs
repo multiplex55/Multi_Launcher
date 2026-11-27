@@ -230,6 +230,10 @@ pub(super) fn row_matches(action: &Action, roots: &[std::path::PathBuf]) -> bool
         .any(|root| root_contains(root, std::path::Path::new(target.dos)))
 }
 
+pub(super) fn supported_shape(action: &Action) -> bool {
+    action.args.is_none() && action.action == action.desc && ordinary_target(&action.action).is_some()
+}
+
 #[cfg(windows)]
 pub(super) fn checked_launch_with(
     action: &Action,
@@ -432,7 +436,9 @@ impl RootWindow {
                 };
                 if config != root.search_catalog.index_config {
                     root.indexed_applications.revoke_snapshot();
+                    root.omni_search.retire();
                     root.search_catalog.clear_index();
+                    if !config.roots().is_empty() { root.rebuild_omni_catalog(cx); }
                     root.search_catalog.index_config = config.clone();
                     if !config.roots().is_empty() {
                         root.refresh_after_application_index(cx);
@@ -440,7 +446,9 @@ impl RootWindow {
                 }
                 if config.roots().is_empty() {
                     root.indexed_applications.revoke_snapshot();
+                    root.omni_search.retire();
                     root.search_catalog.clear_index();
+                    root.rebuild_omni_catalog(cx);
                     root.app_editor.set_index(epoch, Arc::new(Vec::new()));
                     root.indexed_applications.finish(epoch);
                     root.indexed_applications.status = Some("No index paths configured.".into());
@@ -505,11 +513,13 @@ impl RootWindow {
                         // Coordinator generations restart for each scan; the application epoch does not.
                         snapshot.generation = epoch;
                         root.indexed_applications.revoke_snapshot();
+                        root.omni_search.retire();
                         let identity = root.search_catalog.install_index(snapshot);
                         let count = identity.raw_actions.len();
                         root.app_editor
                             .set_index(identity.generation, identity.raw_actions.clone());
                         root.indexed_applications.snapshot = Some(identity);
+                        root.rebuild_omni_catalog(cx);
                         root.indexed_applications.status = Some(format!("Indexed {count} items."));
                         root.refresh_after_application_index(cx);
                     }

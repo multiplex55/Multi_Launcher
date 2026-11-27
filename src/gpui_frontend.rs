@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::mpsc::{Receiver, Sender, channel};
 mod action_sheet;
 mod folder_authoring;
+mod omni_search;
 mod external_drop;
 mod bookmark_authoring;
 mod activity;
@@ -203,6 +204,7 @@ pub(crate) struct LauncherSearchStartup {
     pub index_config: multi_launcher::indexer::coordinator::IndexConfig,
     pub branding: launcher_header::Branding,
     pub calculator_settings: Option<serde_json::Value>,
+    pub omni_settings: Option<serde_json::Value>,
     pub match_exact: bool,
     pub fuzzy_weight: f32,
     pub usage_weight: f32,
@@ -222,6 +224,7 @@ pub(crate) struct LauncherSearchStartup {
 enum LauncherResultOrigin {
     Saved,
     Indexed { generation: u64, index: usize },
+    Omni(multi_launcher::plugins::omni_search::OmniSource),
     CachedCommand,
     Provider(String),
 }
@@ -273,7 +276,7 @@ struct LauncherSearchCatalog {
     calculator_settings: Option<serde_json::Value>,
     command_help_providers: Arc<[CommandHelpProvider]>,
     quick_help_providers: Arc<[QuickHelpProvider]>,
-    actions: Vec<Action>,
+    actions: Arc<Vec<Action>>,
     saved_count: usize,
     index_config: multi_launcher::indexer::coordinator::IndexConfig,
     index_generation: Option<u64>,
@@ -313,6 +316,7 @@ impl LauncherSearchCatalog {
         let providers = InstalledLauncherProviders::new(enabled_plugins);
         #[cfg(test)]
         let providers = InstalledLauncherProviders::test_without_persisted_providers();
+        providers.omni.configure(startup.omni_settings.as_ref());
         // Installed command labels and completion fallbacks follow plugin
         // enablement. Search capability gates provider rows at query time.
         let commands = providers.cached_commands(enabled_plugins);
@@ -341,7 +345,7 @@ impl LauncherSearchCatalog {
             calculator_settings: startup.calculator_settings,
             command_help_providers,
             quick_help_providers,
-            actions,
+            actions: Arc::new(actions),
             saved_count,
             index_config: startup.index_config,
             index_generation: None,
@@ -366,19 +370,31 @@ impl LauncherSearchCatalog {
         }
     }
 
+    #[cfg(test)]
     fn replace_saved_actions(&mut self, rows: Vec<Action>, verified_folders: Vec<Action>) -> bool {
+        self.replace_saved_actions_with(rows, verified_folders, || {})
+    }
+
+    fn replace_saved_actions_with(&mut self, rows: Vec<Action>, verified_folders: Vec<Action>, before_change: impl FnOnce()) -> bool {
         let saved = supported_saved_search_actions(rows, &verified_folders);
         if self.actions[..self.saved_count] == saved && self.verified_folders == verified_folders {
             return false;
         }
-        let indexed = self.actions.split_off(self.saved_count);
+        before_change();
+        self.providers.omni.install(None);
+        let old = std::mem::take(&mut self.actions);
+        let indexed = match Arc::try_unwrap(old) {
+            Ok(mut old) => old.split_off(self.saved_count),
+            Err(old) => old[self.saved_count..].to_vec(),
+        };
         let indexed_cached = self.cached_entries.split_off(self.saved_count);
         let indexed_metadata = self.filter_metadata.split_off(self.saved_count);
         self.cached_entries = saved.iter().map(CachedSearchEntry::from_action).collect();
         self.filter_metadata = saved.iter().map(ActionFilterMetadata::from_action).collect();
         self.saved_count = saved.len();
-        self.actions = saved;
-        self.actions.extend(indexed);
+        let mut combined = saved;
+        combined.extend(indexed);
+        self.actions = Arc::new(combined);
         self.cached_entries.extend(indexed_cached);
         self.filter_metadata.extend(indexed_metadata);
         self.completion_index = multi_launcher::completion::build_index(
@@ -389,7 +405,15 @@ impl LauncherSearchCatalog {
     }
 
     fn clear_index(&mut self) {
-        self.actions.truncate(self.saved_count);
+        if self.actions.len() != self.saved_count || self.index_generation.is_some() {
+            self.providers.omni.install(None);
+            let old = std::mem::take(&mut self.actions);
+            let saved = match Arc::try_unwrap(old) {
+                Ok(mut old) => { old.truncate(self.saved_count); old }
+                Err(old) => old[..self.saved_count].to_vec(),
+            };
+            self.actions = Arc::new(saved);
+        }
         self.cached_entries.truncate(self.saved_count);
         self.filter_metadata.truncate(self.saved_count);
         self.index_generation = None;
@@ -397,10 +421,16 @@ impl LauncherSearchCatalog {
     }
 
     fn install_index(&mut self, snapshot: indexed_applications::Snapshot) -> indexed_applications::Identity {
-        self.actions.truncate(self.saved_count);
+        self.providers.omni.install(None);
+        let old = std::mem::take(&mut self.actions);
+        let mut saved = match Arc::try_unwrap(old) {
+            Ok(mut old) => { old.truncate(self.saved_count); old }
+            Err(old) => old[..self.saved_count].to_vec(),
+        };
         self.cached_entries.truncate(self.saved_count);
         self.filter_metadata.truncate(self.saved_count);
-        self.actions.extend(snapshot.actions);
+        saved.extend(snapshot.actions);
+        self.actions = Arc::new(saved);
         self.cached_entries.extend(snapshot.cached);
         self.filter_metadata.extend(snapshot.metadata);
         self.index_generation = Some(snapshot.generation);
@@ -500,7 +530,7 @@ impl LauncherSearchCatalog {
                 provider_actions
                     .iter()
                     .filter(|(provider, _)| {
-                        external_launch::AssociationKind::from_provider_name(provider).is_some()
+                        external_launch::AssociationKind::from_provider_name(provider).is_some() || provider == "omni_search"
                     })
                     .map(|(_, action)| action.action.as_str())
                     .collect()
@@ -516,9 +546,13 @@ impl LauncherSearchCatalog {
         let bookmark_aliases = bookmark_aliases
             .as_ref()
             .unwrap_or(&self.bookmark_aliases_lc);
+        let omni_projection = self.providers.omni.projection(raw_query);
         let mut scored_provider_actions = provider_actions
             .into_iter()
             .filter_map(|(provider, action)| {
+                let omni_source = (provider == "omni_search")
+                    .then(|| omni_projection.as_ref().and_then(|projection| projection.source_for(&action))).flatten();
+                if provider == "omni_search" && omni_source.is_none() { return None; }
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
                 let unit_result = unit_convert_search::classify(&provider, &action).is_some();
@@ -535,7 +569,7 @@ impl LauncherSearchCatalog {
                 let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || settings_result || clipboard_modify_result || folder_command || bookmark_command || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -555,7 +589,8 @@ impl LauncherSearchCatalog {
                 } else {
                     0.0
                 };
-                Some((action, score, LauncherResultOrigin::Provider(provider)))
+                let origin = omni_source.map(LauncherResultOrigin::Omni).unwrap_or(LauncherResultOrigin::Provider(provider));
+                Some((action, score, origin))
             })
             .collect::<Vec<_>>();
         scored_provider_actions.extend(
@@ -2335,6 +2370,7 @@ struct RootWindow {
     settings_panel_scroll: ScrollHandle,
     settings_actions: Option<Entity<settings_actions::ActionsSettings>>,
     app_editor: add_action::AppEditorState,
+    omni_search: omni_search::Owner,
     folder_authoring: folder_authoring::State,
     external_drop: external_drop::State,
     bookmark_authoring: bookmark_authoring::State,
@@ -4866,6 +4902,7 @@ impl RootWindow {
     ) {
         if open {
             self.external_launch.retire_focus_bound_effects();
+            self.external_launch.retire_omni();
             self.app_editor.revoke_picker_prelaunch();
             self.folder_authoring.revoke();
             self.bookmark_authoring.revoke();
@@ -5917,6 +5954,7 @@ impl RootWindow {
 
     fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.external_launch.retire_focus_bound_effects();
+        self.external_launch.retire_omni();
         self.app_editor.revoke_picker_prelaunch();
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
@@ -6082,6 +6120,7 @@ impl RootWindow {
         self.snippets_search.wake.close();
         self.window_search.retire();
         self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
+        self.omni_search.retire(); self.search_catalog.providers.omni.install(None);
         self.indexed_applications.retire();
         self.retire_search_jump_mode();
         self.drain_file_search_geometry(cx, true);
@@ -6997,6 +7036,7 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
+        self.external_launch.retire_omni();
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
         if !external_drop::same_query_projection(&self.launcher_results.query, &query) { self.external_drop.revoke(); }
@@ -7064,6 +7104,7 @@ impl RootWindow {
 
     fn publish_launcher_provider_results(&mut self, query: String, raw_provider_actions: Vec<(String, Action)>, scroll_to_search: bool) {
         let raw_provider_results_empty = raw_provider_actions.is_empty();
+        let omni_projection = self.search_catalog.providers.omni.projection(&query);
         let provider_actions = raw_provider_actions
             .into_iter()
             .filter(|(provider, action)| {
@@ -7101,6 +7142,8 @@ impl RootWindow {
                     favorite_search::is_executable(action) || is_supported_launcher_search_action(action)
                 } else if provider == "bookmarks" && matches!(parse_action(action), Ok(Command::Storage(StorageCommand::BookmarkDialog | StorageCommand::BookmarkAdd(_) | StorageCommand::BookmarkRemove(_)))) {
                     self.search_catalog.providers.bookmark_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                } else if provider == "omni_search" {
+                    omni_projection.as_ref().and_then(|projection| projection.source_for(action)).is_some_and(|source| omni_search::supported_child(&source, action))
                 } else if provider == "folders" && matches!(parse_action(action), Ok(Command::Storage(StorageCommand::FolderAdd(_) | StorageCommand::FolderRemove(_)))) {
                     self.search_catalog.providers.folder_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if external_launch::AssociationKind::from_provider_name(provider).is_some() {
@@ -7159,7 +7202,9 @@ impl RootWindow {
     }
 
     fn publish_saved_search_actions(&mut self, rows: Vec<Action>, verified_folders: Vec<Action>, cx: &mut Context<Self>) -> bool {
-        if self.search_catalog.replace_saved_actions(rows, verified_folders) {
+        let omni = &mut self.omni_search;
+        if self.search_catalog.replace_saved_actions_with(rows, verified_folders, || omni.retire()) {
+            self.rebuild_omni_catalog(cx);
             let query = self.query.read(cx).value().to_string();
             self.search_completion.reset_for_query(&self.search_catalog, &query);
             self.refresh_launcher_results_with_viewport(query, false, cx);
@@ -7595,6 +7640,7 @@ impl RootWindow {
             return;
         }
         self.external_launch.retire_focus_bound_effects();
+        self.external_launch.retire_omni();
         self.app_editor.revoke_picker_prelaunch();
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
@@ -7872,6 +7918,10 @@ impl RootWindow {
             return;
         };
         if !self.launcher_result_activation_is_live(origin, window, cx) {
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Omni(_)) {
+            self.activate_omni(&result, query, source, window, cx);
             return;
         }
         if result.action.action == "settings:search" {
@@ -10321,6 +10371,7 @@ impl RootWindow {
         if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         self.window_search.retire();
         self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
+        self.omni_search.retire(); self.search_catalog.providers.omni.install(None);
         self.indexed_applications.retire();
         self.hash_docked_resize.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         self.drain_hash_native_geometry(cx, true);
@@ -11012,6 +11063,7 @@ impl Render for RootWindow {
             }))
             .capture_any_mouse_down(cx.listener(|root, _, window, cx| {
                 root.external_launch.retire_focus_bound_effects();
+                root.external_launch.retire_omni();
                 root.app_editor.revoke_picker_prelaunch();
                 root.folder_authoring.revoke();
                 root.bookmark_authoring.revoke();
@@ -13133,6 +13185,7 @@ pub(crate) fn run_foundation_window(
                 settings_panel_scroll: ScrollHandle::new(),
                 settings_actions: None,
                 app_editor: add_action::AppEditorState::new(cx),
+                omni_search: omni_search::Owner::default(),
                 folder_authoring: folder_authoring::State::default(),
                 external_drop: external_drop::State::default(),
                 bookmark_authoring: bookmark_authoring::State::default(),
@@ -13286,7 +13339,7 @@ pub(crate) fn run_foundation_window(
                 })
             });
             appearance_subscription_sink.borrow_mut().push(sheet_subscription);
-            root.update(cx, |root, cx| root.start_application_index(cx));
+            root.update(cx, |root, cx| { root.start_omni_watch(cx); root.rebuild_omni_catalog(cx); root.start_application_index(cx); });
             #[cfg(windows)]
             {
                 let keypad_subscription = root.update(cx, |_, cx| {
@@ -13326,6 +13379,7 @@ pub(crate) fn run_foundation_window(
                                 if root.native_window.is_some_and(|native| native.identity.hwnd == receipt.hwnd)
                                     && root.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id()) {
                                     root.external_launch.retire_focus_bound_effects();
+                                    root.external_launch.retire_omni();
                                     root.app_editor.revoke_picker_prelaunch();
                                     root.folder_authoring.revoke();
                                     root.bookmark_authoring.revoke();
@@ -13589,6 +13643,7 @@ pub(crate) fn run_foundation_window(
                         }
                     } else {
                         root.external_launch.retire_focus_bound_effects();
+                        root.external_launch.retire_omni_before_effect();
                         root.app_editor.revoke_picker_prelaunch();
                         root.folder_authoring.revoke();
                         root.bookmark_authoring.revoke();
@@ -13645,6 +13700,7 @@ pub(crate) fn run_foundation_window(
                             root.retire_json_workspace(cx);
                             if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
                             root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
+                            root.omni_search.retire(); root.search_catalog.providers.omni.install(None);
                             root.indexed_applications.retire();
                         });
                         return true;
@@ -13679,6 +13735,7 @@ pub(crate) fn run_foundation_window(
                             root.retire_json_workspace(cx);
                             if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
                             root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
+                            root.omni_search.retire(); root.search_catalog.providers.omni.install(None);
                             root.indexed_applications.retire();
                         });
                         }
@@ -15477,6 +15534,7 @@ mod tests {
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 actions,
                 calculator_settings: None,
+                omni_settings: None,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -16145,7 +16203,7 @@ mod tests {
         completion.reset_for_query(&catalog, query);
         assert!(!catalog.replace_saved_actions(vec![unsupported.clone(), first.clone()], Vec::new()));
         assert!(catalog.replace_saved_actions(vec![second.clone(), unsupported, first.clone()], Vec::new()));
-        assert_eq!(catalog.actions, vec![second.clone(), first.clone()]);
+        assert_eq!(catalog.actions.as_slice(), &[second.clone(), first.clone()]);
         let mut results = LauncherSearchResults::default();
         results.replace_test_actions(
             query.into(),
@@ -16332,7 +16390,7 @@ mod tests {
             args: Some("--exact".into()),
         };
         let catalog = completion_catalog(vec![action.clone()], true, None);
-        assert_eq!(catalog.actions, vec![action.clone()]);
+        assert_eq!(catalog.actions.as_slice(), &[action.clone()]);
         assert!(supported_launcher_search_actions(vec![action]).is_empty());
     }
 
@@ -16346,6 +16404,7 @@ mod tests {
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 actions: Vec::new(),
                 calculator_settings: None,
+                omni_settings: None,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -16388,6 +16447,7 @@ mod tests {
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 actions: Vec::new(),
                 calculator_settings: None,
+                omni_settings: None,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -16541,6 +16601,7 @@ mod tests {
                 verified_folders: Vec::new(),
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
             calculator_settings: None,
+                omni_settings: None,
             actions: vec![settings_action.clone()],
             match_exact: true,
             fuzzy_weight: 0.25,
@@ -16559,7 +16620,7 @@ mod tests {
         let enabled = HashSet::from(["settings".to_owned()]);
         let search_enabled = HashMap::from([("settings".to_owned(), vec!["search".to_owned()])]);
         let enabled_catalog = LauncherSearchCatalog::new(startup(), Some(&enabled));
-        assert_eq!(enabled_catalog.actions, vec![settings_action.clone()]);
+        assert_eq!(enabled_catalog.actions.as_slice(), &[settings_action.clone()]);
         assert!(enabled_catalog.commands.iter().any(|action| {
             parse_installed_search_invocation(action.clone(), ActivationSource::Enter)
                 .is_ok_and(|invocation| matches!(invocation.route, InstalledSearchRoute::Settings))
@@ -16614,8 +16675,8 @@ mod tests {
         let capability_disabled_catalog =
             LauncherSearchCatalog::new(startup(), Some(&enabled));
         assert_eq!(
-            capability_disabled_catalog.actions,
-            vec![settings_action.clone()],
+            capability_disabled_catalog.actions.as_slice(),
+            &[settings_action.clone()],
             "explicit saved actions use local-action admission independent of Search capability"
         );
         assert!(capability_disabled_catalog.commands.iter().any(|action| {
@@ -16644,8 +16705,8 @@ mod tests {
         let disabled = HashSet::new();
         let disabled_catalog = LauncherSearchCatalog::new(startup(), Some(&disabled));
         assert_eq!(
-            disabled_catalog.actions,
-            vec![settings_action],
+            disabled_catalog.actions.as_slice(),
+            &[settings_action],
             "explicit saved typed actions remain available through shared local Search"
         );
         assert!(disabled_catalog.commands.is_empty());
@@ -16753,6 +16814,7 @@ mod tests {
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 actions: Vec::new(),
                 calculator_settings: None,
+                omni_settings: None,
                 match_exact: true,
                 fuzzy_weight: 0.75,
                 usage_weight: 0.0,
@@ -16787,9 +16849,9 @@ mod tests {
             .map(|provider| provider.name.as_str())
             .collect::<Vec<_>>();
         #[cfg(not(windows))]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "duplicate_finder", "favorites", "file_search", "folder_size", "hash_generator", "help", "json_utility", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "xml_toolkit", "youtube"]);
         #[cfg(windows)]
-        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
+        assert_eq!(help_names, ["activity", "base_convert", "calculator", "date_arithmetic", "downloads_triage", "duplicate_finder", "favorites", "file_lock", "file_search", "folder_size", "hash_generator", "help", "json_utility", "omni_search", "reddit", "regex_tester", "runescape_search", "settings", "unit_convert", "weather", "web_search", "wikipedia", "windows", "xml_toolkit", "youtube"]);
         let settings_help = catalog
             .command_help_providers
             .iter()
@@ -16804,6 +16866,7 @@ mod tests {
                 verified_folders: Vec::new(),
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 calculator_settings: None,
+                omni_settings: None,
                 actions: vec![saved_action("Saved Help", "help:show", None)],
                 match_exact: true,
                 fuzzy_weight: 0.75,
@@ -16822,7 +16885,7 @@ mod tests {
             Some(&HashSet::new()),
         );
         assert!(disabled_catalog.commands.is_empty());
-        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 21 } else { 18 });
+        assert_eq!(disabled_catalog.command_help_providers.len(), if cfg!(windows) { 22 } else { 19 });
         assert_eq!(disabled_catalog.actions.len(), 1);
         assert!(matches!(
             parse_installed_search_invocation(
@@ -17526,6 +17589,7 @@ mod tests {
                 verified_folders: Vec::new(),
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
                 calculator_settings: None,
+                omni_settings: None,
                 actions: vec![
                     alpha.clone(),
                     beta.clone(),
@@ -17550,8 +17614,8 @@ mod tests {
         );
 
         assert_eq!(
-            catalog.actions,
-            vec![alpha.clone(), beta.clone(), query_set.clone()]
+            catalog.actions.as_slice(),
+            &[alpha.clone(), beta.clone(), query_set.clone()]
         );
         let composed = catalog.compose_actions("app QMarker", Vec::new());
         assert_eq!(
@@ -17599,6 +17663,7 @@ mod tests {
                 verified_folders: Vec::new(),
                 index_config: multi_launcher::indexer::coordinator::IndexConfig::new(Vec::new(), None),
             calculator_settings: None,
+                omni_settings: None,
             actions: Vec::new(),
             match_exact,
             fuzzy_weight: 0.25,

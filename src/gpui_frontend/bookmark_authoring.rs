@@ -186,7 +186,7 @@ impl RootWindow {
         if let Some(aliases) = self.search_catalog.providers.bookmark_aliases() { self.search_catalog.bookmark_aliases_lc = aliases; }
         let query = self.query.read(cx).value().to_string();
         let bookmark_rows = self.launcher_results.query == query && self.launcher_results.actions.iter().any(|row| matches!(&row.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks"));
-        if refresh_bookmark_query(&query, bookmark_rows, force) { self.refresh_launcher_results_with_viewport(query, false, cx); }
+        if refresh_bookmark_query(&query, bookmark_rows, force) || super::omni_search::is_omni_query(&query) { self.refresh_launcher_results_with_viewport(query, false, cx); }
         if self.restart_status.as_deref() == Some(WAIT) { self.restart_status = None; }
     }
 
