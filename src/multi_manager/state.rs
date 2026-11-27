@@ -540,7 +540,7 @@ fn start_runtime_after_restore(
     }
 }
 
-fn resolve_relative_to(base: &Path, path: &str) -> PathBuf {
+pub fn resolve_relative_to(base: &Path, path: &str) -> PathBuf {
     let path = PathBuf::from(path);
     if path.is_absolute() {
         path

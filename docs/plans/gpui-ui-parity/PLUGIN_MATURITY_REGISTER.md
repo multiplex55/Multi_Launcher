@@ -41,7 +41,7 @@ Priority values encode user tier and preferred order, for example P0.02. For an 
 | MkMacro | `mkmacro` | G19 | P1.08 | 1 → 3 | — | Retained macro editor and safe run | — | — | Stock macro engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Keyboard actions | `keys` | G21 | P3.10 | 1 → 2 | — | Typed approved input actions | — | — | Stock automation engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Ordinary Mouse Gestures | `mouse_gestures` | G21 | P0.18 | 1 → 3 | — | Start stock runtime and migrate ordinary authoring | — | — | Stock automation engine | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
-| MultiManager | `MultiManager` | G24 | P0.10 | 1 → 3 | — | Workspace and card CRUD, capture/apply and Windows placement | — | — | Stock Windows/system services | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
+| MultiManager | `MultiManager` | G24 | P0.10 | 1 → 3 | Checked authoring subroute and read-only cards | Complete primary Reconnect and Home/Target placement | [Authoring](CHECKPOINTS.md#p010-checked-multimanager-workspace-authoring) | Queued | Stock Windows/system services | Capture, runtime and secondary criteria | [Authoring](CHECKPOINTS.md#p010-checked-multimanager-workspace-authoring) |
 | Favorites | `favorites` | G05/G06 | P1.05 | 2 → 3 | Checked canonical CRUD and Search | Remaining common host/workspace and native checks | [V](#evidence-keys) | Scoped native CRUD | Shared Search and typed dispatch · Canonical stores and Settings | Later original secondary criteria | [V](#evidence-keys) |
 | Missing applications | `missing` | G06 | P0.02 | 1 → 3 | — | App repair against existing catalog | — | — | Canonical stores and Settings | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
 | Recycle Bin | `recycle` | G11 | P2.17 | 1 → 2–3 | — | Checked Recycle Bin workflow | — | — | Checked native file operations | Original secondary criteria | [Registry](../../../src/plugin.rs#L910) |
@@ -144,7 +144,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 | P0.07 Clipboard Modify | clipboard_modify | G13 | 2 → 3 | Canonical pipelines and acquired clipboard effects | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.08 Clipboard Snippets | snippets | G13 | 2 → 3 | Canonical watched store and prompt | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.09 Notes, Quick Notes and Markdown | notes, markdown_studio | G12 | 2 → 3 | Checked docked Quick Notes and existing-note editor with Markdown modes. Matched native replay and the remaining G12 criteria stay open. | [Note Editor](CHECKPOINTS.md#p009-checked-existing-note-editor) |
-| P0.10 MultiManager | MultiManager | G24 | 1 → 3 | Workspace store and native window operations | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.10 MultiManager | MultiManager | G24 | 1 → 3 | Checked workspace authoring delivered. Complete the primary Reconnect and placement workflow for Stage 2. | [Authoring](CHECKPOINTS.md#p010-checked-multimanager-workspace-authoring) |
 | P0.11 Calculation Pad | calculator entry family | G15 | 1 → 3 | Stock Pad session and persistence | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.12 Keyboard and numpad | — | G05 | 2 → 3 | Input routing and native keypad receipts | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.13 Global invocation and visibility | — | G01/G03/G05 | 2 → 3 | Native hotkey and foreground/desktop ownership | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
@@ -177,7 +177,7 @@ Windows snapshot after P0.09 retained Quick Notes. **91 built-ins**, with **59 S
 
 | Priority tier · built-ins only | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 | 21 | 2 | 13 | 6 | 0 |
+| P0 | 21 | 2 | 14 | 5 | 0 |
 | P1 | 16 | 4 | 6 | 6 | 0 |
 | P2 | 27 | 5 | 0 | 22 | 0 |
 | P3 | 25 | 1 | 0 | 24 | 0 |
@@ -187,7 +187,7 @@ The P2 interim floor is Stage 2. P4's existing functional Clipboard History is p
 
 | Priority tier · separate workflow view | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 · readiness workflows | 19 | 3 | 12 | 4 | 0 |
+| P0 · readiness workflows | 19 | 3 | 13 | 3 | 0 |
 | P1 · Dashboard, useful widgets and File Preview | 4 | 0 | 1 | 3 | 0 |
 | P2 · represented by its built-ins | 0 | 0 | 0 | 0 | 0 |
 | P3 · other workspace and companion groups above | 5 | 0 | 0 | 5 | 0 |

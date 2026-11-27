@@ -4856,6 +4856,8 @@ fn main() -> anyhow::Result<()> {
             note_provider_settings: settings.plugin_settings.get("notes").cloned(),
             note_save_on_close: settings.note_save_on_close,
             note_confirm_discard: settings.note_confirm_discard_unsaved_changes,
+            multi_manager_settings: settings.multi_manager.clone(),
+            multi_manager_settings_path: multi_launcher::settings::settings_path(),
             match_exact: settings.match_exact,
             fuzzy_weight: settings.fuzzy_weight,
             usage_weight: settings.usage_weight,

@@ -1832,3 +1832,11 @@ Omni now includes stock existing-note results and opens the checked Note Editor,
 Independent review cleared exact published source, live capability admission and wake retirement. Locked launcher checks passed in 10.03 s and 4.62 s. The launcher-only link took 24.88 s. Nextest run `ee050d42-b39c-4c8f-bfda-5f317ff05452` passed 13/13 in 6.570 s. Reused linked shared Notes and Omni tests passed 5/5 in 1.134 s under `c2431548-377a-41bc-99ee-c76d0ed64980`.
 
 Stage 2. Paired 1516 × 937 replay remains open for Notes-only Omni, checked open after a watched source edit, same-note draft retention and stock result comparison. Todo, Calendar and the category editor remain open. Continue P0.10 MultiManager.
+
+### P0.10 checked MultiManager workspace authoring
+
+The stock bare `mm` route opens a retained docked MultiManager workspace pane. It reads the configured Settings-relative workspace and binding stores without starting runtime. Workspace Add, Rename, Enable or Disable, reorder and reviewed Delete use exact displayed records and a retained draft. Discard restores the committed snapshot. Save requires exact expected disk bytes and current authority immediately before replacement, and a first save uses no-clobber publication. Binding summaries share the stock first-ID and name-fallback association.
+
+The shared library check passed in 59.35 s. Combined checks passed in 58.67 s and 27.46 s after review corrections. Independent review cleared inactive ownership, exact draft and save safety, legacy workspace and binding identity, and focus on reviewed exits. One locked grouped `fast-dev` link covered the library, launcher and stock `multi_manager_launcher_actions` in 23 min 58 s. Nextest run `15be6831-425f-406d-ba88-d0cb600efdba` passed 13/13 in 4.197 s. Current work retains Stage 1 until checked Reconnect and Home/Target are delivered in the next MultiManager increment.
+
+The matched 1516 × 937 authoring replay remains open for exact review and Cancel, dirty Close, malformed recovery, workspace order and same-store egui readback. Disposable paired Settings and workspace seeds are prepared. Continue explicit Reconnect and checked Home/Target using the same retained pane and canonical document.

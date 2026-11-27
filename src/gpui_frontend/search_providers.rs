@@ -11,6 +11,23 @@ pub(super) fn clipboard_catalog_is_current(
 
 struct CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin);
 
+pub(super) struct MultiManagerBare;
+impl multi_launcher::plugin::Plugin for MultiManagerBare {
+    fn name(&self) -> &str { "MultiManager" }
+    fn description(&self) -> &str { "Manage window workspaces, home/target positions, hotkeys, and rotations" }
+    fn capabilities(&self) -> &[&str] { &["workspace_manager", "window_manager", "hotkeys"] }
+    fn query_prefixes(&self) -> &[&str] { &["mm"] }
+    fn search(&self, query: &str) -> Vec<Action> {
+        if !query.trim().eq_ignore_ascii_case("mm") { return Vec::new(); }
+        multi_launcher::multi_manager::commands::search_mm_commands(query).into_iter()
+            .filter(|action| action.action == "mm:open" && action.args.is_none()).collect()
+    }
+    fn commands(&self) -> Vec<Action> {
+        multi_launcher::multi_manager::commands::all_mm_commands().into_iter()
+            .filter(|action| action.action == "mm:open").collect()
+    }
+}
+
 pub(super) struct NoteSnapshot {
     pub version: u64,
     pub by_slug: std::collections::HashMap<String, Arc<multi_launcher::plugins::note::Note>>,
@@ -281,6 +298,7 @@ pub(super) struct InstalledLauncherProviders {
     folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
     duplicate_finder: multi_launcher::plugins::duplicate_finder::DuplicateFinderPlugin,
     quick_notes: QuickNotesBare,
+    multi_manager: MultiManagerBare,
     #[cfg(windows)]
     file_lock: multi_launcher::plugins::file_lock::FileLockPlugin,
     calculator: CalculatorMetadata,
@@ -386,6 +404,7 @@ impl InstalledLauncherProviders {
             folder_size: multi_launcher::plugins::folder_size::FolderSizePlugin,
             duplicate_finder: multi_launcher::plugins::duplicate_finder::DuplicateFinderPlugin,
             quick_notes,
+            multi_manager: MultiManagerBare,
             #[cfg(windows)]
             file_lock: multi_launcher::plugins::file_lock::FileLockPlugin,
             calculator: CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin::default()),
@@ -427,6 +446,7 @@ impl InstalledLauncherProviders {
             Some(&self.folder_size as &dyn multi_launcher::plugin::Plugin),
             Some(&self.duplicate_finder as &dyn multi_launcher::plugin::Plugin),
             Some(&self.quick_notes as &dyn multi_launcher::plugin::Plugin),
+            Some(&self.multi_manager as &dyn multi_launcher::plugin::Plugin),
             #[cfg(windows)]
             Some(&self.file_lock as &dyn multi_launcher::plugin::Plugin),
             Some(&self.calculator as &dyn multi_launcher::plugin::Plugin),

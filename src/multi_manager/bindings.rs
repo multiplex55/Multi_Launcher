@@ -108,22 +108,22 @@ pub fn restore_bindings(workspaces: &mut [MmWorkspace], snapshots: &[WorkspaceBi
     restore_bindings_with_query(workspaces, snapshots, win::query_hwnd_identity);
 }
 
+/// Select the one workspace that owns a saved snapshot, using the stock
+/// first matching ID and then the legacy name fallback.
+pub fn workspace_index_for_snapshot(workspaces: &[MmWorkspace], snapshot: &WorkspaceBindingSnapshot) -> Option<usize> {
+    snapshot.workspace_id.as_deref()
+        .and_then(|id| (!id.is_empty()).then_some(id))
+        .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
+        .or_else(|| workspaces.iter().position(|workspace| workspace.name == snapshot.workspace_name))
+}
+
 fn restore_bindings_with_query(
     workspaces: &mut [MmWorkspace],
     snapshots: &[WorkspaceBindingSnapshot],
     query_hwnd_identity: impl Fn(usize) -> WindowIdentitySnapshot,
 ) {
     for snapshot in snapshots {
-        let workspace_index = snapshot
-            .workspace_id
-            .as_deref()
-            .and_then(|id| (!id.is_empty()).then_some(id))
-            .and_then(|id| workspaces.iter().position(|workspace| workspace.id == id))
-            .or_else(|| {
-                workspaces
-                    .iter()
-                    .position(|workspace| workspace.name == snapshot.workspace_name)
-            });
+        let workspace_index = workspace_index_for_snapshot(workspaces, snapshot);
         let Some(workspace_index) = workspace_index else {
             continue;
         };
@@ -262,6 +262,18 @@ pub fn refresh_live_titles(workspaces: &mut [MmWorkspace]) -> bool {
 mod tests {
     use super::*;
     use crate::multi_manager::model::{MmWindow, MmWorkspace};
+
+    #[test]
+    fn snapshot_workspace_association_prefers_first_id_then_legacy_name() {
+        let rows = vec![ws("duplicate", "First", vec![]), ws("duplicate", "Second", vec![]), ws("third", "Fallback", vec![])];
+        let snapshot = |id: Option<&str>, name: &str| WorkspaceBindingSnapshot {
+            workspace_id: id.map(str::to_owned), workspace_name: name.into(), windows: vec![],
+        };
+        assert_eq!(workspace_index_for_snapshot(&rows, &snapshot(Some("duplicate"), "Second")), Some(0));
+        assert_eq!(workspace_index_for_snapshot(&rows, &snapshot(Some("stale"), "Fallback")), Some(2));
+        assert_eq!(workspace_index_for_snapshot(&rows, &snapshot(Some(""), "Second")), Some(1));
+        assert_eq!(workspace_index_for_snapshot(&rows, &snapshot(None, "missing")), None);
+    }
 
     fn ws(id: &str, name: &str, windows: Vec<MmWindow>) -> MmWorkspace {
         MmWorkspace {

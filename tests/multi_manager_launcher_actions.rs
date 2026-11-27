@@ -15,7 +15,9 @@ fn action(id: &str) -> Action {
     }
 }
 
-fn new_app(settings: Settings) -> LauncherApp {
+fn new_app(mut settings: Settings) -> LauncherApp {
+    settings.paste_sequence.next_hotkey = None;
+    settings.paste_sequence.cancel_hotkey = None;
     let ctx = egui::Context::default();
     LauncherApp::new(
         &ctx,

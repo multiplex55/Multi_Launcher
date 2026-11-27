@@ -2,10 +2,91 @@ use crate::common::persistence::{self, LoadState, PersistenceError};
 use crate::multi_manager::model::{MmWorkspace, new_workspace_id};
 use anyhow::{Context, Result};
 use once_cell::sync::Lazy;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::io::{ErrorKind, Write};
 use std::sync::Mutex;
 
 static WORKSPACE_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+/// Exact raw source retained by a workspace authoring session. Whitespace-only
+/// documents remain distinct from missing files and from one another.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceSource {
+    Missing,
+    Empty(Vec<u8>),
+    Loaded(Vec<u8>),
+}
+
+#[derive(Clone, Debug)]
+pub struct CheckedWorkspaceSnapshot {
+    path: PathBuf,
+    source: WorkspaceSource,
+    workspaces: Vec<MmWorkspace>,
+}
+impl CheckedWorkspaceSnapshot {
+    pub fn path(&self) -> &Path { &self.path }
+    pub fn source(&self) -> &WorkspaceSource { &self.source }
+    pub fn workspaces(&self) -> &[MmWorkspace] { &self.workspaces }
+}
+
+fn read_workspace_source(path: &Path) -> Result<WorkspaceSource> {
+    match std::fs::read(path) {
+        Ok(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => Ok(WorkspaceSource::Empty(bytes)),
+        Ok(bytes) => Ok(WorkspaceSource::Loaded(bytes)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(WorkspaceSource::Missing),
+        Err(error) => Err(error).with_context(|| format!("read MultiManager workspaces {}", path.display())),
+    }
+}
+
+/// Read without starting MultiManager runtime, hooks, or reconnect.
+pub fn load_checked_workspaces(path: &Path, is_current: impl Fn() -> bool) -> Result<CheckedWorkspaceSnapshot> {
+    let _transaction = WORKSPACE_TRANSACTION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    anyhow::ensure!(is_current(), "MultiManager workspace read superseded");
+    let source = read_workspace_source(path)?;
+    let mut workspaces = match &source {
+        WorkspaceSource::Missing | WorkspaceSource::Empty(_) => Vec::new(),
+        WorkspaceSource::Loaded(bytes) => serde_json::from_slice::<Vec<MmWorkspace>>(bytes)
+            .with_context(|| format!("parse MultiManager workspaces {}", path.display()))?,
+    };
+    normalize_workspaces(&mut workspaces);
+    anyhow::ensure!(is_current(), "MultiManager workspace read superseded");
+    Ok(CheckedWorkspaceSnapshot { path: path.to_path_buf(), source, workspaces })
+}
+
+/// Commit a draft only while its exact source bytes and admission remain current.
+/// A first write uses a no-clobber publication so a newly appearing file wins.
+pub fn save_checked_workspaces(
+    expected: &CheckedWorkspaceSnapshot,
+    workspaces: &[MmWorkspace],
+    is_current: impl Fn() -> bool,
+) -> Result<CheckedWorkspaceSnapshot> {
+    let _transaction = WORKSPACE_TRANSACTION.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    anyhow::ensure!(is_current(), "MultiManager workspace save superseded");
+    anyhow::ensure!(read_workspace_source(&expected.path)? == expected.source, "MultiManager workspaces changed; reload before saving");
+    let mut committed = workspaces.to_vec();
+    normalize_workspaces(&mut committed);
+    let bytes = serde_json::to_vec_pretty(&committed)?;
+    match &expected.source {
+        WorkspaceSource::Missing => {
+            let parent = expected.path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+            anyhow::ensure!(is_current(), "MultiManager workspace save superseded");
+            std::fs::create_dir_all(parent)?;
+            let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+            staged.write_all(&bytes)?;
+            staged.flush()?;
+            staged.as_file().sync_all()?;
+            anyhow::ensure!(is_current(), "MultiManager workspace save superseded");
+            staged.persist_noclobber(&expected.path).map_err(|error| error.error)
+                .with_context(|| format!("publish MultiManager workspaces {}", expected.path.display()))?;
+        }
+        WorkspaceSource::Empty(_) | WorkspaceSource::Loaded(_) => {
+            crate::common::atomic_file::save_atomic_if(&expected.path, &bytes, || {
+                is_current() && read_workspace_source(&expected.path).is_ok_and(|current| current == expected.source) && is_current()
+            }).with_context(|| format!("replace MultiManager workspaces {}", expected.path.display()))?;
+        }
+    }
+    Ok(CheckedWorkspaceSnapshot { path: expected.path.clone(), source: WorkspaceSource::Loaded(bytes), workspaces: committed })
+}
 
 pub fn load_workspace_state(
     path: &Path,
@@ -93,6 +174,55 @@ fn normalize_workspaces(workspaces: &mut [MmWorkspace]) {
 mod tests {
     use super::*;
     use crate::multi_manager::model::{MmHotkey, MmRect, MmWindow};
+
+    #[test]
+    fn checked_workspaces_preserve_legacy_and_reject_external_changes() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("workspaces.json");
+        let legacy = br#"[{"name":"Legacy","windows":[{"title":"Editor","home_rect":[0,0,640,480]}]}]"#;
+        std::fs::write(&path, legacy).unwrap();
+        let snapshot = load_checked_workspaces(&path, || true).unwrap();
+        assert!(!snapshot.workspaces()[0].id.is_empty());
+        let committed = save_checked_workspaces(&snapshot, snapshot.workspaces(), || true).unwrap();
+        assert_eq!(committed.workspaces()[0].windows[0].captured_title, "Editor");
+        let replacement = br#"[{"id":"foreign","name":"Changed"}]"#;
+        std::fs::write(&path, replacement).unwrap();
+        assert!(save_checked_workspaces(&committed, committed.workspaces(), || true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
+        std::fs::write(&path, b"{broken").unwrap();
+        assert!(save_checked_workspaces(&committed, committed.workspaces(), || true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+        assert!(load_checked_workspaces(&path, || true).is_err());
+    }
+
+    #[test]
+    fn checked_workspaces_fence_final_replace_and_first_write_collision() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("workspaces.json");
+        let missing = load_checked_workspaces(&path, || true).unwrap();
+        let calls = std::cell::Cell::new(0);
+        assert!(save_checked_workspaces(&missing, &[], || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 3 { std::fs::write(&path, b"foreign").unwrap(); }
+            true
+        }).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"foreign");
+        std::fs::write(&path, b" \r\n").unwrap();
+        let empty = load_checked_workspaces(&path, || true).unwrap();
+        assert_eq!(empty.source(), &WorkspaceSource::Empty(b" \r\n".to_vec()));
+        let calls = std::cell::Cell::new(0);
+        assert!(save_checked_workspaces(&empty, &[], || { calls.set(calls.get() + 1); calls.get() == 1 }).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b" \r\n");
+        let calls = std::cell::Cell::new(0);
+        assert!(save_checked_workspaces(&empty, &[], || { calls.set(calls.get() + 1); calls.get() <= 2 }).is_err());
+        assert!(calls.get() >= 3);
+        assert_eq!(std::fs::read(&path).unwrap(), b" \r\n");
+        let calls = std::cell::Cell::new(0);
+        assert!(save_checked_workspaces(&empty, &[], || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 { std::fs::write(&path, b"{new invalid}").unwrap(); }
+            true
+        }).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{new invalid}");
+    }
 
     #[test]
     fn old_tuple_rect_json_loads_correctly() {
