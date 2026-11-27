@@ -11,14 +11,11 @@ pub(crate) struct RootPlacement {
 }
 
 impl RootPlacement {
+    pub(super) fn with_preferences(self, follow_mouse: bool, enabled: bool, position: Option<(i32, i32)>, size: Option<(i32, i32)>) -> Self {
+        let (enabled, position, size) = multi_launcher::settings::normalize_static_window_config(follow_mouse, enabled, position, size);
+        Self { follow_mouse, position: enabled.then_some(position).flatten(), client_size: enabled.then_some(size.filter(|(w, h)| *w > 0 && *h > 0).map(|(w, h)| (w.max(320), h.max(160)))).flatten(), ..self }
+    }
     pub fn from_settings(settings: &multi_launcher::settings::Settings) -> Self {
-        let (enabled, position, client_size) =
-            multi_launcher::settings::normalize_static_window_config(
-                settings.follow_mouse,
-                settings.static_location_enabled,
-                settings.static_pos,
-                settings.static_size,
-            );
         let valid = |size: (i32, i32)| size.0 > 0 && size.1 > 0;
         let clamp = |size: (i32, i32)| (size.0.max(320), size.1.max(160));
         Self {
@@ -30,11 +27,9 @@ impl RootPlacement {
                     .filter(|size| valid(*size))
                     .unwrap_or((400, 220)),
             ),
-            position: enabled.then_some(position).flatten(),
-            client_size: enabled
-                .then_some(client_size.filter(|size| valid(*size)).map(clamp))
-                .flatten(),
-        }
+            position: None,
+            client_size: None,
+        }.with_preferences(settings.follow_mouse, settings.static_location_enabled, settings.static_pos, settings.static_size)
     }
     fn has_static(self) -> bool {
         self.position.is_some() || self.client_size.is_some()
@@ -230,6 +225,19 @@ mod tests {
         assert!(RootPlacement::from_settings(&settings).follow_mouse);
         assert!(should_place_reveal(false, true, true));
         assert!(!should_place_reveal(true, true, true));
+        assert!(!should_place_reveal(false, true, false));
+    }
+
+    #[test]
+    fn acknowledged_preferences_change_only_future_reveal_policy() {
+        let initial = RootPlacement::from_settings(&Settings::default());
+        let changed = initial.with_preferences(false, true, Some((-120, 45)), Some((640, 480)));
+        assert_eq!(changed.initial_client, initial.initial_client);
+        assert_eq!(changed.startup_client, initial.startup_client);
+        assert_eq!(changed.position, Some((-120, 45)));
+        assert_eq!(changed.client_size, Some((640, 480)));
+        assert!(!should_place_reveal(true, true, true));
+        assert!(should_place_reveal(false, true, true));
         assert!(!should_place_reveal(false, true, false));
     }
 

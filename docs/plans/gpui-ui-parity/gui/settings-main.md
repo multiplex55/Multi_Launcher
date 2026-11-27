@@ -90,3 +90,9 @@ Extend the paired Settings replay with a retained query and known result order. 
 Enter `settings toast duration` to open the retained Settings pane and focus its filter. The shared catalog finds currently available mounted controls. A fresh Enter from the filter or a result click focuses the target. Escape in the filter or results clears that query. Bare `settings` returns to the primary control. Reopening through a typed Settings result preserves both drafts and their save ownership.
 
 For the paired native replay, use fuzzy Search and matched profiles. Check Menu and bare and typed Search entry, a repeated typed query while a draft is dirty, exact focus and fresh key handling, and the 1516 × 937 and compact viewport. Exact-mode cross-frontend behavior and navigation to remaining Settings pages stay open. [Navigation checkpoint](../CHECKPOINTS.md#g06-typed-settings-navigation)
+
+## Launcher Window placement
+
+The retained Launcher Window controls match the stock Follow mouse, Use static position and signed position and size fields. Typed Settings navigation targets the available control. Applying Follow mouse clears the saved static placement and retains the editor's coordinates until reload. Save checks the entire four-field group, and the exact acknowledgement applies the new policy to the next reveal.
+
+The matched 1516 × 937 replay remains open for focus at matched scale, compact scrolling, Save and Cancel, a subsequent checked reveal, and egui settings readback. Snapshot, live hotkey editing and the remaining settings retain their original gates. [Placement checkpoint](../CHECKPOINTS.md#p014-checked-launcher-window-placement-settings)

@@ -16,6 +16,10 @@ struct Values {
     grid: bool,
     columns: usize,
     respect: bool,
+    follow_mouse: bool,
+    static_enabled: bool,
+    static_position: Option<(i32, i32)>,
+    static_size: Option<(i32, i32)>,
 }
 impl Values {
     fn from_settings(settings: &Settings) -> Self {
@@ -28,10 +32,14 @@ impl Values {
             grid: settings.query_results_layout.enabled,
             columns: settings.query_results_layout.cols,
             respect: settings.query_results_layout.respect_plugin_capability,
+            follow_mouse: settings.follow_mouse,
+            static_enabled: settings.static_location_enabled,
+            static_position: settings.static_pos,
+            static_size: settings.static_size,
         }
     }
     fn changes(&self, next: &Self) -> Vec<Change> {
-        [
+        let mut changes: Vec<Change> = [
             (
                 Field::QueryAutocomplete,
                 Value::Bool(self.autocomplete),
@@ -80,14 +88,26 @@ impl Values {
             baseline,
             desired,
         })
-        .collect()
+        .collect();
+        if (self.follow_mouse, self.static_enabled, self.static_position, self.static_size) != (next.follow_mouse, next.static_enabled, next.static_position, next.static_size) {
+            changes.extend([
+                (Field::FollowMouse, Value::Bool(self.follow_mouse), Value::Bool(next.follow_mouse)),
+                (Field::StaticLocationEnabled, Value::Bool(self.static_enabled), Value::Bool(next.static_enabled)),
+                (Field::StaticPosition, Value::OptionalPair(self.static_position), Value::OptionalPair(next.static_position)),
+                (Field::StaticSize, Value::OptionalPair(self.static_size), Value::OptionalPair(next.static_size)),
+            ].into_iter().map(|(field, baseline, desired)| Change { field, baseline, desired }));
+        }
+        changes
     }
-    fn texts(&self) -> [String; 4] {
+    fn texts(&self) -> [String; 8] {
+        let (x, y) = self.static_position.unwrap_or((0, 0));
+        let (width, height) = self.static_size.unwrap_or((400, 220));
         [
             self.fuzzy.to_string(),
             self.usage.to_string(),
             self.page.to_string(),
             self.columns.to_string(),
+            x.to_string(), y.to_string(), width.to_string(), height.to_string(),
         ]
     }
 }
@@ -110,11 +130,22 @@ fn resolve_count(text: &str, baseline: usize, enabled: bool) -> Result<usize, &'
         _ => Err("Page jump and grid columns must be whole numbers from 1 to 100."),
     }
 }
+fn resolve_coordinate(text: &str, fallback: i32, enabled: bool) -> Result<i32, &'static str> {
+    match text.trim().parse::<i32>() {
+        Ok(value) => Ok(value),
+        Err(_) if !enabled => Ok(fallback),
+        Err(_) => Err("Static placement values must be signed 32-bit integers."),
+    }
+}
+fn displayed_static(follow_mouse: bool, static_enabled: bool) -> bool {
+    !follow_mouse && static_enabled
+}
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct RestartDraft {
     baseline: Option<Values>,
     draft: Option<Values>,
-    texts: [String; 4],
+    texts: [String; 8],
+    placement_text_baseline: [String; 4],
     busy: bool,
 }
 impl RestartDraft {
@@ -123,7 +154,7 @@ impl RestartDraft {
             || self
                 .baseline
                 .as_ref()
-                .is_some_and(|base| self.texts != base.texts())
+                .is_some_and(|base| self.texts[..4] != base.texts()[..4] || self.texts[4..] != self.placement_text_baseline)
     }
 }
 
@@ -136,7 +167,8 @@ pub(super) struct SearchSettings {
     scroll: ScrollHandle,
     baseline: Option<Values>,
     draft: Option<Values>,
-    inputs: [Entity<InputState>; 4],
+    inputs: [Entity<InputState>; 8],
+    placement_text_baseline: [String; 4],
     _subscriptions: Vec<Subscription>,
     reading: bool,
     pending: Option<(SettingsBooleanSaveToken, Vec<Change>)>,
@@ -167,6 +199,8 @@ impl SearchSettings {
             Field::MatchExact,
             Field::GridEnabled,
             Field::GridRespectCapability,
+            Field::FollowMouse,
+            Field::StaticLocationEnabled,
         ]
         .into_iter()
         .map(|field| {
@@ -190,6 +224,7 @@ impl SearchSettings {
             baseline: None,
             draft: None,
             inputs,
+            placement_text_baseline: std::array::from_fn(|_| String::new()),
             _subscriptions: subscriptions,
             reading: false,
             pending: None,
@@ -207,6 +242,9 @@ impl SearchSettings {
         match target {
             Autocomplete | Exact | Fuzzy | Usage | Page | Grid => true,
             Columns | Respect => draft.grid,
+            FollowMouse => true,
+            StaticPosition => !draft.follow_mouse,
+            StaticX | StaticY | StaticWidth | StaticHeight => !draft.follow_mouse && draft.static_enabled,
             _ => false,
         }
     }
@@ -221,6 +259,31 @@ impl SearchSettings {
             return false;
         }
         let grid = self.draft.as_ref().is_some_and(|draft| draft.grid);
+        let placement_focus = match target {
+            FollowMouse => self.checkbox_focus.get(&Field::FollowMouse).cloned(),
+            StaticPosition => self.checkbox_focus.get(&Field::StaticLocationEnabled).cloned(),
+            StaticX => Some(self.inputs[4].focus_handle(cx)),
+            StaticY => Some(self.inputs[5].focus_handle(cx)),
+            StaticWidth => Some(self.inputs[6].focus_handle(cx)),
+            StaticHeight => Some(self.inputs[7].focus_handle(cx)),
+            _ => None,
+        };
+        if let Some(focus) = placement_focus {
+            let header = 10 + 3 * usize::from(grid);
+            let index = match target {
+                FollowMouse => header + 1,
+                StaticPosition => header + 2,
+                StaticX => header + 4,
+                StaticY => header + 6,
+                StaticWidth => header + 8,
+                StaticHeight => header + 10,
+                _ => return false,
+            };
+            self.scroll.scroll_to_top_of_item(index);
+            focus.focus(window, cx);
+            cx.notify();
+            return true;
+        }
         let base = 4 + usize::from(grid);
         let (index, focus) = match target {
             Autocomplete => (
@@ -260,7 +323,7 @@ impl SearchSettings {
     pub(super) fn retire(&mut self) {
         self.owner.retire();
     }
-    fn texts(&self, cx: &App) -> [String; 4] {
+    fn texts(&self, cx: &App) -> [String; 8] {
         std::array::from_fn(|i| self.inputs[i].read(cx).value().to_string())
     }
     pub(super) fn restart_draft(&self, cx: &App) -> RestartDraft {
@@ -268,6 +331,7 @@ impl SearchSettings {
             baseline: self.baseline.clone(),
             draft: self.draft.clone(),
             texts: self.texts(cx),
+            placement_text_baseline: self.placement_text_baseline.clone(),
             busy: self.busy(),
         }
     }
@@ -275,6 +339,21 @@ impl SearchSettings {
         for (input, text) in self.inputs.iter().zip(values.texts()) {
             input.update(cx, |input, cx| input.set_value(text, window, cx));
         }
+    }
+    fn set_search_texts(&self, values: &Values, window: &mut Window, cx: &mut Context<Self>) {
+        for (input, text) in self.inputs[..4].iter().zip(values.texts().into_iter().take(4)) {
+            input.update(cx, |input, cx| input.set_value(text, window, cx));
+        }
+    }
+    fn settle_texts(&mut self, values: &Values, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_search_texts(values, window, cx);
+        if !values.follow_mouse && values.static_enabled {
+            for (input, text) in self.inputs[4..].iter().zip(values.texts().into_iter().skip(4)) {
+                input.update(cx, |input, cx| input.set_value(text, window, cx));
+            }
+        }
+        let texts = self.texts(cx);
+        self.placement_text_baseline = std::array::from_fn(|i| texts[i + 4].clone());
     }
     fn readonly(&self, readonly: bool, cx: &mut Context<Self>) {
         for input in &self.inputs {
@@ -358,6 +437,8 @@ impl SearchSettings {
                     Ok(settings) => {
                         let values = Values::from_settings(&settings);
                         view.set_texts(&values, window, cx);
+                        let texts = values.texts();
+                        view.placement_text_baseline = std::array::from_fn(|i| texts[i + 4].clone());
                         view.baseline = Some(values.clone());
                         view.draft = Some(values);
                         view.status = None;
@@ -398,6 +479,20 @@ impl SearchSettings {
             desired.usage = resolve_float(&texts[1], baseline.usage)?;
             desired.page = resolve_count(&texts[2], baseline.page, true)?;
             desired.columns = resolve_count(&texts[3], baseline.columns, desired.grid)?;
+            let placement_edited = desired.follow_mouse != baseline.follow_mouse || desired.static_enabled != baseline.static_enabled || texts[4..] != self.placement_text_baseline;
+            if placement_edited {
+                if desired.follow_mouse {
+                    desired.static_enabled = false;
+                    desired.static_position = None;
+                    desired.static_size = None;
+                } else {
+                    let (x, y) = desired.static_position.unwrap_or((0, 0));
+                    let (width, height) = desired.static_size.unwrap_or((400, 220));
+                    let parse = |index: usize, fallback: i32| resolve_coordinate(&texts[index], fallback, desired.static_enabled);
+                    desired.static_position = Some((parse(4, x)?, parse(5, y)?));
+                    desired.static_size = Some((parse(6, width)?, parse(7, height)?));
+                }
+            }
             Ok::<(), &'static str>(())
         })();
         if let Err(error) = parsed {
@@ -407,7 +502,7 @@ impl SearchSettings {
         }
         let changes = baseline.changes(&desired);
         if changes.is_empty() {
-            self.set_texts(&baseline, window, cx);
+            self.settle_texts(&baseline, window, cx);
             self.status = Some("No changes to save.".into());
             cx.notify();
             return;
@@ -494,8 +589,12 @@ impl SearchSettings {
                 );
                 match result {
                     Ok(ack) if accepted => {
-                        view.set_texts(&desired, window, cx);
+                        view.settle_texts(&desired, window, cx);
                         let _ = view.root.update(cx, |root, cx| {
+                            if changes.iter().any(|change| change.field == Field::FollowMouse) {
+                                let mut placement = root.placement_preferences.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                                *placement = placement.with_preferences(desired.follow_mouse, desired.static_enabled, desired.static_position, desired.static_size);
+                            }
                             if apply_acknowledged(&mut root.search_catalog, &changes, &ack) {
                                 let query = root.query.read(cx).value().to_string();
                                 let policy = refresh_policy(&changes, &query);
@@ -796,8 +895,39 @@ impl Render for SearchSettings {
                     continue;
                 }
                 panel = panel
-                    .child(Label::new(label))
-                    .child(Input::new(&self.inputs[index]).aria_label(label));
+                    .child(div().id(SharedString::from(format!("search-setting-label-{index}"))).child(Label::new(label)))
+                    .child(Input::new(&self.inputs[index]).readonly(busy).aria_label(label));
+            }
+            panel = panel.child(Label::new("Launcher Window"));
+            for (field, label, checked, disabled) in [
+                (Field::FollowMouse, "Follow mouse", draft.follow_mouse, false),
+                (Field::StaticLocationEnabled, "Use static position", displayed_static(draft.follow_mouse, draft.static_enabled), draft.follow_mouse),
+            ] {
+                let weak = cx.entity().downgrade();
+                let mount = self.mount.clone();
+                let Some(focus) = self.checkbox_focus.get(&field).cloned() else { continue; };
+                panel = panel.child(Checkbox::new(SharedString::from(format!("launcher-placement-{field:?}")))
+                    .checked(checked).track_focus(&focus).disabled(busy || disabled).accessibility_label(label)
+                    .on_change(move |state, _, _, app| {
+                        let _ = weak.update(app, |view, cx| {
+                            if view.busy() || !mount.is_current() || !mount.matches(&view.mount) { return; }
+                            if let Some(draft) = &mut view.draft {
+                                let checked = state == CheckboxState::Checked;
+                                match field {
+                                    Field::FollowMouse => { if draft.follow_mouse != checked { draft.static_enabled = false; } draft.follow_mouse = checked; },
+                                    Field::StaticLocationEnabled if !draft.follow_mouse => draft.static_enabled = checked,
+                                    _ => {}
+                                }
+                            }
+                            view.status = None;
+                            cx.notify();
+                        });
+                    }).child(div().flex().gap_2().child(CheckboxIndicator::new().checked(checked)).child(Label::new(label))));
+            }
+            if !draft.follow_mouse && draft.static_enabled {
+                for (index, label) in [(4, "Static position X"), (5, "Static position Y"), (6, "Static window width"), (7, "Static window height")] {
+                    panel = panel.child(div().id(SharedString::from(format!("launcher-placement-label-{index}"))).child(Label::new(label))).child(Input::new(&self.inputs[index]).readonly(busy).aria_label(label));
+                }
             }
             panel = panel.child(
                 Button::new("settings-search-save")
@@ -1015,5 +1145,46 @@ mod tests {
                 .iter()
                 .any(|change| matches!(change.field, Field::GridRows | Field::GridPluginOptOut))
         );
+    }
+
+    #[test]
+    fn placement_changes_include_the_whole_group_and_optional_signed_values() {
+        let mut settings = Settings::default();
+        settings.follow_mouse = false;
+        settings.static_location_enabled = true;
+        settings.static_pos = Some((-50, 20));
+        settings.static_size = None;
+        let before = Values::from_settings(&settings);
+        let mut after = before.clone();
+        after.follow_mouse = true;
+        after.static_enabled = false;
+        after.static_position = None;
+        let changes = before.changes(&after);
+        assert_eq!(changes.len(), 4);
+        assert!(changes.iter().any(|change| change.field == Field::StaticPosition && change.baseline == Value::OptionalPair(Some((-50, 20))) && change.desired == Value::OptionalPair(None)));
+        assert!(changes.iter().any(|change| change.field == Field::StaticSize && change.baseline == change.desired));
+        assert_eq!(super::resolve_coordinate("-25", 4, true), Ok(-25));
+        assert_eq!(super::resolve_coordinate("invalid", 4, false), Ok(4));
+        assert!(super::resolve_coordinate("invalid", 4, true).is_err());
+        assert!(!super::displayed_static(true, true));
+        assert!(super::displayed_static(false, true));
+    }
+
+    #[test]
+    fn hidden_placement_scratch_has_its_own_acknowledged_baseline() {
+        let mut settings = Settings::default();
+        settings.static_pos = None;
+        settings.static_size = None;
+        let values = Values::from_settings(&settings);
+        let mut texts = values.texts();
+        texts[4] = "-321".into();
+        let mut draft = super::RestartDraft {
+            baseline: Some(values.clone()), draft: Some(values), texts,
+            placement_text_baseline: ["0".into(), "0".into(), "400".into(), "220".into()], busy: false,
+        };
+        assert!(draft.dirty());
+        draft.placement_text_baseline = std::array::from_fn(|i| draft.texts[i + 4].clone());
+        assert!(!draft.dirty());
+        assert_eq!(draft.texts[4], "-321");
     }
 }

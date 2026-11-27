@@ -20,6 +20,10 @@ pub enum ScopedSetting {
     GridColumns,
     GridRespectCapability,
     GridPluginOptOut,
+    FollowMouse,
+    StaticLocationEnabled,
+    StaticPosition,
+    StaticSize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -28,6 +32,7 @@ pub enum ScopedSettingValue {
     Float(f32),
     Count(usize),
     Strings(Vec<String>),
+    OptionalPair(Option<(i32, i32)>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -83,6 +88,10 @@ impl ScopedSetting {
                 ("query_results_layout", Some("respect_plugin_capability"))
             }
             Self::GridPluginOptOut => ("query_results_layout", Some("plugin_opt_out")),
+            Self::FollowMouse => ("follow_mouse", None),
+            Self::StaticLocationEnabled => ("static_location_enabled", None),
+            Self::StaticPosition => ("static_pos", None),
+            Self::StaticSize => ("static_size", None),
         }
     }
     pub fn value(self, settings: &Settings) -> ScopedSettingValue {
@@ -106,6 +115,10 @@ impl ScopedSetting {
                 Bool(settings.query_results_layout.respect_plugin_capability)
             }
             Self::GridPluginOptOut => Strings(settings.query_results_layout.plugin_opt_out.clone()),
+            Self::FollowMouse => Bool(settings.follow_mouse),
+            Self::StaticLocationEnabled => Bool(settings.static_location_enabled),
+            Self::StaticPosition => OptionalPair(settings.static_pos),
+            Self::StaticSize => OptionalPair(settings.static_size),
         }
     }
     fn valid(self, value: &ScopedSettingValue) -> bool {
@@ -119,6 +132,7 @@ impl ScopedSetting {
                 (1..=100).contains(v)
             }
             (Self::GridPluginOptOut, Strings(_)) => true,
+            (Self::StaticPosition | Self::StaticSize, OptionalPair(_)) => true,
             (
                 Self::ClearQueryAfterRun
                 | Self::HideAfterRun
@@ -129,6 +143,9 @@ impl ScopedSetting {
                 | Self::MatchExact
                 | Self::GridEnabled
                 | Self::GridRespectCapability,
+                Bool(_),
+            ) => true,
+            (Self::FollowMouse | Self::StaticLocationEnabled,
                 Bool(_),
             ) => true,
             _ => false,
@@ -143,6 +160,7 @@ impl ScopedSettingValue {
             Self::Float(value) => serde_json::to_string(value),
             Self::Count(value) => serde_json::to_string(value),
             Self::Strings(value) => serde_json::to_string(value),
+            Self::OptionalPair(value) => serde_json::to_string(value),
         }
         .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
         serde_json::value::RawValue::from_string(text)
@@ -182,6 +200,11 @@ impl Settings {
                 return Err(ScopedSettingsError::Invalid(change.field));
             }
         }
+        let placement = [ScopedSetting::FollowMouse, ScopedSetting::StaticLocationEnabled, ScopedSetting::StaticPosition, ScopedSetting::StaticSize];
+        let grouped = placement.iter().any(|field| seen.contains(field));
+        if grouped && !placement.iter().all(|field| seen.contains(field)) {
+            return Err(ScopedSettingsError::Invalid(ScopedSetting::FollowMouse));
+        }
         let _transaction = transaction_guard();
         if token.is_some_and(SettingsBooleanSaveToken::is_canceled) {
             return Err(ScopedSettingsError::Cancelled);
@@ -191,18 +214,15 @@ impl Settings {
         let settings = parse_effective_settings(path, &bytes)
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
         let mut pending = Vec::new();
-        for change in changes
-            .iter()
-            .filter(|change| change.desired != change.baseline)
-        {
+        for change in changes.iter().filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field))) {
             let actual = change.field.value(&settings);
-            if actual == change.desired {
+            if actual == change.desired && change.desired != change.baseline {
                 continue;
             }
             if actual != change.baseline {
                 return Err(ScopedSettingsError::Conflict(change.field));
             }
-            pending.push(change);
+            if change.desired != change.baseline { pending.push(change); }
         }
         if pending.is_empty() {
             if token.is_some_and(SettingsBooleanSaveToken::is_canceled) {
@@ -211,7 +231,7 @@ impl Settings {
             return Ok(ScopedSettingsAcknowledgement {
                 values: changes
                     .iter()
-                    .filter(|change| change.desired != change.baseline)
+                    .filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)))
                     .map(|change| (change.field, change.desired.clone()))
                     .collect(),
                 persisted: false,
@@ -221,7 +241,7 @@ impl Settings {
             serde_json::to_vec(&settings)
                 .map_err(|error| ScopedSettingsError::Store(error.to_string()))?
         } else {
-            bytes
+            bytes.clone()
         };
         let mut root: RawSettingsObject = match serde_json::from_slice(&raw_source) {
             Ok(root) => root,
@@ -265,22 +285,37 @@ impl Settings {
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
         if changes
             .iter()
-            .filter(|change| change.desired != change.baseline)
+            .filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)))
             .any(|change| change.field.value(&candidate_settings) != change.desired)
         {
             return Err(ScopedSettingsError::Store(
                 "Settings patch did not produce the requested values".into(),
             ));
         }
-        if token.is_some_and(|token| !token.begin_irrevocable_commit()) {
-            return Err(ScopedSettingsError::Cancelled);
+        if grouped {
+            let failure = std::cell::RefCell::new(None);
+            let committed = std::cell::Cell::new(false);
+            let result = crate::common::atomic_file::save_atomic_if(path, &candidate, || {
+                let error = match read_exact_bytes(path) {
+                    Ok(current) if current == bytes => if !committed.get() && token.is_some_and(|token| !token.begin_irrevocable_commit()) { Some(ScopedSettingsError::Cancelled) } else { committed.set(true); None },
+                    Ok(current) => match parse_effective_settings(path, &current) {
+                        Ok(settings) => changes.iter().find(|change| placement.contains(&change.field) && change.field.value(&settings) != change.baseline).map(|change| ScopedSettingsError::Conflict(change.field)).or_else(|| Some(ScopedSettingsError::Store("Settings changed while saving; retry the save".into()))),
+                        Err(error) => Some(ScopedSettingsError::Store(error.to_string())),
+                    },
+                    Err(error) => Some(ScopedSettingsError::Store(error.to_string())),
+                };
+                if let Some(error) = error { *failure.borrow_mut() = Some(error); false } else { true }
+            });
+            if let Some(error) = failure.into_inner() { return Err(error); }
+            result.map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
+        } else {
+            if token.is_some_and(|token| !token.begin_irrevocable_commit()) { return Err(ScopedSettingsError::Cancelled); }
+            save_json_atomic(path, &root).map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
         }
-        save_json_atomic(path, &root)
-            .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
         Ok(ScopedSettingsAcknowledgement {
             values: changes
                 .iter()
-                .filter(|change| change.desired != change.baseline)
+                .filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)))
                 .map(|change| (change.field, change.desired.clone()))
                 .collect(),
             persisted: true,
@@ -421,5 +456,37 @@ mod tests {
             Settings::read_current(path).unwrap().hide_after_run,
             !defaults.hide_after_run
         );
+    }
+
+    #[test]
+    fn placement_group_checks_untouched_dependencies_and_keeps_opaque_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let raw = br#"{"follow_mouse":false,"static_location_enabled":true,"static_pos":[-40,20],"static_size":[600,400],"opaque":123456789012345678901}"#;
+        std::fs::write(&path, raw).unwrap();
+        let changes = [
+            change(Field::FollowMouse, Value::Bool(false), Value::Bool(true)),
+            change(Field::StaticLocationEnabled, Value::Bool(true), Value::Bool(false)),
+            change(Field::StaticPosition, Value::OptionalPair(Some((-40, 20))), Value::OptionalPair(None)),
+            change(Field::StaticSize, Value::OptionalPair(Some((600, 400))), Value::OptionalPair(None)),
+        ];
+        let token = SettingsBooleanSaveToken::new(123);
+        assert!(token.request_cancel());
+        assert_eq!(Settings::save_scoped_preferences_cancellable(&path, &changes, &token), Err(ScopedSettingsError::Cancelled));
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
+        let ack = Settings::save_scoped_preferences_checked(&path, &changes).unwrap();
+        assert_eq!(ack.values.len(), 4);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("123456789012345678901"));
+        let settings = Settings::read_current(&path).unwrap();
+        assert!(settings.follow_mouse);
+        assert!(!settings.static_location_enabled);
+        assert_eq!(settings.static_pos, None);
+        assert_eq!(settings.static_size, None);
+        std::fs::write(&path, raw).unwrap();
+        let mut changed = changes.clone();
+        changed[3].desired = changed[3].baseline.clone();
+        std::fs::write(&path, br#"{"follow_mouse":false,"static_location_enabled":true,"static_pos":[-40,20],"static_size":[601,400]}"#).unwrap();
+        assert_eq!(Settings::save_scoped_preferences_checked(&path, &changed), Err(ScopedSettingsError::Conflict(Field::StaticSize)));
     }
 }

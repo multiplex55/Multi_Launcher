@@ -18,6 +18,12 @@ pub(super) enum Target {
     Duration,
     Inline,
     ErrorToasts,
+    FollowMouse,
+    StaticPosition,
+    StaticX,
+    StaticY,
+    StaticWidth,
+    StaticHeight,
 }
 impl Target {
     fn from_id(id: &str) -> Option<Self> {
@@ -36,6 +42,12 @@ impl Target {
             ids::FEEDBACK_TOAST_DURATION | ids::FEEDBACK_TOAST_DURATION_VALUE => Self::Duration,
             ids::FEEDBACK_INLINE_ERRORS => Self::Inline,
             ids::FEEDBACK_ERROR_TOASTS => Self::ErrorToasts,
+            ids::LAUNCHER_FOLLOW_MOUSE => Self::FollowMouse,
+            ids::LAUNCHER_STATIC_POSITION => Self::StaticPosition,
+            "launcher.static_x" => Self::StaticX,
+            "launcher.static_y" => Self::StaticY,
+            "launcher.static_width" => Self::StaticWidth,
+            "launcher.static_height" => Self::StaticHeight,
             _ => return None,
         })
     }
@@ -50,6 +62,7 @@ impl Target {
                 | Self::Grid
                 | Self::Columns
                 | Self::Respect
+                | Self::FollowMouse | Self::StaticPosition | Self::StaticX | Self::StaticY | Self::StaticWidth | Self::StaticHeight
         )
     }
 }
@@ -492,5 +505,13 @@ mod tests {
         );
         assert_eq!(Target::from_id("search.grid_rows"), None);
         assert_eq!(Target::from_id("plugins.toggle_sections"), None);
+    }
+
+    #[test]
+    fn real_catalog_routes_launcher_placement_controls() {
+        let catalog = multi_launcher::settings_editor::catalog::SettingsCatalog::default();
+        for (query, expected) in [("follow mouse", Target::FollowMouse), ("use static position", Target::StaticPosition), ("static position x", Target::StaticX), ("static window height", Target::StaticHeight)] {
+            assert!(catalog.search(query).iter().any(|entry| Target::from_id(entry.id.as_str()) == Some(expected)));
+        }
     }
 }

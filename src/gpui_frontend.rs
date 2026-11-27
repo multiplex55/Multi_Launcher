@@ -2523,6 +2523,7 @@ struct RootWindow {
     #[cfg(windows)]
     downloads_triage: Option<Entity<downloads_triage::DownloadsTriageView>>,
     app_data_root: multi_launcher::platform::app_data::AppDataRoot,
+    placement_preferences: Arc<Mutex<root_placement::RootPlacement>>,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     hash_window: HashWindowState,
     hash_return: Option<HashReturnReceipt>,
@@ -13238,6 +13239,8 @@ pub(crate) fn run_foundation_window(
             }),
             ..Default::default()
         };
+        let placement_preferences = Arc::new(Mutex::new(root_placement));
+        let placement_for_root = placement_preferences.clone();
         let controller_for_root = Arc::clone(&controller_for_app);
         let closing_for_root = Arc::clone(&closing_for_app);
         let utility_sizes_for_root = Arc::clone(&utility_size_store);
@@ -13451,6 +13454,7 @@ pub(crate) fn run_foundation_window(
                 #[cfg(windows)]
                 downloads_triage: None,
                 app_data_root: app_data_root.clone(),
+                placement_preferences: placement_for_root.clone(),
                 file_search_settings: file_search_settings.clone(),
                 hash_window: HashWindowState::Closed,
                 hash_return: None,
@@ -14404,7 +14408,8 @@ pub(crate) fn run_foundation_window(
                     }
                     if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
                     if root_placement::should_place_reveal(was_visible, desired_visible, visibility.is_current(revision, desired_visible)) {
-                        if let Err(error) = root_placement::apply_placement(root_placement, native_window, root_placement::PlacementEdge::Reveal, || {
+                        let current_placement = *placement_preferences.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        if let Err(error) = root_placement::apply_placement(current_placement, native_window, root_placement::PlacementEdge::Reveal, || {
                             visibility.is_current(revision, true) && !restart_admission_for_hotkey.is_fenced()
                                 && (!checked_hotkey_reveal || (!hotkey_edge_pending(&trigger)
                                     && foreground.is_none_or(|expected| current_foreground_identity() == Some(expected)
