@@ -55,6 +55,7 @@ mod tempfile_view;
 mod timer_view;
 mod gesture_editor;
 mod gesture_query;
+mod invocation;
 mod tempfile_search;
 mod clipboard_modify_startup;
 mod regex_history;
@@ -168,7 +169,6 @@ use multi_launcher::hash_generator::{
     HashAlgorithm, HashClipboardCopy, HashComparison, HashInputMode, HashSession,
 };
 use multi_launcher::hotkey::HotkeyListener;
-#[cfg(windows)]
 use multi_launcher::hotkey::runtime::HotkeyTrigger;
 use multi_launcher::hotkey::{Hotkey, parse_hotkey};
 use multi_launcher::hotkey::runtime::legacy_virtual_key;
@@ -2377,7 +2377,7 @@ fn toggle_coordinate_hud_probe(
 
 struct RootWindow {
     root_window: Option<AnyWindowHandle>,
-    listener_slot: Arc<Mutex<Option<HotkeyListener>>>,
+    invocation: Arc<invocation::Owner>,
     root_visibility: RootVisibility,
     query: Entity<InputState>,
     enabled_plugins: Option<HashSet<String>>,
@@ -4666,7 +4666,7 @@ struct AcceptedRestart {
     root_window: AnyWindowHandle,
     child_windows: Vec<AnyWindowHandle>,
     native_windows: Vec<NativeWindow>,
-    listener_slot: Arc<Mutex<Option<HotkeyListener>>>,
+    invocation: Arc<invocation::Owner>,
     coordinate_controller: Arc<Mutex<CoordinateToolController>>,
     coordinate_shutdown_complete: Arc<AtomicBool>,
     restart_retiring: Arc<AtomicBool>,
@@ -6282,7 +6282,7 @@ impl RootWindow {
             root_window,
             child_windows: snapshot.child_windows,
             native_windows: snapshot.native_windows,
-            listener_slot: Arc::clone(&self.listener_slot),
+            invocation: Arc::clone(&self.invocation),
             coordinate_controller: Arc::clone(&self.coordinate_hud_probe_controller),
             coordinate_shutdown_complete: Arc::clone(&self.coordinate_shutdown_complete),
             restart_retiring: Arc::clone(&self.restart_retiring),
@@ -6317,20 +6317,14 @@ impl RootWindow {
             }
             cx.background_executor().timer(Duration::from_millis(40)).await;
         }
-        let listener_slot = Arc::clone(&accepted.listener_slot);
+        let invocation = Arc::clone(&accepted.invocation);
         let coordinate_controller = Arc::clone(&accepted.coordinate_controller);
         let coordinate_shutdown_complete = Arc::clone(&accepted.coordinate_shutdown_complete);
         let gesture_owner = accepted.gesture_owner.clone();
         let teardown = cx
             .background_executor()
             .spawn(async move {
-                let listener_stop = match listener_slot.lock() {
-                    Ok(mut slot) => slot
-                        .take()
-                        .map_or(Ok(()), |mut listener| listener.stop_checked()),
-                    Err(_) => Err("the hotkey listener owner lock was poisoned".to_owned()),
-                };
-                listener_stop?;
+                invocation.stop_checked()?;
                 coordinate_controller
                     .lock()
                     .map_err(|_| "the Coordinate HUD controller lock was poisoned".to_owned())?
@@ -13063,22 +13057,6 @@ fn reveal_edge_is_current(revision_current: bool, newer_hotkey_pending: bool) ->
 }
 
 #[cfg(windows)]
-fn hotkey_edge_pending(trigger: &HotkeyTrigger) -> bool {
-    trigger.open.lock().map(|pending| *pending).unwrap_or(true)
-}
-
-#[cfg(any(test, windows))]
-fn rollback_reveal_unless_hotkey_pending(visibility: &RootVisibility, revision: u64, trigger: &multi_launcher::hotkey::runtime::HotkeyTrigger) -> bool {
-    if let Ok(pending) = trigger.open.lock() {
-        if !*pending && visibility.is_current(revision, true) {
-            visibility.revert_if_current(revision, true);
-            return true;
-        }
-    }
-    false
-}
-
-#[cfg(windows)]
 fn reconcile_aborted_gesture_show(visibility: &RootVisibility, revision: u64, native: NativeWindow, fallback: bool) -> bool {
     use windows::Win32::{Foundation::HWND, UI::WindowsAndMessaging::IsIconic};
     if visibility.is_current(revision, true) {
@@ -13110,10 +13088,11 @@ fn activate_for_root_request(
     desired_visible: bool,
     target: NativeWindow,
     expected_foreground: Option<ForegroundIdentity>,
-    newer_hotkey: Option<&HotkeyTrigger>,
+    turn: &invocation::Turn,
+    guard_pending: bool,
 ) -> bool {
-    let current = || reveal_edge_is_current(visibility.is_current(revision, desired_visible),
-        newer_hotkey.is_some_and(hotkey_edge_pending));
+    let current = || turn.current() && reveal_edge_is_current(visibility.is_current(revision, desired_visible),
+        guard_pending && turn.pending());
     if !current() || !native_window_is_valid(target) {
         return false;
     }
@@ -13282,10 +13261,10 @@ pub(crate) fn run_foundation_window(
     let subscription_sink = Rc::clone(&subscriptions);
     let root_for_quit = Rc::new(RefCell::new(None::<WeakEntity<RootWindow>>));
     let root_for_quit_callback = Rc::clone(&root_for_quit);
-    let listener_slot = Arc::new(Mutex::new(None::<HotkeyListener>));
-    let listener_slot_for_run = Arc::clone(&listener_slot);
-    let listener_slot_for_quit = Arc::clone(&listener_slot);
-    let listener_slot_for_root = Arc::clone(&listener_slot);
+    let invocation = Arc::new(invocation::Owner::default());
+    let invocation_for_run = Arc::clone(&invocation);
+    let invocation_for_quit = Arc::clone(&invocation);
+    let invocation_for_root = Arc::clone(&invocation);
     let restart_admission = Arc::new(RestartAdmission::default());
     let restart_admission_for_quit = Arc::clone(&restart_admission);
     let settings_save_workers_for_quit = settings_save_workers.clone();
@@ -13429,11 +13408,7 @@ pub(crate) fn run_foundation_window(
             hash_mount_generation_for_quit.store(0, Ordering::Release);
             hash_rehost_pending_for_quit.store(false, Ordering::Release);
             hash_file_picker_pending_for_quit.store(false, Ordering::Release);
-            if let Ok(mut listener) = listener_slot_for_quit.lock()
-                && let Some(mut listener) = listener.take()
-            {
-                listener.stop();
-            }
+            if let Err(error) = invocation_for_quit.stop_checked() { tracing::warn!(%error, "could not stop GPUI hotkey owner"); }
             let timer_task = timer.map(|timer| app.background_executor().spawn(async move { timer.shutdown() }));
             let gesture_task = gesture.map(|gesture| app.background_executor().spawn(async move { gesture.shutdown_checked() }));
             async move { if let Some(task) = timer_task { let _ = task.await; } if let Some(task) = gesture_task { let _ = task.await; } }
@@ -13513,7 +13488,7 @@ pub(crate) fn run_foundation_window(
                 search_catalog_for_root.initial_results(enabled_plugins.as_ref());
             let root = cx.new(move |cx| RootWindow {
                 root_window: None,
-                listener_slot: Arc::clone(&listener_slot_for_root),
+                invocation: Arc::clone(&invocation_for_root),
                 root_visibility: visibility_for_root.clone(),
                 query,
                 enabled_plugins: enabled_plugins.clone(),
@@ -14386,18 +14361,11 @@ pub(crate) fn run_foundation_window(
                     return;
                 }
             };
-            if let Ok(mut slot) = listener_slot_for_run.lock() {
-                *slot = Some(listener);
-            } else {
+            if invocation_for_run.install(listener, trigger, quick_help_trigger).is_err() {
                 *startup_error_sink.borrow_mut() =
                     Some("Could not initialize the GPUI hotkey owner.".to_owned());
                 cx.quit();
                 return;
-            }
-            if let Ok(slot) = listener_slot_for_run.lock()
-                && let Some(listener) = slot.as_ref()
-            {
-                listener.activate();
             }
             if !visibility.activate() {
                 *startup_error_sink.borrow_mut() =
@@ -14420,8 +14388,9 @@ pub(crate) fn run_foundation_window(
             cx.spawn(async move |cx| {
                 let mut event_rx: Receiver<()> = event_rx;
                 let mut return_target = initial_return_target;
+                let startup_turn = invocation_for_run.turn();
                 if let Err(error) = root_placement::apply_placement(root_placement, native_window, root_placement::PlacementEdge::Startup, || {
-                    visibility.is_current(startup_revision, true) && !restart_admission_for_hotkey.is_fenced()
+                    startup_turn.as_ref().is_some_and(|turn| turn.current()) && visibility.is_current(startup_revision, true) && !restart_admission_for_hotkey.is_fenced()
                 }) {
                     tracing::warn!(%error, "could not apply saved launcher placement");
                 }
@@ -14437,10 +14406,9 @@ pub(crate) fn run_foundation_window(
                     if event.is_err() || !visibility.active.load(Ordering::Acquire) {
                         break;
                     }
+                    let Some(turn) = invocation_for_run.turn() else { break; };
                     let Some(_operation) = restart_admission_for_hotkey.admit() else {
-                        if let Some(trigger) = quick_help_trigger.as_ref() {
-                            trigger.clear_pending();
-                        }
+                        turn.clear_quick_help();
                         break;
                     };
 
@@ -14462,9 +14430,7 @@ pub(crate) fn run_foundation_window(
                         });
                     }
 
-                    let quick_help_stamp = quick_help_trigger
-                        .as_ref()
-                        .and_then(|trigger| trigger.take_scoped_stamp());
+                    let quick_help_stamp = turn.quick_help();
                     let mut requested_visible = visibility.take_requested_visible();
                     if let Some(Some(revision)) = quick_help_stamp
                         && visibility.is_current_visible_revision(revision, native_window)
@@ -14483,7 +14449,7 @@ pub(crate) fn run_foundation_window(
                                     .is_some_and(|handle| {
                                         handle.window_id() == root_window.window_id()
                                     });
-                                if root_handle_matches
+                                if turn.current() && root_handle_matches
                                     && root.native_window == Some(native_window)
                                     && root
                                         .root_visibility
@@ -14504,7 +14470,7 @@ pub(crate) fn run_foundation_window(
                         visibility.current_visible_revision(native_window).is_some()
                     } else { visibility.visible.load(Ordering::Acquire) };
                     let hotkey_for_conditional = requested_visible.as_ref()
-                        .is_some_and(|request| request.superseded_by_hotkey(|| trigger.take()));
+                        .is_some_and(|request| request.superseded_by_hotkey(|| turn.take()));
                     let gesture_request = requested_visible.as_ref().and_then(|request| match request {
                         RootVisibilityRequest::GestureQuery(request) => Some(request.clone()), _ => None,
                     });
@@ -14568,7 +14534,7 @@ pub(crate) fn run_foundation_window(
                             && native_window_is_valid(gesture.source)
                             && !restart_admission_for_hotkey.is_fenced()
                     });
-                    let accepted_visible = if hotkey_for_conditional || !gesture_current || !switch_query_current || !close_current || !undo_current || !dock_current || !utility_destination_current {
+                    let accepted_visible = if !turn.current() || hotkey_for_conditional || !gesture_current || !switch_query_current || !close_current || !undo_current || !dock_current || !utility_destination_current {
                         None
                     } else {
                         requested_visible.as_ref().and_then(|request| visibility.accept_requested_visible(request))
@@ -14592,7 +14558,7 @@ pub(crate) fn run_foundation_window(
                         if let Some((revision, visible)) = accepted_visible {
                             let hash_focus_generation = dock_reveal.as_ref().and_then(|(_, generation, _)| *generation);
                             (revision, visible, hash_focus_generation, false)
-                        } else if hotkey_for_conditional || trigger.take() {
+                        } else if hotkey_for_conditional || turn.take() {
                             let (revision, visible) = visibility.next_toggle();
                             (revision, visible, None, true)
                         } else {
@@ -14610,27 +14576,27 @@ pub(crate) fn run_foundation_window(
                     } else {
                         (None, None)
                     };
-                    if !visibility.is_current(revision, desired_visible) {
+                    if !turn.current() || !visibility.is_current(revision, desired_visible) {
                         continue;
                     }
                     let checked_hotkey_reveal = hotkey_toggle && desired_visible && !was_visible;
                     let checked_gesture_reveal = gesture_request.is_some();
-                    let gesture_still_current = || gesture_request.as_ref().is_none_or(|request| {
+                    let gesture_still_current = || turn.current() && gesture_request.as_ref().is_none_or(|request| {
                         visibility.is_current(revision, true) && request.owner.is_current(&request.release) && request.root == native_window
                             && native_window_is_valid(native_window)
                             && current_foreground_identity() == Some(request.source())
                             && native_window_is_valid(NativeWindow { identity: request.source() })
-                            && !restart_admission_for_hotkey.is_fenced() && !hotkey_edge_pending(&trigger) && !visibility.has_current_established_request()
+                            && !restart_admission_for_hotkey.is_fenced() && !turn.pending() && !visibility.has_current_established_request()
                     });
                     if checked_gesture_reveal && !gesture_still_current() {
                         let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible);
                         continue;
                     }
-                    if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
+                    if checked_hotkey_reveal && turn.pending() { continue; }
                     if checked_hotkey_reveal || checked_gesture_reveal {
                         if let Some(expected) = foreground.filter(|identity| *identity != native_window.identity) {
                             let worker_visibility = visibility.clone();
-                            let worker_trigger = trigger.clone();
+                            let worker_turn = turn.clone();
                             let worker_admission = restart_admission_for_hotkey.clone();
                             let worker_gesture = gesture_request.clone();
                             let request = multi_launcher::window_activation::CheckedRootDesktop {
@@ -14640,7 +14606,7 @@ pub(crate) fn run_foundation_window(
                                     tid: native_window.identity.thread_id,
                                 },
                                 is_current: Arc::new(move || {
-                                    reveal_edge_is_current(worker_visibility.is_current(revision, true), hotkey_edge_pending(&worker_trigger))
+                                    worker_turn.current() && reveal_edge_is_current(worker_visibility.is_current(revision, true), worker_turn.pending())
                                         && !worker_admission.is_fenced() && native_window_is_valid(native_window)
                                         && native_window_is_valid(NativeWindow { identity: expected })
                                         && current_foreground_identity() == Some(expected)
@@ -14654,7 +14620,7 @@ pub(crate) fn run_foundation_window(
                             if let Err(error) = result {
                                 // Keep the pending-edge observation and rollback ordered against
                                 // listener publication. A second press remains queued for its own toggle.
-                                let reverted = if checked_gesture_reveal { reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible) } else { rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger) };
+                                let reverted = if checked_gesture_reveal { reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible) } else { turn.rollback(&visibility, revision) };
                                 if reverted && gesture_request.as_ref().is_none_or(|request| request.owner.is_current(&request.release)) {
                                     let _ = root_view.update(&mut *cx, |root, cx| {
                                         root.launcher_search_error = Some(format!("Could not show launcher on the current desktop: {error}"));
@@ -14665,7 +14631,7 @@ pub(crate) fn run_foundation_window(
                             }
                         }
                     }
-                    if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
+                    if checked_hotkey_reveal && turn.pending() { continue; }
                     if checked_gesture_reveal && !gesture_still_current() { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); continue; }
                     if checked_gesture_reveal && !update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| root.gesture_query_destination_available(window, cx)).unwrap_or(false) {
                         let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); continue;
@@ -14673,8 +14639,8 @@ pub(crate) fn run_foundation_window(
                     if root_placement::should_place_reveal(was_visible, desired_visible, visibility.is_current(revision, desired_visible)) {
                         let current_placement = *placement_preferences.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         if let Err(error) = root_placement::apply_placement(current_placement, native_window, root_placement::PlacementEdge::Reveal, || {
-                            visibility.is_current(revision, true) && !restart_admission_for_hotkey.is_fenced()
-                                && (!checked_hotkey_reveal || (!hotkey_edge_pending(&trigger)
+                            turn.current() && visibility.is_current(revision, true) && !restart_admission_for_hotkey.is_fenced()
+                                && (!checked_hotkey_reveal || (!turn.pending()
                                     && foreground.is_none_or(|expected| current_foreground_identity() == Some(expected)
                                         && native_window_is_valid(NativeWindow { identity: expected }))))
                                 && gesture_still_current()
@@ -14685,14 +14651,14 @@ pub(crate) fn run_foundation_window(
                             continue;
                         }
                     }
-                    let reveal_current = || gesture_still_current() && (!checked_hotkey_reveal || (
-                        reveal_edge_is_current(visibility.is_current(revision, true), hotkey_edge_pending(&trigger))
+                    let reveal_current = || turn.current() && gesture_still_current() && (!checked_hotkey_reveal || (
+                        reveal_edge_is_current(visibility.is_current(revision, true), turn.pending())
                             && !restart_admission_for_hotkey.is_fenced() && native_window_is_valid(native_window)
                             && foreground.is_none_or(|expected| current_foreground_identity() == Some(expected)
                                 && native_window_is_valid(NativeWindow { identity: expected }))
                     ));
                     if !reveal_current() {
-                        if checked_gesture_reveal { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); } else { rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger); }
+                        if checked_gesture_reveal { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); } else { turn.rollback(&visibility, revision); }
                         continue;
                     }
                     if checked_gesture_reveal && !update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| root.gesture_query_destination_available(window, cx)).unwrap_or(false) {
@@ -14815,7 +14781,7 @@ pub(crate) fn run_foundation_window(
                         }
                     };
                     if !reveal_current() {
-                        if checked_gesture_reveal { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); } else { rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger); }
+                        if checked_gesture_reveal { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); } else { turn.rollback(&visibility, revision); }
                         continue;
                     }
                     if !visibility.is_current(revision, desired_visible) {
@@ -14867,25 +14833,29 @@ pub(crate) fn run_foundation_window(
                         }
                     }
                     if !reveal_current() {
-                        if checked_gesture_reveal { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); } else { rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger); }
+                        if checked_gesture_reveal { let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); } else { turn.rollback(&visibility, revision); }
                         continue;
                     }
                     if checked_gesture_reveal && !update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| root.gesture_query_destination_available(window, cx)).unwrap_or(false) {
                         let _ = reconcile_aborted_gesture_show(&visibility, revision, native_window, was_visible); continue;
                     }
-                    if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
+                    if checked_hotkey_reveal && turn.pending() { continue; }
                     if let Err(error) = set_native_window_visible(native_window, desired_visible) {
                         if checked_gesture_reveal {
                             settle_failed_gesture_show(&visibility, revision, native_window, gesture_prior_state, was_visible);
                         } else if checked_hotkey_reveal {
-                            rollback_reveal_unless_hotkey_pending(&visibility, revision, &trigger);
+                            turn.rollback(&visibility, revision);
                         } else {
                             visibility.revert_if_current(revision, desired_visible);
                         }
                         tracing::error!(%error, "could not change GPUI root window visibility");
                         continue;
                     }
-                    if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
+                    if !turn.current() {
+                        if checked_gesture_reveal { settle_failed_gesture_show(&visibility, revision, native_window, gesture_prior_state, was_visible); }
+                        continue;
+                    }
+                    if checked_hotkey_reveal && turn.pending() { continue; }
                     if desired_visible && !checked_gesture_reveal && !(was_visible && dock_reveal.as_ref().is_some_and(|(_, _, mount)| mount.is_some())) {
                         return_target = foreground
                             .filter(|captured| Some(*captured) == foreground_before_transition)
@@ -14924,7 +14894,7 @@ pub(crate) fn run_foundation_window(
                             });
                         }
                     }
-                    if checked_hotkey_reveal && hotkey_edge_pending(&trigger) { continue; }
+                    if checked_hotkey_reveal && turn.pending() { continue; }
                     let foreground_after_transition = current_foreground_identity();
                     let show_request_is_current = show_request_is_current
                         && foreground_after_transition == foreground_before_transition;
@@ -14950,11 +14920,11 @@ pub(crate) fn run_foundation_window(
                             };
                         }
                         if root_activation_accepted && visibility.is_current(revision, true) && request.owner.is_current(&request.release)
-                            && !hotkey_edge_pending(&trigger) && !restart_admission_for_hotkey.is_fenced() {
+                            && !turn.pending() && !restart_admission_for_hotkey.is_fenced() {
                             committed = update_kit_window_content(root_window, &root_view, &mut *cx, |root, window, cx| {
                                 if root.native_window != Some(native_window) || current_foreground_identity() != Some(native_window.identity)
                                     || !visibility.is_current(revision, true) || !request.owner.is_current(&request.release)
-                                    || root.restart_admission.is_fenced() || hotkey_edge_pending(&trigger) || visibility.has_current_established_request()
+                                    || root.restart_admission.is_fenced() || turn.pending() || visibility.has_current_established_request()
                                     || !root.gesture_query_destination_available(window, cx) { return false; }
                                 let Some(outcome) = gesture_outcome.clone() else { return false; };
                                 let Some(permit) = root.restart_admission.admit() else { return false; };
@@ -15008,7 +14978,7 @@ pub(crate) fn run_foundation_window(
                     } else if let Some(target) = target {
                         let expected_foreground = foreground_after_transition;
                         let visibility = visibility.clone();
-                        let activation_trigger = checked_hotkey_reveal.then(|| trigger.clone());
+                        let activation_turn = turn.clone();
                         root_activation_accepted = cx.background_executor()
                             .spawn(async move {
                                 activate_for_root_request(
@@ -15017,13 +14987,15 @@ pub(crate) fn run_foundation_window(
                                     desired_visible,
                                     target,
                                     expected_foreground,
-                                    activation_trigger.as_deref(),
+                                    &activation_turn,
+                                    checked_hotkey_reveal,
                                 )
                             })
                             .await;
                     }
-                    if desired_visible && visibility.is_current(revision, true) {
+                    if desired_visible && turn.current() && !turn.pending() && visibility.is_current(revision, true) {
                         if let Ok(mut saved) = visibility.snippet_origin.lock() {
+                            if !turn.current() || turn.pending() || !visibility.is_current(revision, true) { continue; }
                             if was_visible {
                                 if let Some((issued, _)) = saved.as_mut() { *issued = revision; }
                             } else if root_activation_accepted
@@ -15041,6 +15013,8 @@ pub(crate) fn run_foundation_window(
                         && desired_visible
                         && search_focus_selected
                         && show_request_is_current
+                        && turn.current()
+                        && !turn.pending()
                         && visibility.is_current(revision, true)
                     {
                         let foreground = cx
@@ -15048,6 +15022,8 @@ pub(crate) fn run_foundation_window(
                             .spawn(async { current_foreground_identity() })
                             .await;
                         if foreground == Some(native_window.identity)
+                            && turn.current()
+                            && !turn.pending()
                             && visibility.is_current(revision, true)
                         {
                             let _ = cx.update(|app| {
@@ -15057,6 +15033,8 @@ pub(crate) fn run_foundation_window(
                                     app,
                                     |root, window, cx| {
                                         if root.native_window == Some(native_window)
+                                            && turn.current()
+                                            && !turn.pending()
                                             && visibility.is_current(revision, true)
                                             && current_foreground_identity()
                                                 == Some(native_window.identity)
@@ -15114,11 +15092,7 @@ pub(crate) fn run_foundation_window(
         }
     }
 
-    if let Ok(mut listener) = listener_slot.lock()
-        && let Some(mut listener) = listener.take()
-    {
-        listener.stop();
-    }
+    if let Err(error) = invocation.stop_checked() { tracing::warn!(%error, "could not stop GPUI hotkey owner"); }
 
     let settings_save_receipt = settings_save_workers.join_all_checked();
     let (utility_size_failures, utility_size_pending) = {
@@ -19437,15 +19411,16 @@ mod tests {
         assert!(super::reveal_edge_is_current(visibility.is_current(first, true), false));
         assert!(!super::reveal_edge_is_current(visibility.is_current(first, true), true));
         // Leave the accepted first bit intact until the queued edge is drained.
-        let trigger = multi_launcher::hotkey::runtime::HotkeyTrigger::new(multi_launcher::hotkey::parse_hotkey("F2").unwrap());
+        let (turn, trigger) = super::invocation::test_turn();
         *trigger.open.lock().unwrap() = true;
-        assert!(!super::rollback_reveal_unless_hotkey_pending(&visibility, first, &trigger));
-        assert!(trigger.take());
+        assert!(!turn.rollback(&visibility, first));
+        assert!(turn.pending());
+        assert!(turn.take());
         let (_, visible) = visibility.next_toggle();
         assert!(!visible);
         assert!(!super::reveal_edge_is_current(visibility.is_current(first, true), false));
         let (fresh, _) = visibility.next_toggle();
-        assert!(super::rollback_reveal_unless_hotkey_pending(&visibility, fresh, &trigger));
+        assert!(turn.rollback(&visibility, fresh));
         let (_, visible) = visibility.next_toggle();
         assert!(visible);
     }
