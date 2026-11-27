@@ -179,7 +179,7 @@ impl multi_launcher::plugin::Plugin for TempfileBare {
     }
     fn commands(&self) -> Vec<Action> {
         multi_launcher::plugin::Plugin::commands(&multi_launcher::plugins::tempfile::TempfilePlugin)
-            .into_iter().filter(|action| matches!(action.action.as_str(), "query:tmp" | "query:tmp list")).collect()
+            .into_iter().filter(|action| matches!(action.action.as_str(), "query:tmp" | "query:tmp list" | "query:tmp rm ")).collect()
     }
 }
 
@@ -701,6 +701,9 @@ mod tests {
         assert_eq!(rows[0].action, "tempfile:dialog");
         assert!(super::tempfile_rows("tmp new secret", Some(&enabled), None).is_empty());
         assert!(super::tempfile_rows("tmp", Some(&HashSet::new()), None).is_empty());
+        let commands = super::TempfileBare.commands();
+        assert!(commands.iter().any(|action| action.action == "query:tmp rm "));
+        assert!(!commands.iter().any(|action| action.action == "query:tmp clear"));
     }
 
     #[test]

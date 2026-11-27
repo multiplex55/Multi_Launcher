@@ -28,6 +28,7 @@ pub struct ListedTempFile {
     root_path: PathBuf,
     root_identity: FileIdentity,
     root_resolved: PathBuf,
+    operation: ListedOperation,
     #[cfg(unix)]
     _root_hold: Arc<std::fs::File>,
     #[cfg(unix)]
@@ -36,10 +37,20 @@ pub struct ListedTempFile {
     resolved_path: PathBuf,
 }
 
+#[derive(Clone)]
+enum ListedOperation { Open, Remove, Alias(String) }
+
 /// Scan without creating a missing storage directory. The caller owns query
 /// generation and can revoke the scan between entries.
 pub fn list_checked_in(dir: &Path, query: &str, current: impl Fn() -> bool) -> anyhow::Result<Vec<ListedTempFile>> {
-    let Some(filter) = crate::plugins::tempfile::list_filter(query) else { return Ok(Vec::new()); };
+    enum Projection { List(String), Remove(String), Alias(String, String) }
+    let projection = if let Some(filter) = crate::plugins::tempfile::remove_filter(query) {
+        Projection::Remove(filter)
+    } else if let Some((file, alias)) = crate::plugins::tempfile::alias_parts(query) {
+        Projection::Alias(file.to_owned(), alias.to_owned())
+    } else if let Some(filter) = crate::plugins::tempfile::list_filter(query) {
+        Projection::List(filter)
+    } else { return Ok(Vec::new()); };
     anyhow::ensure!(current(), "Temp file search was superseded");
     let metadata = match std::fs::symlink_metadata(dir) {
         Ok(metadata) => metadata,
@@ -67,7 +78,11 @@ pub fn list_checked_in(dir: &Path, query: &str, current: impl Fn() -> bool) -> a
         let name = entry.file_name();
         let path = dir.join(&name);
         let Some(name_text) = name.to_str() else { continue; };
-        if !name_text.to_lowercase().contains(&filter)
+        let matches = match &projection {
+            Projection::List(filter) | Projection::Remove(filter) => name_text.to_lowercase().contains(filter),
+            Projection::Alias(file, _) => name_text == file,
+        };
+        if !matches
             || !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("txt")) { continue; }
         let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue; };
         if !metadata.file_type().is_file() || is_reparse(&metadata) { continue; }
@@ -99,7 +114,13 @@ pub fn list_checked_in(dir: &Path, query: &str, current: impl Fn() -> bool) -> a
         if open_published_guard(&path, Some(identity.0)).is_none() { continue; }
         #[cfg(not(windows))]
         if !same_published_file(&file, &path) { continue; }
-        rows.push(ListedTempFile { action: crate::plugins::tempfile::list_action(&path), path, file_identity: identity, root_path: dir.to_owned(), root_identity, root_resolved: canonical.clone(), #[cfg(windows)] resolved_path, #[cfg(unix)] _root_hold: root_file.clone(), #[cfg(unix)] _file_hold: Arc::new(file) });
+        let (action, operation) = match &projection {
+            Projection::List(_) => (crate::plugins::tempfile::list_action(&path), ListedOperation::Open),
+            Projection::Remove(_) => (crate::plugins::tempfile::remove_action(&path), ListedOperation::Remove),
+            Projection::Alias(file, alias) => (crate::plugins::tempfile::alias_action(&path, file, alias), ListedOperation::Alias(alias.clone())),
+        };
+        rows.push(ListedTempFile { action, operation, path, file_identity: identity, root_path: dir.to_owned(), root_identity, root_resolved: canonical.clone(), #[cfg(windows)] resolved_path, #[cfg(unix)] _root_hold: root_file.clone(), #[cfg(unix)] _file_hold: Arc::new(file) });
+        if matches!(projection, Projection::Alias(..)) { break; }
     }
     anyhow::ensure!(current(), "Temp file search was superseded");
     anyhow::ensure!(root_matches(dir, root_identity, &canonical), "Temp file storage changed during search");
@@ -142,11 +163,71 @@ fn is_reparse(metadata: &std::fs::Metadata) -> bool {
 }
 
 pub fn open_listed_if_current(row: &ListedTempFile, current: impl Fn() -> bool) -> anyhow::Result<CreateAndOpenOutcome> {
+    anyhow::ensure!(matches!(row.operation, ListedOperation::Open), "Not a temporary file Open row");
     open_listed_with_effect(row, current, || true)
 }
 
 pub fn open_listed_with_effect(row: &ListedTempFile, current: impl Fn() -> bool, before_effect: impl Fn() -> bool) -> anyhow::Result<CreateAndOpenOutcome> {
+    anyhow::ensure!(matches!(row.operation, ListedOperation::Open), "Not a temporary file Open row");
     open_listed_with(row, &current, |path, guard| crate::actions::exec::launch_association_if_current(path.as_os_str(), || guard() && before_effect()))
+}
+
+/// Rename or remove exactly the observed object using its opened native handle.
+#[cfg(windows)]
+pub fn mutate_listed_with_effect(row: &ListedTempFile, current: impl Fn() -> bool, before_effect: impl Fn() -> bool) -> anyhow::Result<()> {
+    use std::path::{Component, Prefix};
+    let target = match &row.operation {
+        ListedOperation::Open => anyhow::bail!("Not a temporary file mutation row"),
+        ListedOperation::Remove => None,
+        ListedOperation::Alias(alias) => {
+            let alias = crate::plugins::tempfile::validate_alias(alias)?;
+            let extension = row.path.extension().and_then(|value| value.to_str()).unwrap_or("txt");
+            Some(row.root_resolved.join(format!("temp_{alias}.{extension}")))
+        }
+    };
+    let drive = match row.root_resolved.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() { Prefix::VerbatimDisk(drive) | Prefix::Disk(drive) => drive, _ => anyhow::bail!("Temporary file mutation requires a local drive path") },
+        _ => anyhow::bail!("Temporary file mutation requires a local drive path"),
+    };
+    let drive_root = [u16::from(drive), b':' as u16, b'\\' as u16, 0];
+    // The stack array is a NUL-terminated drive root and remains live for the call.
+    let drive_type = unsafe { windows::Win32::Storage::FileSystem::GetDriveTypeW(windows::core::PCWSTR(drive_root.as_ptr())) };
+    anyhow::ensure!(matches!(drive_type, 2 | 3 | 5 | 6), "Temporary file mutation requires an available local drive");
+    anyhow::ensure!(current(), "Temporary file request was superseded");
+    let root = open_storage_root(&row.root_path, false)?;
+    anyhow::ensure!(file_identity(&root) == Some(row.root_identity) && root_matches(&row.root_path, row.root_identity, &row.root_resolved), "Temporary file storage changed");
+    let file = crate::file_operations::open_tempfile_mutation_file(&row.resolved_path)?;
+    anyhow::ensure!(file_identity(&file) == Some(row.file_identity)
+        && crate::file_operations::final_path_for_handle_verbatim(&file).ok().as_ref() == Some(&row.resolved_path)
+        && row.resolved_path.parent() == Some(row.root_resolved.as_path()), "Temporary file changed");
+    let same_name = target.as_ref().is_some_and(|target| target == &row.resolved_path);
+    let target_vacant = || -> anyhow::Result<()> {
+        if let Some(target) = target.as_ref().filter(|_| !same_name) {
+            match std::fs::symlink_metadata(target) {
+                Ok(_) => anyhow::bail!("Temporary file alias target already exists"),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    };
+    target_vacant()?;
+    anyhow::ensure!(root_matches(&row.root_path, row.root_identity, &row.root_resolved) && current() && before_effect(), "Temporary file request was superseded");
+    target_vacant()?;
+    anyhow::ensure!(root_matches(&row.root_path, row.root_identity, &row.root_resolved) && current(), "Temporary file request was superseded");
+    match target {
+        Some(_) if same_name => {},
+        Some(target) => crate::file_operations::rename_open_file_no_replace_to_path(&file, &target)?,
+        None => crate::file_operations::delete_open_file(&file)?,
+    }
+    drop(file);
+    drop(root);
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub fn mutate_listed_with_effect(_: &ListedTempFile, _: impl Fn() -> bool, _: impl Fn() -> bool) -> anyhow::Result<()> {
+    anyhow::bail!("Checked temporary file mutation requires Windows")
 }
 
 fn open_listed_with(row: &ListedTempFile, current: &dyn Fn() -> bool, launch: impl FnOnce(&Path, &dyn Fn() -> bool) -> anyhow::Result<()>) -> anyhow::Result<CreateAndOpenOutcome> {
@@ -415,6 +496,129 @@ mod checked_creation_tests {
         std::fs::write(root.join("owned.txt"), b"replacement").unwrap();
         let outcome = open_listed_with(&row, &|| true, |_, _| panic!("replacement root must not launch")).unwrap();
         assert!(matches!(outcome, CreateAndOpenOutcome::Published { reason: PublishedReason::Changed, .. }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_alias_and_remove_preserve_siblings_and_refuse_collision() {
+        let root = tempfile::tempdir().unwrap();
+        let original = root.path().join("Café.txt");
+        let sibling = root.path().join("other.txt");
+        let target = root.path().join("temp_new name.txt");
+        std::fs::write(&original, b"exact").unwrap();
+        std::fs::write(&sibling, b"sibling").unwrap();
+        let row = list_checked_in(root.path(), "tmp alias Café.txt new name", || true).unwrap().remove(0);
+        let result = mutate_listed_with_effect(&row, || true, || {
+            std::fs::write(&target, b"foreign").unwrap(); true
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"foreign");
+        assert_eq!(std::fs::read(&original).unwrap(), b"exact");
+        std::fs::remove_file(&target).unwrap();
+        assert!(mutate_listed_with_effect(&row, || true, || false).is_err());
+        assert!(original.exists());
+        mutate_listed_with_effect(&row, || true, || true).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"exact");
+        assert!(!original.exists());
+        let row = list_checked_in(root.path(), "tmp rm new name", || true).unwrap().remove(0);
+        mutate_listed_with_effect(&row, || true, || true).unwrap();
+        assert!(!target.exists());
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"sibling");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_mutation_rejects_replaced_file_and_root() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("storage");
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("owned.txt");
+        std::fs::write(&path, b"original").unwrap();
+        let row = list_checked_in(&root, "tmp rm owned", || true).unwrap().remove(0);
+        std::fs::rename(&path, root.join("moved.txt")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        assert!(mutate_listed_with_effect(&row, || true, || true).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+        std::fs::rename(&root, base.path().join("old")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("owned.txt"), b"other").unwrap();
+        assert!(mutate_listed_with_effect(&row, || true, || true).is_err());
+        assert_eq!(std::fs::read(root.join("owned.txt")).unwrap(), b"other");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_alias_refuses_hard_link_and_same_name_is_guarded_noop() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("temp_owned.txt");
+        let target = root.path().join("temp_other.txt");
+        std::fs::write(&source, b"owned").unwrap();
+        std::fs::hard_link(&source, &target).unwrap();
+        let row = list_checked_in(root.path(), "tmp alias temp_owned.txt other", || true).unwrap().remove(0);
+        let calls = std::cell::Cell::new(0);
+        assert!(mutate_listed_with_effect(&row, || true, || { calls.set(calls.get() + 1); true }).is_err());
+        assert_eq!(calls.get(), 0);
+        assert_eq!(std::fs::read(&source).unwrap(), b"owned");
+        let same = list_checked_in(root.path(), "tmp alias temp_owned.txt owned", || true).unwrap().remove(0);
+        assert!(mutate_listed_with_effect(&same, || false, || { calls.set(calls.get() + 1); true }).is_err());
+        assert_eq!(calls.get(), 0);
+        mutate_listed_with_effect(&same, || true, || { calls.set(calls.get() + 1); true }).unwrap();
+        assert_eq!(calls.get(), 1);
+        assert_eq!(std::fs::read(&source).unwrap(), b"owned");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_alias_rejects_hard_link_created_during_effect_claim() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("owned.txt");
+        let target = root.path().join("temp_late.txt");
+        std::fs::write(&source, b"original").unwrap();
+        let row = list_checked_in(root.path(), "tmp alias owned.txt late", || true).unwrap().remove(0);
+        let claims = std::cell::Cell::new(0);
+        let result = mutate_listed_with_effect(&row, || true, || {
+            claims.set(claims.get() + 1);
+            std::fs::hard_link(&source, &target).unwrap();
+            true
+        });
+        assert!(result.is_err());
+        assert_eq!(claims.get(), 1);
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_alias_rechecks_authority_after_effect_claim() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("owned.txt");
+        std::fs::write(&source, b"original").unwrap();
+        let row = list_checked_in(root.path(), "tmp alias owned.txt later", || true).unwrap().remove(0);
+        let current = std::cell::Cell::new(true);
+        let claims = std::cell::Cell::new(0);
+        let result = mutate_listed_with_effect(&row, || current.get(), || {
+            claims.set(claims.get() + 1);
+            current.set(false);
+            true
+        });
+        assert!(result.is_err());
+        assert_eq!(claims.get(), 1);
+        assert_eq!(std::fs::read(&source).unwrap(), b"original");
+        assert!(!root.path().join("temp_later.txt").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_mutation_accepts_a_relative_storage_directory() {
+        let root = tempfile::tempdir_in(".").unwrap();
+        let relative = Path::new(root.path().file_name().unwrap());
+        assert!(relative.is_relative());
+        assert_eq!(std::fs::canonicalize(relative).unwrap(), std::fs::canonicalize(root.path()).unwrap());
+        let source = relative.join("owned.txt");
+        std::fs::write(&source, b"owned").unwrap();
+        let row = list_checked_in(relative, "tmp rm owned", || true).unwrap().remove(0);
+        mutate_listed_with_effect(&row, || true, || true).unwrap();
+        assert!(!source.exists());
     }
 
     #[cfg(windows)]

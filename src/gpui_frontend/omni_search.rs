@@ -369,7 +369,7 @@ impl RootWindow {
         let guard = external_launch::OmniGuard {
             catalog,
             lease: Arc::new(AtomicBool::new(true)),
-            effect_entered: Arc::new(AtomicBool::new(false)),
+            effect_gate: Arc::new(external_launch::EffectGate::default()),
             visibility: self.root_visibility.clone(),
             revision: self
                 .root_visibility

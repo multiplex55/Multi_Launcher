@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-fn validate_alias(alias: &str) -> anyhow::Result<&str> {
+pub(crate) fn validate_alias(alias: &str) -> anyhow::Result<&str> {
     if alias.contains('\0') {
         anyhow::bail!("alias contains invalid characters");
     }
@@ -231,6 +231,26 @@ pub fn list_action(path: &Path) -> Action {
     Action { label: name, desc: "Tempfile".into(), action: path.to_string_lossy().into(), args: None }
 }
 
+pub fn remove_filter(query: &str) -> Option<String> {
+    crate::common::strip_prefix_ci(query.trim(), "tmp rm").map(|rest| rest.trim().to_lowercase())
+}
+pub fn alias_parts(query: &str) -> Option<(&str, &str)> {
+    let rest = crate::common::strip_prefix_ci(query.trim(), "tmp alias")?;
+    let mut parts = rest.trim().splitn(2, ' ');
+    let file = parts.next()?.trim();
+    let alias = parts.next()?.trim();
+    (!file.is_empty() && !alias.is_empty()).then_some((file, alias))
+}
+pub fn remove_action(path: &Path) -> Action {
+    let mut action = list_action(path);
+    action.label = format!("Remove {}", action.label);
+    action.action = format!("tempfile:remove:{}", path.to_string_lossy());
+    action
+}
+pub fn alias_action(path: &Path, name: &str, alias: &str) -> Action {
+    Action { label: format!("Set alias {name} -> {alias}"), desc: "Tempfile".into(), action: format!("tempfile:alias:{}|{alias}", path.to_string_lossy()), args: None }
+}
+
 impl Plugin for TempfilePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
@@ -289,9 +309,7 @@ impl Plugin for TempfilePlugin {
                 args: None,
             }];
         }
-        const RM_PREFIX: &str = "tmp rm";
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, RM_PREFIX) {
-            let filter = rest.trim().to_lowercase();
+        if let Some(filter) = remove_filter(trimmed) {
             let files = list_files().unwrap_or_default();
             return files
                 .into_iter()
@@ -302,42 +320,14 @@ impl Plugin for TempfilePlugin {
                             .map(|n| n.to_lowercase().contains(&filter))
                             .unwrap_or(false)
                 })
-                .map(|p| {
-                    let name = p
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| p.to_string_lossy().into_owned());
-                    Action {
-                        label: format!("Remove {}", name),
-                        desc: "Tempfile".into(),
-                        action: format!("tempfile:remove:{}", p.to_string_lossy()),
-                        args: None,
-                    }
-                })
+                .map(|p| remove_action(&p))
                 .collect();
         }
-        const ALIAS_PREFIX: &str = "tmp alias";
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, ALIAS_PREFIX) {
-            let mut parts = rest.trim().splitn(2, ' ');
-            if let (Some(file), Some(alias)) = (parts.next(), parts.next()) {
-                let file = file.trim();
-                let alias = alias.trim();
-                if !file.is_empty() && !alias.is_empty() {
-                    let files = list_files().unwrap_or_default();
-                    for p in files {
-                        if p.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n == file)
-                            .unwrap_or(false)
-                        {
-                            return vec![Action {
-                                label: format!("Set alias {} -> {}", file, alias),
-                                desc: "Tempfile".into(),
-                                action: format!("tempfile:alias:{}|{}", p.to_string_lossy(), alias),
-                                args: None,
-                            }];
-                        }
-                    }
+        if let Some((file, alias)) = alias_parts(trimmed) {
+            let files = list_files().unwrap_or_default();
+            for p in files {
+                if p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == file) {
+                    return vec![alias_action(&p, file, alias)];
                 }
             }
         }

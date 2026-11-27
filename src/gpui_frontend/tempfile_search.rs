@@ -51,6 +51,12 @@ pub(super) fn list_query(query: &str) -> bool {
     let (query, _) = multi_launcher::common::query::split_action_filters(query);
     multi_launcher::plugins::tempfile::list_filter(&query).is_some()
 }
+pub(super) fn mutation_query(query: &str) -> bool {
+    let (query, _) = multi_launcher::common::query::split_action_filters(query);
+    multi_launcher::plugins::tempfile::remove_filter(&query).is_some()
+        || multi_launcher::plugins::tempfile::alias_parts(&query).is_some()
+}
+pub(super) fn supported_query(query: &str) -> bool { list_query(query) || mutation_query(query) }
 struct Rows<'a>(&'a [ListedTempFile]);
 impl Plugin for Rows<'_> {
     fn name(&self) -> &str { "tempfile" }
@@ -118,7 +124,7 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{Owner, enabled, list_query};
+    use super::{Owner, enabled, list_query, mutation_query};
     use std::sync::{Arc, atomic::AtomicBool};
 
     #[test]
@@ -145,5 +151,28 @@ mod tests {
         assert!(list_query(query));
         assert!(!list_query("tmp open"));
         assert!(!enabled(Some(&std::collections::HashSet::new()), None));
+    }
+
+    #[test]
+    fn mutation_receipt_preserves_stock_query_and_full_action() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("Café.txt");
+        std::fs::write(&path, b"owned").unwrap();
+        let query = "tmp alias Café.txt new name";
+        let rows = multi_launcher::actions::tempfiles::list_checked_in(temporary.path(), query, || true).unwrap();
+        assert_eq!(rows.len(), 1);
+        let action = multi_launcher::plugins::tempfile::alias_action(&path, "Café.txt", "new name");
+        assert_eq!(rows[0].action, action);
+        let mut owner = Owner::default();
+        owner.published = Some((query.into(), 2, rows, Arc::new(AtomicBool::new(true))));
+        assert!(owner.receipt(2, query, &action).is_some());
+        let mut forged = action.clone();
+        forged.label.push('!');
+        assert!(owner.receipt(2, query, &forged).is_none());
+        assert!(owner.receipt(2, "tmp alias Café.txt other", &action).is_none());
+        owner.retire();
+        assert!(owner.receipt(2, query, &action).is_none());
+        assert!(mutation_query("tmp rm CAFÉ"));
+        assert!(!mutation_query("tmp alias Café.txt"));
     }
 }

@@ -7165,7 +7165,7 @@ impl RootWindow {
             .take_clipboard_modify_projection().map(|(effective, catalog)| (query.clone(), effective, catalog));
         self.snippets_search.projection = self.search_catalog.providers.take_snippets_projection()
             .map(|(effective, snapshot)| (query.clone(), effective, snapshot));
-        if tempfile_search::list_query(&query) && tempfile_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+        if tempfile_search::supported_query(&query) && tempfile_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
             self.start_tempfile_search(query, raw_provider_actions, scroll_to_search, cx);
             return;
         }
@@ -8030,19 +8030,23 @@ impl RootWindow {
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "tempfile")
-            && tempfile_search::list_query(&query) {
+            && tempfile_search::supported_query(&query) {
             if !tempfile_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
                 || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
             let Some((row, catalog)) = self.tempfile_search.receipt(generation, &query, &result.action) else { return; };
             let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
             let guard = external_launch::OmniGuard {
-                catalog, lease: Arc::new(AtomicBool::new(true)), effect_entered: Arc::new(AtomicBool::new(false)),
+                catalog, lease: Arc::new(AtomicBool::new(true)), effect_gate: Arc::new(external_launch::EffectGate::default()),
                 visibility: self.root_visibility.clone(), revision: self.root_visibility.request_revision.load(Ordering::Acquire),
                 native, admission: self.restart_admission.clone(),
             };
-            let command = multi_launcher::commands::ExternalCommand { target: result.action.action.clone(), args: None, namespace: None };
-            self.start_omni_launch(result.action, command, external_launch::OmniTarget::Tempfile(row), guard, query, source, window, cx);
+            if tempfile_search::list_query(&query) {
+                let command = multi_launcher::commands::ExternalCommand { target: result.action.action.clone(), args: None, namespace: None };
+                self.start_omni_launch(result.action, command, external_launch::OmniTarget::Tempfile(row), guard, query, source, window, cx);
+            } else if let Ok(Command::Storage(command @ (StorageCommand::TempfileRemove(_) | StorageCommand::TempfileAlias { .. }))) = parse_action(&result.action) {
+                self.start_tempfile_mutation(result.action, command, row, guard, query, source, window, cx);
+            }
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Omni(_)) {
@@ -14496,7 +14500,7 @@ pub(crate) fn run_foundation_window(
                                     && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
                                     || (file_search::typed_query(&query)
                                         && file_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
-                                    || (tempfile_search::list_query(&query)
+                                    || (tempfile_search::supported_query(&query)
                                         && tempfile_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
                                 {
                                     root.refresh_launcher_results_with_viewport(query, false, cx);

@@ -1,5 +1,5 @@
 //! Single-flight ownership for ordinary external launcher actions.
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU8, Ordering}};
 
 use gpui_kit::{AppContext as _, Context, FocusHandle, Focusable as _, WeakEntity, Window, WindowId};
 use multi_launcher::actions::Action;
@@ -548,6 +548,7 @@ pub(super) enum RunCommand {
     Omni { command: ExternalCommand, target: OmniTarget, guard: OmniGuard },
     Indexed { command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority },
     Favorite(ExternalCommand),
+    TempfileMutation { command: multi_launcher::commands::StorageCommand, row: multi_launcher::actions::tempfiles::ListedTempFile, guard: OmniGuard },
     Copy(String),
     WindowSwitch(multi_launcher::window_activation::CheckedWindowSwitch),
     WindowClose(multi_launcher::window_close::CheckedWindowClose),
@@ -589,7 +590,7 @@ pub(super) enum OmniTarget {
 pub(super) struct OmniGuard {
     pub catalog: Arc<AtomicBool>,
     pub lease: Arc<AtomicBool>,
-    pub effect_entered: Arc<AtomicBool>,
+    pub effect_gate: Arc<EffectGate>,
     pub visibility: super::RootVisibility,
     pub revision: u64,
     pub native: super::NativeWindow,
@@ -603,7 +604,7 @@ impl OmniGuard {
             && super::json_utility::native_host_current(&self.visibility, self.revision, Some(self.native), false)
     }
     fn effect_current(&self) -> bool {
-        claim_omni_effect(&self.effect_entered, || self.current())
+        claim_omni_effect(&self.effect_gate, || self.current()) && self.current()
     }
     fn receipt_current(&self) -> bool {
         self.catalog.load(Ordering::Acquire) && self.lease.load(Ordering::Acquire)
@@ -612,10 +613,19 @@ impl OmniGuard {
     }
 }
 
-fn claim_omni_effect(entered: &AtomicBool, current: impl FnOnce() -> bool) -> bool {
+#[derive(Default)]
+pub(super) struct EffectGate(AtomicU8);
+const EFFECT_PENDING: u8 = 0;
+const EFFECT_ENTERED: u8 = 1;
+const EFFECT_REVOKED: u8 = 2;
+impl EffectGate {
+    fn revoke_pending(&self) -> bool {
+        self.0.compare_exchange(EFFECT_PENDING, EFFECT_REVOKED, Ordering::AcqRel, Ordering::Acquire).is_ok()
+    }
+}
+fn claim_omni_effect(gate: &EffectGate, current: impl FnOnce() -> bool) -> bool {
     if !current() { return false; }
-    entered.store(true, Ordering::Release);
-    true
+    gate.0.compare_exchange(EFFECT_PENDING, EFFECT_ENTERED, Ordering::AcqRel, Ordering::Acquire).is_ok()
 }
 
 #[derive(Clone)]
@@ -652,7 +662,7 @@ struct Pending {
     focus_guard: Option<gpui_kit::Subscription>,
     snippet_effect: bool,
     omni_lease: Option<Arc<AtomicBool>>,
-    omni_effect_entered: Option<Arc<AtomicBool>>,
+    omni_gate: Option<Arc<EffectGate>>,
 }
 
 #[derive(Default)]
@@ -700,14 +710,15 @@ impl ExternalLaunch {
     }
 
     pub(super) fn retire_omni(&self) {
-        if let Some(lease) = self.pending.as_ref().and_then(|pending| pending.omni_lease.as_ref()) {
-            lease.store(false, Ordering::Release);
+        if let Some(pending) = self.pending.as_ref() {
+            if let Some(gate) = &pending.omni_gate { gate.revoke_pending(); }
+            if let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
         }
     }
 
     pub(super) fn retire_omni_before_effect(&self) {
         if let Some(pending) = &self.pending
-            && pending.omni_effect_entered.as_ref().is_some_and(|entered| !entered.load(Ordering::Acquire))
+            && pending.omni_gate.as_ref().is_some_and(|gate| gate.revoke_pending())
             && let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
     }
 
@@ -754,8 +765,8 @@ impl ExternalLaunch {
             clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
-            omni_lease: match &request.command { RunCommand::Omni { guard, .. } => Some(guard.lease.clone()), _ => None },
-            omni_effect_entered: match &request.command { RunCommand::Omni { guard, .. } => Some(guard.effect_entered.clone()), _ => None },
+            omni_lease: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_gate: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
         });
         Some(ticket)
     }
@@ -955,6 +966,17 @@ fn execute_request(
                 &mut IndexedHost { host, authority })
         }
         RunCommand::Favorite(command) => CommandBus.dispatch_external(command, &request.action, request.source, None, &mut FavoriteHost { host }),
+        RunCommand::TempfileMutation { command, row, guard } => {
+            let effect = if row.action == request.action {
+                multi_launcher::actions::tempfiles::mutate_listed_with_effect(row, || guard.current(), || guard.effect_current())
+            } else { Err(anyhow::anyhow!("Temporary file result changed")) };
+            CommandBus.complete_checked_tempfile_mutation(command.clone(), &request.action, request.source, effect,
+                multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run,
+                    refocus: true,
+                })
+        }
         RunCommand::WindowSwitch(checked) => {
             let effect = multi_launcher::window_activation::activate_checked_window_switch(checked.clone())
                 .map_err(anyhow::Error::new);
@@ -1077,7 +1099,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::Omni { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1520,6 +1542,12 @@ impl RootWindow {
         self.start_run(action, RunCommand::Omni { command, target, guard }, query, source, None, window, cx);
     }
 
+    pub(super) fn start_tempfile_mutation(&mut self, action: Action, command: multi_launcher::commands::StorageCommand,
+        row: multi_launcher::actions::tempfiles::ListedTempFile, guard: OmniGuard, query: String, source: ActivationSource,
+        window: &mut Window, cx: &mut Context<Self>) {
+        self.start_run(action, RunCommand::TempfileMutation { command, row, guard }, query, source, None, window, cx);
+    }
+
     fn start_run(
         &mut self,
         action: Action,
@@ -1570,17 +1598,17 @@ impl RootWindow {
                 lease.store(false, Ordering::Release);
             }
         }
-        if let RunCommand::Omni { guard, .. } = &request.command {
+        if let RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } = &request.command {
             if let Some(focus) = window.focused(cx) {
                 let lease = guard.lease.clone();
-                let effect_entered = guard.effect_entered.clone();
+                let effect_gate = guard.effect_gate.clone();
                 let subscription = cx.on_blur(&focus, window, move |_, _, _| {
-                    if !effect_entered.load(Ordering::Acquire) { lease.store(false, Ordering::Release); }
+                    if effect_gate.revoke_pending() { lease.store(false, Ordering::Release); }
                 });
                 if let Some(pending) = self.external_launch.pending.as_mut().filter(|pending| pending.ticket == ticket) {
                     pending.focus_guard = Some(subscription);
                 }
-            } else { guard.lease.store(false, Ordering::Release); }
+            } else { guard.effect_gate.revoke_pending(); guard.lease.store(false, Ordering::Release); }
         }
         if matches!(&request.command, RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. }) {
             if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, cx| { view.retire_read_for_effect(); cx.notify(); }); }
@@ -1702,7 +1730,7 @@ impl RootWindow {
             RunCommand::ClipboardUndo(current, _) => current() && window.is_window_active(),
             RunCommand::ClipboardExecute { current, .. } => current() && window.is_window_active(),
             RunCommand::SnippetRun { current, .. } => current() && window.is_window_active(),
-            RunCommand::Omni { guard, .. } => guard.receipt_current(),
+            RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => guard.receipt_current(),
             _ => true,
         };
         let local_focus_owned = self.external_owner_is_current(receipt.stamp.focus.as_ref(), window, cx);
@@ -1715,6 +1743,15 @@ impl RootWindow {
         ) && window.window_handle().window_id() == root.window_id()
             && local_focus_owned && switch_current;
         if !current {
+            if matches!(&receipt.request.command, RunCommand::TempfileMutation { .. })
+                && receipt.result.outcome.is_ok() && visible && !self.restart_admission.is_fenced() {
+                let query = self.query.read(cx).value().to_string();
+                if super::tempfile_search::supported_query(&query)
+                    && super::tempfile_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                    && self.launcher_results.query == query {
+                    self.refresh_launcher_results_with_viewport(query, false, cx);
+                }
+            }
             cx.notify();
             return;
         }
@@ -1903,6 +1940,12 @@ impl RootWindow {
                 );
             }
         }
+        if matches!(&receipt.request.command, RunCommand::TempfileMutation { .. })
+            && receipt.result.outcome.as_ref().is_ok_and(|outcome| outcome.search)
+            && changed_query.is_none() {
+            let query = self.query.read(cx).value().to_string();
+            self.refresh_launcher_results_with_viewport(query, false, cx);
+        }
         if let (Some(expected_query), Some(message)) = (changed_query, deferred_inline) {
             let expected_generation = receipt.stamp.generation.wrapping_add(1).max(1);
             let origin_focus = if matches!(&receipt.request.command, RunCommand::ClipboardExecute { .. })
@@ -2039,7 +2082,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "o".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_effect_entered: Some(Arc::new(AtomicBool::new(false))),
+            omni_lease: Some(lease.clone()), omni_gate: Some(Arc::new(EffectGate::default())),
         });
         assert!(owner.defer_notes_wake_for_omni());
         assert!(owner.defer_notes_wake_for_omni());
@@ -2054,22 +2097,32 @@ mod tests {
 
     #[test]
     fn omni_final_effect_rechecks_current_and_marks_only_entered_calls() {
-        let entered = AtomicBool::new(false);
+        let gate = EffectGate::default();
         let current = AtomicBool::new(true);
         let calls = std::cell::Cell::new(0);
         let run = |revoke: bool| {
             if revoke { current.store(false, Ordering::Release); }
-            if claim_omni_effect(&entered, || current.load(Ordering::Acquire)) {
+            if claim_omni_effect(&gate, || current.load(Ordering::Acquire)) {
                 calls.set(calls.get() + 1);
             }
         };
         run(true);
         assert_eq!(calls.get(), 0);
-        assert!(!entered.load(Ordering::Acquire));
+        assert_eq!(gate.0.load(Ordering::Acquire), EFFECT_PENDING);
         current.store(true, Ordering::Release);
         run(false);
         assert_eq!(calls.get(), 1);
-        assert!(entered.load(Ordering::Acquire));
+        assert_eq!(gate.0.load(Ordering::Acquire), EFFECT_ENTERED);
+        assert!(!gate.revoke_pending());
+        assert!(!claim_omni_effect(&gate, || true));
+    }
+
+    #[test]
+    fn omni_effect_cannot_enter_after_completed_revocation() {
+        let gate = EffectGate::default();
+        assert!(!claim_omni_effect(&gate, || { assert!(gate.revoke_pending()); true }));
+        assert_eq!(gate.0.load(Ordering::Acquire), EFFECT_REVOKED);
+        assert!(!claim_omni_effect(&gate, || true));
     }
 
     #[test]

@@ -6559,6 +6559,15 @@ fn open_native_mutation_file(path: &Path) -> std::io::Result<OpenedObject<std::f
 }
 
 #[cfg(windows)]
+pub(crate) fn open_tempfile_mutation_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let opened = open_native_mutation_file(path)?;
+    if opened.kind != SnapshotEntryKind::File || opened.reparse_point {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Temporary file is not a regular file"));
+    }
+    Ok(opened.handle)
+}
+
+#[cfg(windows)]
 fn open_native_replace_file(path: &Path) -> std::io::Result<OpenedObject<std::fs::File>> {
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::fs::MetadataExt;
@@ -8969,7 +8978,7 @@ unsafe fn replace_dacl_equal(left: &ReplaceSecurityParts, right: &ReplaceSecurit
 }
 
 #[cfg(windows)]
-fn delete_open_file(file: &std::fs::File) -> std::io::Result<()> {
+pub(crate) fn delete_open_file(file: &std::fs::File) -> std::io::Result<()> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::{BOOLEAN, HANDLE};
     use windows::Win32::Storage::FileSystem::{

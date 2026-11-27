@@ -13,3 +13,7 @@ Select `search_tmp_returns_dialog`, `create_named_file_rejects_invalid_alias`, `
 ## Listing and opening temporary text files
 
 Stock `tmp list [filter]` shows the current ordinary text files from the configured store. The exact result uses checked Windows association through the existing external-effect owner. Create refreshes the list when the relevant query still owns the launcher. Matched native association and the wider management and alias routes remain open. [List and Open checkpoint](../CHECKPOINTS.md#p016-checked-temporary-file-list-and-open)
+
+## Direct Alias and Remove
+
+The checked `tmp alias <filename> <alias>` and `tmp rm [filter]` commands act on the exact current local text file. The command receives the same filename grammar and alias as stock egui. The dedicated Set Alias form retains its original criteria. [Alias and removal checkpoint](../CHECKPOINTS.md#p016-checked-temporary-file-alias-and-removal)
