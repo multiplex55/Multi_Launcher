@@ -11,4 +11,4 @@ Select `timer_and_alarm_authoring_keep_their_drafts_across_actual_host_moves`, `
 
 ## Retained GPUI routes
 
-The exact stock bare `timer` and `alarm` rows open the retained form. Start, sound Preview, current active rows and exact cancellation use the shared scheduler. Canonical Alarm restore, Start and Cancel have focused evidence. The matched user interactions, host moves and remaining picker and active-entry controls are open. [Timer and Alarm checkpoint](../CHECKPOINTS.md#p017-retained-timers-and-checked-alarms)
+The exact stock bare `timer` and `alarm` rows open the retained form. Start, sound Preview, current active rows, countdown Pause and Resume and exact cancellation use the shared scheduler. [Countdown controls](../CHECKPOINTS.md#p017-checked-countdown-pause-and-resume) Canonical Alarm restore, Start and Cancel have focused evidence. The matched user interactions, host moves and remaining picker and active-entry controls are open. [Timer and Alarm checkpoint](../CHECKPOINTS.md#p017-retained-timers-and-checked-alarms)

@@ -9,11 +9,19 @@ use crate::platform::app_data::AppDataRoot;
 use crate::plugins::timer::{self, ACTIVE_TIMERS};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TimerKind {
+    Countdown,
+    Alarm,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TimerRow {
     pub id: u64,
     pub generation: u64,
     pub label: String,
     pub remaining: Duration,
+    pub kind: TimerKind,
+    pub paused: bool,
 }
 
 pub struct TimerSession {
@@ -103,15 +111,16 @@ impl TimerSession {
     }
 
     pub fn rows(&self) -> Vec<TimerRow> {
-        let Ok(owned) = self.owned.try_lock() else {
-            return Vec::new();
-        };
+        self.try_rows().unwrap_or_default()
+    }
+
+    /// None means the snapshot is temporarily unavailable, not that timers ended.
+    pub fn try_rows(&self) -> Option<Vec<TimerRow>> {
+        let owned = self.owned.try_lock().ok()?;
         let Some(owned) = owned.as_ref() else {
-            return Vec::new();
+            return Some(Vec::new());
         };
-        let Ok(active) = ACTIVE_TIMERS.try_lock() else {
-            return Vec::new();
-        };
+        let active = ACTIVE_TIMERS.try_lock().ok()?;
         let now = Instant::now();
         let mut rows: Vec<_> = owned
             .iter()
@@ -120,6 +129,8 @@ impl TimerSession {
                 id: entry.id,
                 generation: entry.generation,
                 label: entry.label.clone(),
+                kind: if entry.persist { TimerKind::Alarm } else { TimerKind::Countdown },
+                paused: entry.paused,
                 remaining: if entry.paused {
                     entry.remaining
                 } else {
@@ -128,7 +139,7 @@ impl TimerSession {
             })
             .collect();
         rows.sort_by_key(|row| row.id);
-        rows
+        Some(rows)
     }
 
     pub fn cancel(&self, id: u64, generation: u64) -> Result<bool, String> {
@@ -148,6 +159,14 @@ impl TimerSession {
         }
         owned.remove(&id);
         Ok(true)
+    }
+
+    /// Toggle an exact countdown receipt while the caller's authority is live.
+    pub fn set_countdown_paused_if(&self, id: u64, generation: u64, expected_paused: bool, current: impl Fn() -> bool) -> Result<bool, String> {
+        let owned = self.owned.lock().map_err(|_| "Timer session unavailable")?;
+        let owned = owned.as_ref().ok_or("Timer session closed")?;
+        if !owned.contains(&id) { return Ok(false); }
+        timer::set_session_countdown_paused_if(id, generation, expected_paused, current).map_err(|error| error.to_string())
     }
 
     pub fn take_finished(&self) -> Vec<String> {
@@ -199,6 +218,7 @@ impl Drop for TimerSession {
 mod tests {
     use super::TimerSession;
     use crate::platform::app_data::AppDataRoot;
+    use crate::plugins::timer;
     use std::sync::Arc;
 
     #[test]
@@ -234,6 +254,46 @@ mod tests {
         let final_root = AppDataRoot::from_settings_path(dir.path().join("settings.json")).unwrap();
         let last = TimerSession::start(final_root, Arc::new(|| {})).unwrap();
         last.shutdown().unwrap();
+    }
+
+    #[test]
+    fn countdown_pause_resume_rejects_stale_receipts_and_preserves_alarm_bytes() {
+        use super::TimerKind;
+        let _owner = crate::plugins::timer::TEST_TIMER_INBOX_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_settings_path(dir.path().join("settings.json")).unwrap();
+        let session = TimerSession::start(root, Arc::new(|| {})).unwrap();
+        session.restore_alarms().unwrap();
+        let alarm = session.start_alarm("1d 12:00", "alarm", "None").unwrap();
+        let alarm_bytes = std::fs::read(dir.path().join("alarms.json")).unwrap();
+        let id = session.start_timer("1h", "timer", "None").unwrap();
+        let original = session.rows().into_iter().find(|row| row.id == id).unwrap();
+        assert_eq!(original.kind, TimerKind::Countdown);
+        assert!(!original.paused);
+        assert!(!session.set_countdown_paused_if(id, original.generation + 1, false, || true).unwrap());
+        assert!(session.set_countdown_paused_if(id, original.generation, false, || false).is_err());
+        assert!(session.set_countdown_paused_if(id, original.generation, false, || true).unwrap());
+        assert_eq!(timer::session_heap_generation_for_test(id), None);
+        let paused = session.rows().into_iter().find(|row| row.id == id).unwrap();
+        assert!(paused.paused);
+        assert_eq!(paused.generation, original.generation.wrapping_add(1));
+        assert_eq!(session.rows().into_iter().find(|row| row.id == id).unwrap().remaining, paused.remaining);
+        crate::plugins::timer::fire_session_timer_for_test(id, original.generation);
+        assert!(session.take_finished().is_empty());
+        assert!(!session.set_countdown_paused_if(id, original.generation, false, || true).unwrap());
+        assert!(session.set_countdown_paused_if(id, paused.generation, true, || true).unwrap());
+        assert_eq!(timer::session_heap_generation_for_test(id), Some(paused.generation.wrapping_add(1)));
+        let resumed = session.rows().into_iter().find(|row| row.id == id).unwrap();
+        assert!(!resumed.paused);
+        assert_eq!(resumed.generation, paused.generation.wrapping_add(1));
+        crate::plugins::timer::fire_session_timer_for_test(id, paused.generation);
+        assert!(session.take_finished().is_empty());
+        let alarm_row = session.rows().into_iter().find(|row| row.id == alarm).unwrap();
+        assert_eq!(alarm_row.kind, TimerKind::Alarm);
+        assert!(session.set_countdown_paused_if(alarm, alarm_row.generation, false, || true).is_err());
+        assert_eq!(std::fs::read(dir.path().join("alarms.json")).unwrap(), alarm_bytes);
+        session.shutdown().unwrap();
+        assert!(session.set_countdown_paused_if(id, resumed.generation, false, || true).is_err());
     }
 
     #[test]

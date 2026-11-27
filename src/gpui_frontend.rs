@@ -5023,6 +5023,9 @@ impl RootWindow {
     }
 
     fn revoke_focus_bound_utility_operations(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.timer_view {
+            view.update(cx, |view, _| view.revoke_pause());
+        }
         if let Some(view) = &self.multi_manager_view {
             view.update(cx, |view, _| view.revoke_operation());
         }

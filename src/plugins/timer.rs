@@ -1130,6 +1130,44 @@ fn resume_entry_in_map(
     TimerMutation::Updated
 }
 
+/// Change only an exact session-owned countdown. The session lock is held by
+/// the caller; completion and active-map locks serialize this with firing.
+pub(crate) fn set_session_countdown_paused_if(
+    id: u64,
+    generation: u64,
+    expected_paused: bool,
+    current: impl Fn() -> bool,
+) -> anyhow::Result<bool> {
+    let _completion = TIMER_COMPLETION_LOCK.lock().map_err(|_| anyhow::anyhow!("timer completion unavailable"))?;
+    let mut timers = ACTIVE_TIMERS.lock().map_err(|_| anyhow::anyhow!("timer state unavailable"))?;
+    let Some(entry) = timers.get(&id).filter(|entry| entry.generation == generation && entry.paused == expected_paused) else { return Ok(false); };
+    anyhow::ensure!(!entry.persist, "Alarms cannot be paused or resumed");
+    let now = Instant::now();
+    if expected_paused { anyhow::ensure!(now.checked_add(entry.remaining).is_some(), "Timer deadline is out of range"); }
+    anyhow::ensure!(current(), "Timer request was superseded");
+    let changed = if expected_paused { resume_entry_in_map(&mut timers, id, now) } else { pause_entry_in_map(&mut timers, id, now) };
+    if changed != TimerMutation::Updated { return Ok(false); }
+    if expected_paused {
+        let entry = &timers[&id];
+        TIMER_MANAGER.register(entry.deadline, entry.id, entry.generation);
+    } else {
+        TIMER_MANAGER.remove(id);
+    }
+    TIMER_MANAGER.wakeup();
+    Ok(true)
+}
+
+#[cfg(test)]
+pub(crate) fn session_heap_generation_for_test(id: u64) -> Option<u64> {
+    let heap = TIMER_MANAGER.inner.heap.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    heap.positions.get(&id).map(|index| heap.entries[*index].generation)
+}
+
+#[cfg(test)]
+pub(crate) fn fire_session_timer_for_test(id: u64, generation: u64) {
+    TimerManager::fire_timer(id, generation);
+}
+
 fn notify(_msg: &str) {}
 
 fn format_duration(dur: Duration) -> String {

@@ -2018,3 +2018,15 @@ A failed rename retains its draft while the original source remains available. A
 The locked `fast-dev` shared library check passed in 1m 19s, the integrated check in 24.45 s, the settlement correction in 9.65 s and the final launcher check in 3.91 s. Independent review covered Action Sheet provenance, revocation, exact settlement and stale focus. The grouped library and launcher build took 5m 02s. Nextest run `bd489199-0607-4da1-bdf7-c31aafb764d4` passed 10 of 10 tests across two binaries in 3.880 s.
 
 P0.16 remains Stage 2. Paired 1516 × 937 Windows replay remains open for exact Action Sheet selection, long path and footer, unchanged Cancel, Unicode and spaces, occupied destination, and exact bytes and extension after rename. Directory Open, additional file types, bulk management and the remaining Temporary File criteria stay open. Continue P0.17 countdown Pause and Resume.
+
+### P0.17 checked countdown Pause and Resume
+
+Active countdown rows in the retained Timer pane expose Pause or Resume, with a visible Paused state and stable button identity. A control acts on its exact painted session row, generation and expected state. The checked operation holds the existing restart permit and busy lane, and rechecks mounted native visibility and focus authority before mutation.
+
+Pause freezes monotonic remaining time and retires the old scheduler entry. Resume registers a new generation at the checked deadline. The shared completion claim rejects the retired generation. The pane retains its last painted rows through the request and through temporary scheduler lock contention. Only an authoritative empty result clears them. The operation uses the existing wake and leaves launcher visibility, Search and command History unchanged.
+
+Ordinary countdowns use this volatile transition. Persistent alarms continue through their existing canonical Start, restore, completion and Cancel paths. Alarm Pause or rescheduling needs a separate durable schedule contract. Typed Search and Action Sheet routes for countdown Pause and Resume remain open.
+
+The locked `fast-dev` shared check passed in 1m 06s, integration in 32.21 s, the retained focus correction in 4.55 s and the final snapshot check in 28.15 s. Independent review confirmed exact session mutation, old-generation rejection, stable focus and contention handling. The initial grouped build stopped at a missing timer module import in the test. The corrected library and launcher Nextest build took 7m 26s. Nextest run `3831cece-82b4-4982-b30c-fd82d136ed9f` passed 7 of 7 tests across two binaries in 2.158 s.
+
+P0.17 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Pause an owned silent countdown beyond its original deadline, verify stable remaining time, resume, then verify exactly one completion and acknowledgement without a hidden launcher reveal. Continue P0.18 individual Mouse Gesture enablement.

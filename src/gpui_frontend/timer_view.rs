@@ -1,7 +1,7 @@
 //! Retained timer form and exact session completion presentation.
 use super::*;
 use multi_launcher::plugin::Plugin;
-use multi_launcher::plugins::timer_session::TimerSession;
+use multi_launcher::plugins::timer_session::{TimerKind, TimerRow, TimerSession};
 pub(super) const WAIT: &str = "Wait for the Timer or Alarm operation to finish.";
 
 pub(super) fn current_provider(
@@ -43,6 +43,10 @@ pub(super) struct TimerView {
     label: Entity<InputState>,
     sound: usize,
     feedback: Option<String>,
+    pause_lease: Option<Arc<AtomicBool>>,
+    pause_focus_guard: Option<Subscription>,
+    pause_active_guard: Option<Subscription>,
+    painted_rows: Vec<TimerRow>,
 }
 
 impl TimerView {
@@ -71,6 +75,10 @@ impl TimerView {
             label: cx.new(|cx| InputState::new(window, cx).placeholder("Label (optional)")),
             sound: default_sound(),
             feedback: None,
+            pause_lease: None,
+            pause_focus_guard: None,
+            pause_active_guard: None,
+            painted_rows: Vec::new(),
         }
     }
     fn current(&self, window: &Window, cx: &App) -> bool {
@@ -129,6 +137,87 @@ impl TimerView {
             },
             cx,
         );
+    }
+
+    pub(super) fn revoke_pause(&mut self) {
+        if let Some(lease) = &self.pause_lease {
+            lease.store(false, Ordering::Release);
+        }
+    }
+
+    fn set_paused(&mut self, id: u64, generation: u64, paused: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.load(Ordering::Acquire) || !self.current(window, cx)
+            || !window.is_window_active() || window.has_active_dialog(cx) {
+            return;
+        }
+        if !self.painted_rows.iter().any(|row| row.id == id && row.generation == generation
+            && row.kind == TimerKind::Countdown && row.paused == paused) {
+            return;
+        }
+        let Some(focus) = window.focused(cx) else { return; };
+        let Some(root) = self.root.upgrade() else { return; };
+        let state = root.read(cx);
+        if !state.external_owner_is_current(Some(&focus), window, cx) { return; }
+        let Some(native) = state.native_window else { return; };
+        let visibility = state.root_visibility.clone();
+        let revision = visibility.request_revision.load(Ordering::Acquire);
+        let admission = state.restart_admission.clone();
+        let wake = state.timer_wake.clone();
+        if !json_utility::native_host_current(&visibility, revision, Some(native), false) {
+            return;
+        }
+        let Some(permit) = admission.admit() else { return; };
+        if self.busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return;
+        }
+        let lease = Arc::new(AtomicBool::new(true));
+        let blur = lease.clone();
+        self.pause_focus_guard = Some(cx.on_blur(&focus, window, move |_, _, _| {
+            blur.store(false, Ordering::Release);
+        }));
+        let inactive = lease.clone();
+        self.pause_active_guard = Some(cx.observe_window_activation(window, move |_, window, _| {
+            if !window.is_window_active() { inactive.store(false, Ordering::Release); }
+        }));
+        self.pause_lease = Some(lease.clone());
+        self.feedback = None;
+        let mount = self.mount.clone();
+        let worker_mount = mount.clone();
+        let worker_lease = lease.clone();
+        let session = self.session.clone();
+        let busy = self.busy.clone();
+        let host = self.host;
+        let task = cx.background_executor().spawn(async move {
+            session.set_countdown_paused_if(id, generation, paused, || {
+                worker_mount.is_current() && worker_lease.load(Ordering::Acquire)
+                    && !admission.is_fenced()
+                    && current_foreground_identity() == Some(native.identity)
+                    && json_utility::native_host_current(&visibility, revision, Some(native), false)
+            })
+        });
+        cx.spawn(async move |weak, cx| {
+            let _permit = permit;
+            let result = task.await;
+            busy.store(false, Ordering::Release);
+            if let Some(view) = weak.upgrade() {
+                let _ = update_kit_window_content(host, &view, cx, |view, window, cx| {
+                    if !mount.is_current() || !mount.matches(&view.mount) { return; }
+                    view.pause_lease = None;
+                    view.pause_focus_guard = None;
+                    view.pause_active_guard = None;
+                    if lease.load(Ordering::Acquire) && view.current(window, cx) {
+                        match result {
+                            Ok(true) => view.feedback = None,
+                            Ok(false) => view.feedback = Some("Timer changed; try again.".into()),
+                            Err(error) => view.feedback = Some(error),
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+            wake.notify();
+        }).detach();
+        cx.notify();
     }
 
     fn run_operation(&mut self, operation: TimerOperation, cx: &mut Context<Self>) {
@@ -226,6 +315,22 @@ fn default_sound() -> usize {
 
 fn latest_completion(messages: Vec<String>) -> Option<String> {
     messages.into_iter().last()
+}
+
+fn displayed_rows(busy: bool, pause_pending: bool, painted: &mut Vec<TimerRow>, live: impl FnOnce() -> Option<Vec<TimerRow>>) -> Vec<TimerRow> {
+    if busy && !pause_pending {
+        return Vec::new();
+    }
+    if !busy {
+        if let Some(rows) = live() {
+            *painted = rows;
+        }
+    }
+    painted.clone()
+}
+
+fn pause_button_id(id: u64) -> SharedString {
+    SharedString::from(format!("timer-pause-{id}"))
 }
 
 impl Render for TimerView {
@@ -374,45 +479,42 @@ impl Render for TimerView {
             if busy {
                 panel = panel.child(Label::new("Working with timers and alarms…"));
             }
-            for row in if busy {
-                Vec::new()
-            } else {
-                self.session.rows()
-            } {
+            let session = self.session.clone();
+            for row in displayed_rows(busy, self.pause_lease.is_some(), &mut self.painted_rows, || session.try_rows()) {
                 let mount = self.mount.clone();
+                let pause_mount = mount.clone();
                 let id = row.id;
                 let generation = row.generation;
-                panel = panel.child(
-                    div()
-                        .id(SharedString::from(format!("timer-row-{id}-{generation}")))
-                        .flex()
-                        .gap_2()
-                        .child(Label::new(format!(
-                            "{} ({}s left)",
-                            row.label,
-                            row.remaining.as_secs()
-                        )))
-                        .child(
-                            Button::new(SharedString::from(format!(
-                                "timer-cancel-{id}-{generation}"
-                            )))
-                            .label("Cancel")
-                            .on_click(cx.listener(
-                                move |view, _, window, cx| {
-                                    if mount.is_current()
-                                        && mount.matches(&view.mount)
-                                        && view.current(window, cx)
-                                        && !window.has_active_dialog(cx)
-                                    {
-                                        view.run_operation(
-                                            TimerOperation::Cancel { id, generation },
-                                            cx,
-                                        );
-                                    }
-                                },
-                            )),
-                        ),
-                );
+                let paused = row.paused;
+                let countdown = row.kind == TimerKind::Countdown;
+                let mut item = div()
+                    .id(SharedString::from(format!("timer-row-{id}")))
+                    .flex()
+                    .gap_2()
+                    .child(Label::new(if paused {
+                        format!("{} (Paused · {}s left)", row.label, row.remaining.as_secs())
+                    } else {
+                        format!("{} ({}s left)", row.label, row.remaining.as_secs())
+                    }));
+                if countdown {
+                    item = item.child(Button::new(pause_button_id(id))
+                        .label(if paused { "Resume" } else { "Pause" })
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            if pause_mount.is_current() && pause_mount.matches(&view.mount) {
+                                view.set_paused(id, generation, paused, window, cx);
+                            }
+                        })));
+                }
+                panel = panel.child(item.child(
+                    Button::new(SharedString::from(format!("timer-cancel-{id}-{generation}")))
+                        .label("Cancel")
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            if mount.is_current() && mount.matches(&view.mount)
+                                && view.current(window, cx) && !window.has_active_dialog(cx) {
+                                view.run_operation(TimerOperation::Cancel { id, generation }, cx);
+                            }
+                        })),
+                ));
             }
         }
         panel
@@ -546,10 +648,30 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{current_provider, default_sound, latest_completion};
+    use super::{current_provider, default_sound, displayed_rows, latest_completion, pause_button_id};
     use multi_launcher::plugin::Plugin;
     use multi_launcher::plugins::timer::TimerPlugin;
+    use multi_launcher::plugins::timer_session::{TimerKind, TimerRow};
     use std::collections::{HashMap, HashSet};
+    use std::time::Duration;
+
+    #[test]
+    fn pending_pause_retains_exact_painted_row_and_button_identity() {
+        let row = TimerRow { id: 42, generation: 7, label: "Timer".into(),
+            remaining: Duration::from_secs(60), kind: TimerKind::Countdown, paused: false };
+        let mut painted = vec![row.clone()];
+        let pending = displayed_rows(true, true, &mut painted, || panic!("busy must not sample the session"));
+        assert_eq!(pending, vec![row.clone()]);
+        assert_eq!(pause_button_id(pending[0].id), pause_button_id(row.id));
+        assert!(displayed_rows(true, false, &mut painted, || None).is_empty());
+        assert_eq!(displayed_rows(false, false, &mut painted, || None), pending);
+        let mut resumed = row;
+        resumed.generation += 1;
+        resumed.paused = true;
+        assert_eq!(displayed_rows(false, false, &mut painted, || Some(vec![resumed.clone()])), vec![resumed]);
+        assert!(displayed_rows(false, false, &mut painted, || Some(Vec::new())).is_empty());
+        assert!(painted.is_empty());
+    }
 
     #[test]
     fn bare_timer_route_requires_exact_current_stock_action_and_search_capability() {
