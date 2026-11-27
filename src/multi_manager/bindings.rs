@@ -194,7 +194,7 @@ fn non_empty_string(value: &str) -> Option<String> {
     (!value.trim().is_empty()).then(|| value.to_string())
 }
 
-fn window_from_snapshot(snapshot: &WindowBindingSnapshot) -> MmWindow {
+pub(super) fn window_from_snapshot(snapshot: &WindowBindingSnapshot) -> MmWindow {
     let mut window = MmWindow {
         alias: snapshot.alias.clone().unwrap_or_default(),
         captured_title: snapshot.captured_title.clone(),

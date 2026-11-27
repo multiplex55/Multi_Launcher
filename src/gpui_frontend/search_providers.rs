@@ -73,9 +73,9 @@ impl multi_launcher::plugin::Plugin for MultiManagerBare {
     fn capabilities(&self) -> &[&str] { &["workspace_manager", "window_manager", "hotkeys"] }
     fn query_prefixes(&self) -> &[&str] { &["mm"] }
     fn search(&self, query: &str) -> Vec<Action> {
-        if !query.trim().eq_ignore_ascii_case("mm") { return Vec::new(); }
+        if !["mm", "mm restore bindings"].iter().any(|candidate| query.trim().eq_ignore_ascii_case(candidate)) { return Vec::new(); }
         multi_launcher::multi_manager::commands::search_mm_commands(query).into_iter()
-            .filter(|action| action.action == "mm:open" && action.args.is_none()).collect()
+            .filter(|action| matches!(action.action.as_str(), "mm:open" | "mm:restore-bindings") && action.args.is_none()).collect()
     }
     fn commands(&self) -> Vec<Action> {
         multi_launcher::multi_manager::commands::all_mm_commands().into_iter()

@@ -13,7 +13,25 @@ struct PlacementOverlay {
     index: usize,
     revision: u64,
     expected: MmWorkspace,
-    reconnect: checked::ReconnectedWorkspace,
+    source: OverlaySource,
+}
+
+#[derive(Clone)]
+enum OverlaySource {
+    Reconnect(checked::ReconnectedWorkspace),
+    Restore(Arc<checked::RestorePlan>),
+}
+impl PlacementOverlay {
+    fn bound_count(&self) -> usize {
+        match &self.source {
+            OverlaySource::Reconnect(value) => value.identities.len(),
+            OverlaySource::Restore(plan) => plan
+                .rows()
+                .iter()
+                .find(|row| row.index() == self.index)
+                .map_or(0, |row| row.bound_count()),
+        }
+    }
 }
 
 fn overlay_current(
@@ -25,21 +43,51 @@ fn overlay_current(
     overlay.index == index && overlay.revision == revision && &overlay.expected == expected
 }
 
+fn select_overlay<'a>(
+    overlays: &'a [PlacementOverlay],
+    index: usize,
+    expected: &MmWorkspace,
+    revision: u64,
+) -> Option<&'a PlacementOverlay> {
+    overlays.iter().rev().find(|overlay| {
+        overlay_current(overlay, index, expected, revision) && overlay.bound_count() != 0
+    })
+}
+
+fn replace_restore_entries<T>(
+    entries: &mut Vec<T>,
+    replacements: impl IntoIterator<Item = T>,
+    is_restore: impl Fn(&T) -> bool,
+) {
+    entries.retain(|entry| !is_restore(entry));
+    entries.extend(replacements);
+}
+
+fn restore_busy(pending: bool, loading: bool, has_restore: bool) -> bool {
+    pending && (!loading || has_restore)
+}
+
 fn overlay_has_live_identity(
-    overlay: Option<&PlacementOverlay>,
+    overlays: &[PlacementOverlay],
     rows: &[MmWorkspace],
     revision: u64,
     identity: multi_launcher::window_catalog::WindowNativeIdentity,
     is_live: impl Fn(multi_launcher::window_catalog::WindowNativeIdentity) -> bool,
 ) -> bool {
-    overlay.is_some_and(|overlay| {
+    overlays.iter().any(|overlay| {
         rows.get(overlay.index)
             .is_some_and(|row| overlay_current(overlay, overlay.index, row, revision))
-            && overlay
-                .reconnect
-                .identities
-                .values()
-                .any(|item| item.native == identity && is_live(item.native))
+            && match &overlay.source {
+                OverlaySource::Reconnect(value) => value
+                    .identities
+                    .values()
+                    .any(|item| item.native == identity && is_live(item.native)),
+                OverlaySource::Restore(plan) => plan
+                    .rows()
+                    .iter()
+                    .find(|row| row.index() == overlay.index)
+                    .is_some_and(|row| row.has_identity(identity) && is_live(identity)),
+            }
     })
 }
 
@@ -65,6 +113,7 @@ pub(super) fn current_provider(
             parse_action(action),
             Ok(Command::MultiManager(
                 multi_launcher::commands::MultiManagerCommand::Open
+                    | multi_launcher::commands::MultiManagerCommand::RestoreBindings
             ))
         )
         && super::search_providers::search_routed(
@@ -100,6 +149,19 @@ fn discard_draft(rows: &mut Vec<MmWorkspace>, snapshot: Option<&CheckedWorkspace
     *rows = snapshot.map_or_else(Vec::new, |snapshot| snapshot.workspaces().to_vec());
 }
 
+struct RestoreIntent {
+    query: String,
+    action: Action,
+    generation: u64,
+    index: usize,
+    visibility_revision: u64,
+    native: NativeWindow,
+    mount: utility_mount::MountReceipt,
+    lease: Arc<AtomicBool>,
+    permit: EffectPermit,
+    validated: bool,
+}
+
 #[derive(Clone)]
 enum Review {
     Delete {
@@ -131,6 +193,9 @@ pub(super) struct MultiManagerView {
     revision: u64,
     attempt: u64,
     pending: bool,
+    loading: bool,
+    restore_intent: Option<RestoreIntent>,
+    restore_lease: Option<Arc<AtomicBool>>,
     rename: Option<(usize, MmWorkspace, u64)>,
     name: Entity<InputState>,
     _name_sub: Subscription,
@@ -145,11 +210,12 @@ pub(super) struct MultiManagerView {
     capture_slot: Option<multi_launcher::multi_manager::capture::CaptureCancel>,
     capture_identities: Vec<multi_launcher::window_catalog::WindowNativeIdentity>,
     ignore_launcher_capture: bool,
-    overlay: Option<PlacementOverlay>,
+    overlays: Vec<PlacementOverlay>,
 }
 
 impl MultiManagerView {
     pub(super) fn revoke_operation(&mut self) {
+        self.revoke_restore();
         if let Some(lease) = &self.operation_lease {
             lease.store(false, Ordering::Release);
         }
@@ -352,13 +418,13 @@ impl MultiManagerView {
                         let mut shadow = view.rows.clone();
                         for row in &mut shadow { for window in &mut row.windows { window.hwnd = 0; window.binding_verified = false; } }
                         let duplicate = view.capture_identities.iter().any(|item| view.rows.iter().any(|row| row.windows.iter().any(|window| window.hwnd == item.hwnd)) && *item == identity && multi_launcher::window_catalog::native_window_identity(item.hwnd).as_ref() == Some(item))
-                            || overlay_has_live_identity(view.overlay.as_ref(), &view.rows, view.revision, identity, |native| multi_launcher::window_catalog::native_window_identity(native.hwnd) == Some(native));
+                            || overlay_has_live_identity(&view.overlays, &view.rows, view.revision, identity, |native| multi_launcher::window_catalog::native_window_identity(native.hwnd) == Some(native));
                         let action = multi_launcher::multi_manager::model::PendingCaptureAction::CaptureOneWindow { workspace_id: expected.id.clone() };
                         if !duplicate && multi_launcher::multi_manager::apply_capture::apply_capture_to_workspaces(&mut shadow, &action, captured) == multi_launcher::multi_manager::apply_capture::ApplyCaptureResult::Applied {
                             if let Some(window) = shadow[index].windows.pop() {
                                 view.rows[index].windows.push(window);
                                 view.capture_identities.push(identity);
-                                view.overlay = None;
+                                view.overlays.clear();
                                 view.revision = view.revision.wrapping_add(1);
                                 view.message = Some("Window captured. Save to keep the workspace change.".into());
                             }
@@ -390,10 +456,7 @@ impl MultiManagerView {
         {
             return;
         }
-        let Some(overlay) = self
-            .overlay
-            .clone()
-            .filter(|overlay| overlay_current(overlay, index, expected, revision))
+        let Some(overlay) = select_overlay(&self.overlays, index, expected, revision).cloned()
         else {
             return;
         };
@@ -455,17 +518,24 @@ impl MultiManagerView {
                     false,
                 )
         });
+        let restore_placement = matches!(&overlay.source, OverlaySource::Restore(_));
         let task = cx.background_executor().spawn(async move {
             let mut backend = checked::NativePlacement {
                 effect_started: started,
             };
-            let report = checked::place_checked(
-                &overlay.reconnect,
-                issuer,
-                destination,
-                current,
-                &mut backend,
-            );
+            let report = match overlay.source {
+                OverlaySource::Reconnect(ref reconnect) => {
+                    checked::place_checked(reconnect, issuer, destination, current, &mut backend)
+                }
+                OverlaySource::Restore(plan) => checked::place_restored_checked(
+                    plan,
+                    overlay.index,
+                    issuer,
+                    destination,
+                    current,
+                    &mut backend,
+                ),
+            };
             (permit, report)
         });
         cx.spawn(async move |weak, cx| {
@@ -478,8 +548,10 @@ impl MultiManagerView {
                 view.operation_lease = None;
                 view.focus_guard = None;
                 view.activation_guard = None;
-                if report.error.is_some() {
-                    view.overlay = None;
+                if report.error.is_some() && restore_placement {
+                    view.overlays.retain(|item| {
+                        item.index != index || !matches!(&item.source, OverlaySource::Restore(_))
+                    });
                 }
                 view.message = Some(match report.error {
                     Some(error) => format!(
@@ -524,7 +596,6 @@ impl MultiManagerView {
             return;
         };
         self.focus.focus(window, cx);
-        self.overlay = None;
         self.pending = true;
         self.attempt = self.attempt.wrapping_add(1);
         let attempt = self.attempt;
@@ -603,11 +674,15 @@ impl MultiManagerView {
                     match result {
                         Ok(reconnect) => {
                             let count = reconnect.identities.len();
-                            view.overlay = Some(PlacementOverlay {
+                            view.overlays.retain(|item| {
+                                item.index != index
+                                    || !matches!(&item.source, OverlaySource::Reconnect(_))
+                            });
+                            view.overlays.push(PlacementOverlay {
                                 index,
                                 revision,
                                 expected,
-                                reconnect,
+                                source: OverlaySource::Reconnect(reconnect),
                             });
                             view.message = Some(format!("Reconnected {count} window(s)."));
                         }
@@ -682,6 +757,9 @@ impl MultiManagerView {
             revision: 0,
             attempt: 0,
             pending: false,
+            loading: false,
+            restore_intent: None,
+            restore_lease: None,
             rename: None,
             name,
             _name_sub: name_sub,
@@ -696,7 +774,7 @@ impl MultiManagerView {
             capture_slot: None,
             capture_identities: Vec::new(),
             ignore_launcher_capture: settings.ignore_launcher_window_on_capture,
-            overlay: None,
+            overlays: Vec::new(),
         };
         view.reload(cx);
         view
@@ -754,12 +832,246 @@ impl MultiManagerView {
                     .external_owner_is_current(window.focused(cx).as_ref(), window, cx)
             })
     }
+    pub(super) fn revoke_restore(&mut self) {
+        if let Some(lease) = self.restore_lease.take() {
+            lease.store(false, Ordering::Release);
+        }
+        if let Some(intent) = self.restore_intent.take() {
+            intent.lease.store(false, Ordering::Release);
+            self.operation_lease = None;
+            self.focus_guard = None;
+            self.activation_guard = None;
+        }
+    }
+
+    fn restore_origin_current(
+        &self,
+        intent: &RestoreIntent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        intent.lease.load(Ordering::Acquire)
+            && intent.mount.is_current() && intent.mount.matches(&self.mount)
+            && self.visibility.request_revision.load(Ordering::Acquire) == intent.visibility_revision
+            && self.native == Some(intent.native)
+            && self.focus.contains_focused(window, cx)
+            && self.current(window, cx)
+            && self.root.upgrade().is_some_and(|root| {
+                let root = root.read(cx);
+                root.query.read(cx).value().as_ref() == intent.query.as_str()
+                    && root.launcher_results.resolve_result(intent.generation, intent.index, &intent.query).is_some_and(|result| {
+                        matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "MultiManager")
+                            && result.action == intent.action
+                            && current_provider(&intent.query, &result.action, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref())
+                    })
+            })
+    }
+
+    fn queue_restore(
+        &mut self,
+        query: String,
+        action: Action,
+        generation: u64,
+        index: usize,
+        visibility_revision: u64,
+        native: NativeWindow,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.restore_intent.is_some()
+            || self.rename.is_some()
+            || self.review.is_some()
+            || self.capture_slot.is_some()
+            || self.dirty()
+            || restore_busy(self.pending, self.loading, self.restore_lease.is_some())
+        {
+            return;
+        }
+        let Some(permit) = self.admission.admit() else {
+            return;
+        };
+        let lease = Arc::new(AtomicBool::new(true));
+        let blur = lease.clone();
+        self.focus_guard = Some(cx.on_focus_out(&self.focus, window, move |_, _, _, _| {
+            blur.store(false, Ordering::Release);
+        }));
+        let active = lease.clone();
+        self.activation_guard = Some(cx.observe_window_activation(window, move |_, window, _| {
+            if !window.is_window_active() {
+                active.store(false, Ordering::Release);
+            }
+        }));
+        let intent = RestoreIntent {
+            query,
+            action,
+            generation,
+            index,
+            visibility_revision,
+            native,
+            mount: self.mount.clone(),
+            lease,
+            permit,
+            validated: false,
+        };
+        self.restore_lease = Some(intent.lease.clone());
+        self.operation_lease = Some(intent.lease.clone());
+        self.restore_intent = Some(intent);
+    }
+
+    fn validate_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let valid = self
+            .restore_intent
+            .as_ref()
+            .is_some_and(|intent| self.restore_origin_current(intent, window, cx));
+        if !valid {
+            self.revoke_restore();
+            self.operation_lease = None;
+            self.focus_guard = None;
+            self.activation_guard = None;
+            return;
+        }
+        if let Some(intent) = self.restore_intent.as_mut() {
+            intent.validated = true;
+        }
+        if !self.pending {
+            self.start_restore(window, cx);
+        }
+    }
+
+    fn start_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(intent) = self.restore_intent.take() else {
+            return;
+        };
+        if self.pending
+            || self.rename.is_some()
+            || self.review.is_some()
+            || self.dirty()
+            || !self.restore_origin_current(&intent, window, cx)
+        {
+            self.focus_guard = None;
+            self.activation_guard = None;
+            self.operation_lease = None;
+            self.restore_lease = None;
+            return;
+        }
+        let Some(snapshot) = self.snapshot.clone() else {
+            self.focus_guard = None;
+            self.activation_guard = None;
+            self.operation_lease = None;
+            self.restore_lease = None;
+            self.message = Some("Could not restore bindings without a loaded workspace.".into());
+            cx.notify();
+            return;
+        };
+        self.pending = true;
+        self.attempt = self.attempt.wrapping_add(1);
+        let attempt = self.attempt;
+        let revision = self.revision;
+        let path = self.bindings_path.clone();
+        let visibility = self.visibility.clone();
+        let admission = self.admission.clone();
+        let worker_mount = intent.mount.clone();
+        let worker_lease = intent.lease.clone();
+        let native = intent.native;
+        let visibility_revision = intent.visibility_revision;
+        let host = self.host;
+        let task = cx.background_executor().spawn(async move {
+            checked::restore_checked(
+                &snapshot,
+                &path,
+                || {
+                    worker_mount.is_current()
+                        && !admission.is_fenced()
+                        && worker_lease.load(Ordering::Acquire)
+                        && json_utility::native_host_current(
+                            &visibility,
+                            visibility_revision,
+                            Some(native),
+                            false,
+                        )
+                        && current_foreground_identity() == Some(native.identity)
+                },
+                &checked::NativeRestore,
+            )
+        });
+        cx.spawn(async move |weak, cx| {
+            let result = task.await;
+            let delivered = host.update(cx, |_, window, cx| {
+                let _ = weak.update(cx, |view, cx| {
+                    if !attempt_current(&intent.mount, &view.mount, attempt, view.attempt) {
+                        return;
+                    }
+                    view.pending = false;
+                    let current = view.revision == revision
+                        && view.restore_origin_current(&intent, window, cx);
+                    view.focus_guard = None;
+                    view.activation_guard = None;
+                    view.operation_lease = None;
+                    view.restore_lease = None;
+                    if current {
+                        match result {
+                            Ok(plan) => {
+                                let plan = Arc::new(plan);
+                                let replacements = plan
+                                    .rows()
+                                    .iter()
+                                    .filter_map(|row| {
+                                        let index = row.index();
+                                        view.rows.get(index).cloned().map(|expected| {
+                                            PlacementOverlay {
+                                                index,
+                                                revision,
+                                                expected,
+                                                source: OverlaySource::Restore(plan.clone()),
+                                            }
+                                        })
+                                    })
+                                    .collect::<Vec<_>>();
+                                replace_restore_entries(&mut view.overlays, replacements, |old| {
+                                    matches!(&old.source, OverlaySource::Restore(_))
+                                });
+                                view.message = Some(format!(
+                                    "Restored {} window(s), skipped {}.",
+                                    plan.bound, plan.skipped
+                                ));
+                            }
+                            Err(error) => {
+                                view.message =
+                                    Some(format!("Could not restore bindings: {error:#}"))
+                            }
+                        }
+                    }
+                    view.settle_wait(cx);
+                    cx.notify();
+                });
+            });
+            if delivered.is_err() {
+                let _ = weak.update(cx, |view, cx| {
+                    if attempt_current(&intent.mount, &view.mount, attempt, view.attempt) {
+                        view.pending = false;
+                        view.operation_lease = None;
+                        view.restore_lease = None;
+                        view.focus_guard = None;
+                        view.activation_guard = None;
+                        view.message =
+                            Some("Restore finished after the launcher became unavailable.".into());
+                        view.settle_wait(cx);
+                        cx.notify();
+                    }
+                });
+            }
+            drop(intent.permit);
+        })
+        .detach();
+        cx.notify();
+    }
     fn reload(&mut self, cx: &mut Context<Self>) {
         if self.pending || !self.open {
             return;
         }
-        self.overlay = None;
+        self.overlays.clear();
         self.pending = true;
+        self.loading = true;
         self.attempt = self.attempt.wrapping_add(1);
         let attempt = self.attempt;
         let receipt = self.mount.clone();
@@ -768,47 +1080,75 @@ impl MultiManagerView {
         let binding_path = self.bindings_path.clone();
         let admission = self.admission.clone();
         let task = cx.background_executor().spawn(async move {
-            let workspace = store::load_checked_workspaces(&path, || {
-                worker_receipt.is_current() && !admission.is_fenced()
-            });
-            let bindings = bindings::load_bindings_if_exists(&binding_path)
-                .map_err(|error| format!("{error:#}"));
-            (workspace, bindings)
+            let (workspace, bindings) =
+                checked::load_editor_sources_checked(&path, &binding_path, || {
+                    worker_receipt.is_current() && !admission.is_fenced()
+                });
+            (workspace, bindings.map_err(|error| format!("{error:#}")))
         });
+        let host = self.host;
         cx.spawn(async move |weak, cx| {
             let (workspace, bindings) = task.await;
-            let _ = weak.update(cx, |view, cx| {
-                if !attempt_current(&receipt, &view.mount, attempt, view.attempt) {
-                    return;
-                }
-                view.pending = false;
-                match workspace {
-                    Ok(snapshot) => {
-                        view.rows = snapshot.workspaces().to_vec();
-                        view.snapshot = Some(snapshot);
-                        view.revision = view.revision.wrapping_add(1);
-                        view.rename = None;
-                        view.review = None;
-                        view.expanded.clear();
-                        view.message = None;
+            let delivered = host.update(cx, |_, window, cx| {
+                let _ = weak.update(cx, |view, cx| {
+                    if !attempt_current(&receipt, &view.mount, attempt, view.attempt) {
+                        return;
                     }
-                    Err(error) => {
-                        view.message = Some(format!("Could not load workspaces: {error:#}"))
+                    view.pending = false;
+                    view.loading = false;
+                    let loaded = workspace.is_ok();
+                    match workspace {
+                        Ok(snapshot) => {
+                            view.rows = snapshot.workspaces().to_vec();
+                            view.snapshot = Some(snapshot);
+                            view.revision = view.revision.wrapping_add(1);
+                            view.rename = None;
+                            view.review = None;
+                            view.expanded.clear();
+                            view.message = None;
+                        }
+                        Err(error) => {
+                            view.message = Some(format!("Could not load workspaces: {error:#}"))
+                        }
                     }
-                }
-                match bindings {
-                    Ok(rows) => {
-                        view.bindings = rows;
-                        view.binding_error = None;
+                    match bindings {
+                        Ok(rows) => {
+                            view.bindings = rows;
+                            view.binding_error = None;
+                        }
+                        Err(error) => {
+                            view.binding_error =
+                                Some(format!("Could not load window bindings: {error}"))
+                        }
                     }
-                    Err(error) => {
-                        view.binding_error =
-                            Some(format!("Could not load window bindings: {error}"))
+                    if !loaded {
+                        view.revoke_restore();
                     }
-                }
-                view.settle_wait(cx);
-                cx.notify();
+                    if view
+                        .restore_intent
+                        .as_ref()
+                        .is_some_and(|intent| intent.validated)
+                    {
+                        view.start_restore(window, cx);
+                    }
+                    view.settle_wait(cx);
+                    cx.notify();
+                });
             });
+            if delivered.is_err() {
+                let _ = weak.update(cx, |view, cx| {
+                    if attempt_current(&receipt, &view.mount, attempt, view.attempt) {
+                        view.pending = false;
+                        view.loading = false;
+                        view.revoke_restore();
+                        view.message = Some(
+                            "Workspace load finished after the launcher became unavailable.".into(),
+                        );
+                        view.settle_wait(cx);
+                        cx.notify();
+                    }
+                });
+            }
         })
         .detach();
         cx.notify();
@@ -828,7 +1168,7 @@ impl MultiManagerView {
         let Some(permit) = self.admission.admit() else {
             return;
         };
-        self.overlay = None;
+        self.overlays.clear();
         self.focus.focus(window, cx);
         self.pending = true;
         self.attempt = self.attempt.wrapping_add(1);
@@ -904,7 +1244,7 @@ impl MultiManagerView {
         let revision = self.visibility.request_revision.load(Ordering::Acquire);
         self.revoke_operation();
         self.open = false;
-        self.overlay = None;
+        self.overlays.clear();
         self.owner.retire();
         self.attempt = self.attempt.wrapping_add(1);
         self.pending = false;
@@ -1041,7 +1381,7 @@ impl MultiManagerView {
         }
         match action {
             RowAction::Rename => {
-                self.overlay = None;
+                self.overlays.clear();
                 self.rename_epoch = self.rename_epoch.wrapping_add(1);
                 self.name.update(cx, |name, cx| {
                     name.set_value(expected.name.clone(), window, cx)
@@ -1050,18 +1390,18 @@ impl MultiManagerView {
                 self.name.focus_handle(cx).focus(window, cx);
             }
             RowAction::Toggle => {
-                self.overlay = None;
+                self.overlays.clear();
                 self.rows[index].disabled = !self.rows[index].disabled;
                 self.revision = self.revision.wrapping_add(1);
             }
             RowAction::Up if index > 0 => {
-                self.overlay = None;
+                self.overlays.clear();
                 self.rows.swap(index, index - 1);
                 self.revision = self.revision.wrapping_add(1);
                 self.expanded.clear();
             }
             RowAction::Down if index + 1 < self.rows.len() => {
-                self.overlay = None;
+                self.overlays.clear();
                 self.rows.swap(index, index + 1);
                 self.revision = self.revision.wrapping_add(1);
                 self.expanded.clear();
@@ -1213,7 +1553,7 @@ impl Render for MultiManagerView {
                                         ) =>
                                     {
                                         view.rows.remove(*index);
-                                        view.overlay = None;
+                                        view.overlays.clear();
                                         view.revision = view.revision.wrapping_add(1);
                                         view.expanded.clear();
                                         view.review = None;
@@ -1331,7 +1671,7 @@ impl Render for MultiManagerView {
                                         name: "New Workspace".into(),
                                         ..Default::default()
                                     });
-                                    view.overlay = None;
+                                    view.overlays.clear();
                                     view.revision = view.revision.wrapping_add(1);
                                     cx.notify();
                                 }
@@ -1462,12 +1802,8 @@ impl Render for MultiManagerView {
             ] {
                 let expected = row.clone();
                 let receipt = mount.clone();
-                let overlay_ready = self.overlay.as_ref().is_some_and(|overlay| {
-                    overlay.index == index
-                        && overlay.revision == issued_revision
-                        && overlay.expected == *row
-                        && !overlay.reconnect.identities.is_empty()
-                });
+                let overlay_ready =
+                    select_overlay(&self.overlays, index, row, issued_revision).is_some();
                 let unavailable = self.pending
                     || match action {
                         RowAction::Capture => {
@@ -1503,15 +1839,19 @@ impl Render for MultiManagerView {
                 );
             }
             card = card.child(controls);
-            if let Some(overlay) = self.overlay.as_ref().filter(|overlay| {
+            if let Some(overlay) = self.overlays.iter().rev().find(|overlay| {
                 overlay.index == index
                     && overlay.revision == self.revision
                     && overlay.expected == *row
             }) {
                 card = card.child(Label::new(format!(
-                    "{} of {} windows reconnected",
-                    overlay.reconnect.identities.len(),
-                    row.windows.len()
+                    "{} of {} windows {}",
+                    overlay.bound_count(),
+                    row.windows.len(),
+                    match &overlay.source {
+                        OverlaySource::Reconnect(_) => "reconnected",
+                        OverlaySource::Restore(_) => "restored",
+                    }
                 )));
             }
             if self.expanded.contains(&index) {
@@ -1563,6 +1903,57 @@ impl Render for MultiManagerView {
 }
 
 impl RootWindow {
+    pub(super) fn restore_multi_manager(
+        &mut self,
+        query: String,
+        action: Action,
+        generation: u64,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(native) = self
+            .native_window
+            .filter(|native| current_foreground_identity() == Some(native.identity))
+        else {
+            return;
+        };
+        let revision = self
+            .root_visibility
+            .request_revision
+            .load(Ordering::Acquire);
+        if self.restart_admission.is_fenced()
+            || window.has_active_dialog(cx)
+            || !window.is_window_active()
+            || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+        {
+            return;
+        }
+        if let Some(view) = &self.multi_manager_view {
+            let view_state = view.read(cx);
+            if restore_busy(
+                view_state.pending,
+                view_state.loading,
+                view_state.restore_lease.is_some(),
+            ) {
+                return;
+            }
+            view.update(cx, |view, _| view.revoke_restore());
+        }
+        self.open_multi_manager(window, cx);
+        let Some(view) = self.multi_manager_view.clone() else {
+            return;
+        };
+        view.update(cx, |view, cx| {
+            view.queue_restore(
+                query, action, generation, index, revision, native, window, cx,
+            )
+        });
+        window.defer(cx, move |window, cx| {
+            view.update(cx, |view, cx| view.validate_restore(window, cx));
+        });
+    }
+
     pub(super) fn open_multi_manager(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.restart_admission.is_fenced()
             || window.has_active_dialog(cx)
@@ -1676,8 +2067,9 @@ impl RootWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        PlacementOverlay, attempt_current, current_provider, discard_draft, focus_out_revokes,
-        overlay_current, overlay_has_live_identity, row_current,
+        OverlaySource, PlacementOverlay, attempt_current, current_provider, discard_draft,
+        focus_out_revokes, overlay_current, overlay_has_live_identity, replace_restore_entries,
+        restore_busy, row_current, select_overlay,
     };
     use multi_launcher::multi_manager::model::MmWorkspace;
     use multi_launcher::plugin::Plugin;
@@ -1700,6 +2092,30 @@ mod tests {
         let mut forged = action;
         forged.args = Some("other".into());
         assert!(!current_provider("mm", &forged, None, None));
+    }
+    #[test]
+    fn restore_provider_requires_exact_stock_action_and_enabled_search() {
+        let action =
+            multi_launcher::multi_manager::commands::search_mm_commands("mm restore bindings")
+                .into_iter()
+                .find(|row| row.action == "mm:restore-bindings")
+                .unwrap();
+        assert!(current_provider("mm restore bindings", &action, None, None));
+        assert!(!current_provider("mm restore", &action, None, None));
+        assert!(!current_provider(
+            "mm restore bindings",
+            &action,
+            Some(&HashSet::new()),
+            None
+        ));
+        let mut forged = action;
+        forged.label.push('!');
+        assert!(!current_provider(
+            "mm restore bindings",
+            &forged,
+            None,
+            None
+        ));
     }
     #[test]
     fn duplicate_id_rows_require_exact_ordinal_revision_and_record() {
@@ -1749,11 +2165,13 @@ mod tests {
             index: 2,
             revision: 4,
             expected: row.clone(),
-            reconnect: multi_launcher::multi_manager::checked::ReconnectedWorkspace {
-                workspace: row.clone(),
-                identities: Default::default(),
-                summary: Default::default(),
-            },
+            source: OverlaySource::Reconnect(
+                multi_launcher::multi_manager::checked::ReconnectedWorkspace {
+                    workspace: row.clone(),
+                    identities: Default::default(),
+                    summary: Default::default(),
+                },
+            ),
         };
         assert!(overlay_current(&overlay, 2, &row, 4));
         assert!(!overlay_current(&overlay, 1, &row, 4));
@@ -1761,6 +2179,32 @@ mod tests {
         let mut changed = row;
         changed.name.push('!');
         assert!(!overlay_current(&overlay, 2, &changed, 4));
+    }
+
+    #[test]
+    fn restore_replaces_only_prior_restore_entries_even_when_empty_or_partial() {
+        #[derive(Debug, PartialEq)]
+        enum Entry {
+            Reconnect(u8),
+            Restore(u8),
+        }
+        let mut entries = vec![Entry::Reconnect(1), Entry::Restore(1), Entry::Restore(2)];
+        replace_restore_entries(&mut entries, vec![Entry::Restore(3)], |entry| {
+            matches!(entry, Entry::Restore(_))
+        });
+        assert_eq!(entries, vec![Entry::Reconnect(1), Entry::Restore(3)]);
+        replace_restore_entries(&mut entries, Vec::new(), |entry| {
+            matches!(entry, Entry::Restore(_))
+        });
+        assert_eq!(entries, vec![Entry::Reconnect(1)]);
+    }
+
+    #[test]
+    fn restore_busy_preserves_admitted_work_and_allows_first_reopen_load() {
+        assert!(!restore_busy(true, true, false));
+        assert!(restore_busy(true, true, true));
+        assert!(restore_busy(true, false, false));
+        assert!(!restore_busy(false, false, false));
     }
 
     #[test]
@@ -1797,29 +2241,41 @@ mod tests {
             index: 0,
             revision: 4,
             expected: first.clone(),
-            reconnect: multi_launcher::multi_manager::checked::ReconnectedWorkspace {
-                workspace: first.clone(),
-                identities: [(0, identity)].into_iter().collect(),
-                summary: Default::default(),
-            },
+            source: OverlaySource::Reconnect(
+                multi_launcher::multi_manager::checked::ReconnectedWorkspace {
+                    workspace: first.clone(),
+                    identities: [(0, identity)].into_iter().collect(),
+                    summary: Default::default(),
+                },
+            ),
         };
+        let mut empty = overlay.clone();
+        if let OverlaySource::Reconnect(ref mut reconnect) = empty.source {
+            reconnect.identities.clear();
+        }
+        let choices = vec![overlay.clone(), empty];
+        assert!(std::ptr::eq(
+            select_overlay(&choices, 0, &first, 4).unwrap(),
+            &choices[0]
+        ));
+        assert!(select_overlay(&choices[1..], 0, &first, 4).is_none());
         let rows = vec![first, second];
         assert!(overlay_has_live_identity(
-            Some(&overlay),
+            std::slice::from_ref(&overlay),
             &rows,
             4,
             native,
             |_| true
         ));
         assert!(!overlay_has_live_identity(
-            Some(&overlay),
+            std::slice::from_ref(&overlay),
             &rows,
             5,
             native,
             |_| true
         ));
         assert!(!overlay_has_live_identity(
-            Some(&overlay),
+            std::slice::from_ref(&overlay),
             &rows,
             4,
             native,

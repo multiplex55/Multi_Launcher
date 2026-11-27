@@ -7201,6 +7201,7 @@ impl RootWindow {
 
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
         if self.launcher_results.query != query {
+            if let Some(view) = &self.multi_manager_view { view.update(cx, |view, _| view.revoke_restore()); }
             self.note_open_epoch.fetch_add(1, Ordering::AcqRel);
             if let Some(view) = &self.note_editor_view { view.update(cx, |view, cx| view.revoke_switch(cx)); }
         }
@@ -8254,7 +8255,11 @@ impl RootWindow {
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "MultiManager") {
             if multi_manager::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
-                self.open_multi_manager(window, cx);
+                if result.action.action == "mm:restore-bindings" {
+                    self.restore_multi_manager(query, result.action.clone(), generation, index, window, cx);
+                } else {
+                    self.open_multi_manager(window, cx);
+                }
             }
             return;
         }
