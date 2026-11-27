@@ -21,7 +21,7 @@ The initial program has 27 goals. All remain on **one migration branch**, with o
 | G12 | [Notes, Markdown Studio, links, export, and printing](goals/G12-notes-and-markdown.md) | G00–G05 | In implementation for retained Quick Notes and the existing-note editor |
 | G13 | [Clipboard history, Clipboard Modify, snippets, and prompts](goals/G13-clipboard-and-snippets.md) | G00–G05 | In implementation for Clipboard History, Clipboard Modify, Snippets and Create Temp File |
 | G14 | [JSON, XML, Regex, and structured text tooling](goals/G14-structured-text.md) | G00–G05; G13 where clipboard handoffs apply | In implementation |
-| G15 | [Calculation Pad, editors, reference, and companion windows](goals/G15-calculation-pad.md) | G00–G05 | Not started |
+| G15 | [Calculation Pad, editors, reference, and companion windows](goals/G15-calculation-pad.md) | G00–G05 | In implementation for retained Pad editing, evaluation, Copy and checked documents |
 | G16 | [Table Utility, date/time, and conversion interfaces](goals/G16-tables-and-conversion.md) | G00–G05; G15 only for shared chart/data handoffs | Not started |
 | G17 | [Diagram Studio, visual/Mermaid editing, and child tools](goals/G17-diagram-studio.md) | G00–G05 | Not started |
 | G18 | [Screenshot editor, crop, comparison, colors, and QR](goals/G18-images-and-screenshots.md) | G00–G05; G01 native capability findings | Not started |

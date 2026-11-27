@@ -279,7 +279,7 @@ impl RootWindow {
                 }
             },
         );
-        self.revoke_multi_manager_operation(cx);
+        self.revoke_focus_bound_utility_operations(cx);
         self.action_sheet = Some(Sheet {
             serial,
             generation,

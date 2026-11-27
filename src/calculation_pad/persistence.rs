@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
 use std::thread::{self, JoinHandle};
@@ -656,6 +656,7 @@ pub enum PadStoreError {
     NameAlreadyExists(String),
     DocumentNotFound(DocumentId),
     DiskConflict(DocumentId),
+    Revoked,
     OccupiedPath(PathBuf),
     OversizedDocument {
         path: PathBuf,
@@ -715,6 +716,7 @@ impl std::fmt::Display for PadStoreError {
                 formatter,
                 "Calculation Pad document {id} changed or was deleted outside this session"
             ),
+            Self::Revoked => formatter.write_str("Calculation Pad operation was superseded"),
             Self::OccupiedPath(path) => {
                 write!(
                     formatter,
@@ -926,10 +928,10 @@ impl PadDocumentStore {
         })
     }
 
-    pub(super) fn save_as_with_metadata(
-        &self, name: &str, source: String, line_ids: Vec<LineId>, next_line_id: u64, view: PadViewMetadata, options: DocumentOptions,
+    pub(super) fn save_as_with_metadata_if(
+        &self, name: &str, source: String, line_ids: Vec<LineId>, next_line_id: u64, view: PadViewMetadata, options: DocumentOptions, current: impl Fn() -> bool,
     ) -> Result<(StoredDocument, [u8; 32]), PadStoreError> {
-        self.save_as_with_id_and_writer(DocumentId::fresh(), name, source, line_ids, next_line_id, view, options, save_atomic)
+        self.save_as_with_id_and_writer(DocumentId::fresh(), name, source, line_ids, next_line_id, view, options, |path, bytes| save_new_file_if(path, bytes, &current))
     }
 
     pub(super) fn save_as_with_writer(
@@ -988,9 +990,9 @@ impl PadDocumentStore {
         stored.options = options;
         let bytes = encode_document(&path, &stored)?;
         self.ensure_write_directories()?;
-        writer(&path, &bytes).map_err(|source| PadStoreError::AtomicWrite {
-            path: path.clone(),
-            source,
+        writer(&path, &bytes).map_err(|source| match source.downcast::<PadStoreError>() {
+            Ok(error) => error,
+            Err(source) => PadStoreError::AtomicWrite { path: path.clone(), source },
         })?;
         Ok((stored, digest(&bytes)))
     }
@@ -1020,11 +1022,28 @@ impl PadDocumentStore {
             return Err(PadStoreError::DiskConflict(stored.id));
         }
         let bytes = encode_document(&path, stored)?;
-        writer(&path, &bytes).map_err(|source| PadStoreError::AtomicWrite {
-            path: path.clone(),
-            source,
+        writer(&path, &bytes).map_err(|source| match source.downcast::<PadStoreError>() {
+            Ok(error) => error,
+            Err(source) => PadStoreError::AtomicWrite { path: path.clone(), source },
         })?;
         Ok(digest(&bytes))
+    }
+
+    pub(super) fn save_existing_if(&self, stored: &StoredDocument, expected: [u8; 32], current: impl Fn() -> bool) -> Result<[u8; 32], PadStoreError> {
+        self.save_existing_with_writer(stored, expected, |path, bytes| {
+            let failure = std::cell::RefCell::new(None);
+            let result = crate::common::atomic_file::save_atomic_if(path, bytes, || {
+                let error = if !current() { Some(PadStoreError::Revoked) }
+                    else { match read_limited(path) {
+                        Ok(Some(bytes)) if digest(&bytes) == expected => if current() { None } else { Some(PadStoreError::Revoked) },
+                        Ok(_) => Some(PadStoreError::DiskConflict(stored.id)),
+                        Err(error) => Some(error),
+                    }};
+                if let Some(error) = error { *failure.borrow_mut() = Some(error); false } else { true }
+            });
+            if let Some(error) = failure.into_inner() { return Err(error.into()); }
+            result
+        })
     }
 
     fn list_unlocked(&self) -> Result<Vec<PadDocumentSummary>, PadStoreError> {
@@ -1161,6 +1180,20 @@ impl PadDocumentStore {
         }
         Ok(())
     }
+}
+
+fn save_new_file_if(path: &Path, bytes: &[u8], current: &dyn Fn() -> bool) -> anyhow::Result<()> {
+    let mut staged = tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
+    staged.write_all(bytes)?;
+    staged.flush()?;
+    staged.as_file().sync_all()?;
+    if !current() { return Err(PadStoreError::Revoked.into()); }
+    staged.persist_noclobber(path).map_err(|error| {
+        if error.error.kind() == io::ErrorKind::AlreadyExists {
+            anyhow::Error::new(PadStoreError::OccupiedPath(path.to_owned()))
+        } else { anyhow::Error::new(error.error) }
+    })?;
+    Ok(())
 }
 
 fn validate_name(name: &str) -> Result<String, PadStoreError> {
@@ -1595,6 +1628,22 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = AppDataRoot::from_path(directory.path().join("app-data"));
         (directory, PadDocumentStore::new(&root))
+    }
+
+    #[test]
+    fn guarded_new_file_preserves_late_collision_and_revocation() {
+        let directory = tempfile::tempdir().unwrap();
+        let target = directory.path().join("document.json");
+        let result = super::save_new_file_if(&target, b"new", &|| {
+            std::fs::write(&target, b"other").unwrap();
+            true
+        });
+        assert!(matches!(result.unwrap_err().downcast::<super::PadStoreError>().unwrap(), super::PadStoreError::OccupiedPath(_)));
+        assert_eq!(std::fs::read(&target).unwrap(), b"other");
+        std::fs::remove_file(&target).unwrap();
+        let result = super::save_new_file_if(&target, b"new", &|| false);
+        assert!(matches!(result.unwrap_err().downcast::<super::PadStoreError>().unwrap(), super::PadStoreError::Revoked));
+        assert!(!target.exists());
     }
 
     fn recovery_fixture() -> (tempfile::TempDir, AppDataRoot, PadRecoveryStore) {

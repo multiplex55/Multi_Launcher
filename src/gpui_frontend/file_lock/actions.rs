@@ -85,7 +85,7 @@ impl FileLockView {
                 && current_foreground_identity() == Some(native.identity)
                 && json_utility::native_host_current(&visibility, revision, Some(native), popup);
             match action {
-                Action::Copy => super::super::file_search_preview::copy_if_current(
+                Action::Copy => super::super::external_launch::copy_if_current(
                     &multi_launcher::clipboard_modify::ArboardClipboardBackend,
                     &multi_launcher::file_lock::copy_snapshot(&worker_snapshot), &current),
                 Action::Reveal => {
@@ -195,10 +195,10 @@ mod tests {
         let backend = FakeClipboard { writes: Mutex::new(Vec::new()), revoke_during_acquire: AtomicBool::new(false),
             lease: lease.clone(), acquired_calls: AtomicUsize::new(0), ordinary_calls: AtomicUsize::new(0) };
         let payload = "Windows reported users: café";
-        assert!(super::super::super::file_search_preview::copy_if_current(&backend, payload, &|| lease.load(Ordering::Acquire)).is_ok());
+        assert!(super::super::super::external_launch::copy_if_current(&backend, payload, &|| lease.load(Ordering::Acquire)).is_ok());
         assert_eq!(backend.writes.lock().unwrap().as_slice(), &[payload.to_owned()]);
         backend.revoke_during_acquire.store(true, Ordering::Release);
-        assert!(super::super::super::file_search_preview::copy_if_current(&backend, payload, &|| lease.load(Ordering::Acquire)).is_err());
+        assert!(super::super::super::external_launch::copy_if_current(&backend, payload, &|| lease.load(Ordering::Acquire)).is_err());
         assert_eq!(backend.writes.lock().unwrap().len(), 1);
         #[cfg(windows)]
         { assert_eq!(backend.acquired_calls.load(Ordering::SeqCst), 2); assert_eq!(backend.ordinary_calls.load(Ordering::SeqCst), 0); }

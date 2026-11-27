@@ -8,6 +8,8 @@ mod calendar;
 mod chart;
 pub(crate) use chart::{ChartDefinition, ChartSource};
 mod comparison;
+mod copy;
+pub use copy::copy_all_results;
 mod dependencies;
 mod document;
 mod exact;

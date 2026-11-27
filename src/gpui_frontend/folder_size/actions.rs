@@ -161,7 +161,7 @@ impl FolderSizeView {
                 && json_utility::native_host_current(&visibility, revision, Some(native), popup)
                 && publication.as_ref().is_none_or(|(guard, key)| guard.is_current(*key));
             if clipboard {
-                return super::super::file_search_preview::copy_if_current(&multi_launcher::clipboard_modify::ArboardClipboardBackend,
+                return super::super::external_launch::copy_if_current(&multi_launcher::clipboard_modify::ArboardClipboardBackend,
                     &worker_path.display().to_string(), &current);
             }
             #[cfg(windows)]
@@ -247,10 +247,10 @@ mod tests {
     fn copied_path_respects_late_revocation_and_unicode() {
         let fake = FakeClipboard::default();
         let payload = "C:\\owned\\café.txt";
-        assert!(super::super::super::file_search_preview::copy_if_current(&fake, payload, &|| true).is_ok());
+        assert!(super::super::super::external_launch::copy_if_current(&fake, payload, &|| true).is_ok());
         assert_eq!(fake.writes.lock().unwrap().as_slice(), &[payload.to_owned()]);
         fake.revoke_before_write.store(true, Ordering::Release);
-        assert!(super::super::super::file_search_preview::copy_if_current(&fake, payload, &|| true).is_err());
+        assert!(super::super::super::external_launch::copy_if_current(&fake, payload, &|| true).is_err());
         assert_eq!(fake.writes.lock().unwrap().len(), 1);
     }
 }

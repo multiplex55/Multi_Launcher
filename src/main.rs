@@ -4885,7 +4885,6 @@ fn main() -> anyhow::Result<()> {
             settings.plugin_settings.get("file_search")
                 .and_then(|value| serde_json::from_value(value.clone()).ok())
                 .unwrap_or_default(),
-            #[cfg(windows)]
             app_data_root.clone(),
             gpui_frontend::ExternalLaunchPreferences {
                 preserve_command: settings.preserve_command,

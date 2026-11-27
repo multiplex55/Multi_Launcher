@@ -24,6 +24,7 @@ mod settings_search;
 mod settings_navigation;
 mod date_search;
 mod calculator_search;
+mod calculation_pad;
 mod base_convert_search;
 mod unit_convert_search;
 mod plugin_editor;
@@ -589,6 +590,7 @@ impl LauncherSearchCatalog {
                     || calculator_search::history_index(&provider, raw_query, &action).is_some();
                 let duplicate_result = provider == "duplicate_finder" && duplicate_finder::current_provider(raw_query, &action, None, None);
                 let quick_notes_result = provider == "notes" && quick_notes::current_provider(raw_query, &action, None, None);
+                let calculation_pad_result = provider == "calculator" && calculation_pad::current_provider(raw_query, &action, None, None);
                 let multi_manager_result = provider == "MultiManager" && multi_manager::current_provider(raw_query, &action, None, None);
                 let bookmark_command = provider == "bookmarks" && matches!(parse_action(&action), Ok(Command::Storage(StorageCommand::BookmarkDialog | StorageCommand::BookmarkAdd(_) | StorageCommand::BookmarkRemove(_))))
                     && self.providers.bookmark_row_is_current(raw_query, &action, None, None);
@@ -599,7 +601,7 @@ impl LauncherSearchCatalog {
                 let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || note_source.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || calculation_pad_result || note_source.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -2510,6 +2512,7 @@ struct RootWindow {
     quick_notes_view: Option<Entity<quick_notes::QuickNotesView>>,
     note_editor_view: Option<Entity<note_editor::NoteEditor>>,
     multi_manager_view: Option<Entity<multi_manager::MultiManagerView>>,
+    calculation_pad_view: Option<Entity<calculation_pad::CalculationPadView>>,
     note_open_epoch: Arc<AtomicU64>,
     file_lock_popup: Option<utility_mount::UtilityPopup>,
     file_lock_retiring: Vec<RetiringHashWindow>,
@@ -2519,7 +2522,6 @@ struct RootWindow {
     file_search_retiring: Vec<RetiringHashWindow>,
     #[cfg(windows)]
     downloads_triage: Option<Entity<downloads_triage::DownloadsTriageView>>,
-    #[cfg(windows)]
     app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     hash_window: HashWindowState,
@@ -3698,6 +3700,7 @@ enum RootCloseBlocker {
     QuickNotes,
     NoteEditor,
     MultiManager,
+    CalculationPad,
     AppWrite,
     FolderAuthoring,
     ExternalDrop,
@@ -4960,9 +4963,12 @@ impl RootWindow {
         }
     }
 
-    fn revoke_multi_manager_operation(&mut self, cx: &mut Context<Self>) {
+    fn revoke_focus_bound_utility_operations(&mut self, cx: &mut Context<Self>) {
         if let Some(view) = &self.multi_manager_view {
             view.update(cx, |view, _| view.revoke_operation());
+        }
+        if let Some(view) = &self.calculation_pad_view {
+            view.update(cx, |view, _| view.revoke_document());
         }
     }
 
@@ -4980,7 +4986,7 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         if open {
-            self.revoke_multi_manager_operation(cx);
+            self.revoke_focus_bound_utility_operations(cx);
             self.external_launch.retire_focus_bound_effects();
             self.external_launch.retire_omni();
             self.app_editor.revoke_picker_prelaunch();
@@ -5689,6 +5695,7 @@ impl RootWindow {
         if self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(quick_notes::WAIT.into()); }
         if self.note_editor_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(note_editor::WAIT.into()); }
         if self.multi_manager_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Err(multi_manager::WAIT.into()); }
+        if self.calculation_pad_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Err(calculation_pad::WAIT.into()); }
         if self.calculator_search.active {
             return Err(calculator_search::SEARCH_PENDING_STATUS.to_owned());
         }
@@ -6036,7 +6043,7 @@ impl RootWindow {
     }
 
     fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.revoke_multi_manager_operation(cx);
+        self.revoke_focus_bound_utility_operations(cx);
         self.external_launch.retire_focus_bound_effects();
         self.external_launch.retire_omni();
         self.app_editor.revoke_picker_prelaunch();
@@ -7198,6 +7205,7 @@ impl RootWindow {
                 } else if provider == "calculator" {
                     calculator_search::classify(provider, &query, action).is_some()
                         || calculator_search::history_index(provider, &query, action).is_some()
+                        || calculation_pad::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "date_arithmetic" {
                     date_search::classify(provider, action).is_some()
                 } else if provider == "base_convert" {
@@ -7735,7 +7743,7 @@ impl RootWindow {
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
         self.external_drop.revoke();
-        self.revoke_multi_manager_operation(cx);
+        self.revoke_focus_bound_utility_operations(cx);
         self.context_favorite_popup = Some(ContextFavoritePopup {
             receipt: receipt.clone(),
             position,
@@ -8085,6 +8093,12 @@ impl RootWindow {
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "duplicate_finder") {
             if duplicate_finder::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
                 self.open_duplicate_finder(window, cx);
+            }
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "calculator") && result.action.action == "calc:pad" {
+            if calculation_pad::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+                self.open_calculation_pad(window, cx);
             }
             return;
         }
@@ -10431,6 +10445,7 @@ impl RootWindow {
             Some(RootCloseBlocker::QuickNotes) => { self.restart_status = Some(quick_notes::WAIT.to_owned()); }
             Some(RootCloseBlocker::NoteEditor) => { self.restart_status = Some(note_editor::WAIT.to_owned()); }
             Some(RootCloseBlocker::MultiManager) => { self.restart_status = Some(multi_manager::WAIT.to_owned()); }
+            Some(RootCloseBlocker::CalculationPad) => { self.restart_status = Some(calculation_pad::WAIT.to_owned()); }
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
@@ -10545,6 +10560,7 @@ impl RootWindow {
         if self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::QuickNotes); }
         if self.note_editor_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::NoteEditor); }
         if self.multi_manager_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Some(RootCloseBlocker::MultiManager); }
+        if self.calculation_pad_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Some(RootCloseBlocker::CalculationPad); }
         if self.file_lock_retiring.iter().any(|window| window.native_window.is_none()) || self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FileLock); }
         if self.folder_size_retiring.iter().any(|window| window.native_window.is_none())
             || self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FolderSize); }
@@ -11502,6 +11518,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.multi_manager_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.calculation_pad_view.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -13020,7 +13039,7 @@ pub(crate) fn run_foundation_window(
     search_startup: LauncherSearchStartup,
     root_placement: root_placement::RootPlacement,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
-    #[cfg(windows)] app_data_root: multi_launcher::platform::app_data::AppDataRoot,
+    app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     external_launch_preferences: ExternalLaunchPreferences,
     coordinate_tool_preferences: CoordinateToolPreferences,
     theme_settings: multi_launcher::settings::ThemeSettings,
@@ -13421,6 +13440,7 @@ pub(crate) fn run_foundation_window(
                 quick_notes_view: None,
                 note_editor_view: None,
                 multi_manager_view: None,
+                calculation_pad_view: None,
                 note_open_epoch: Arc::new(AtomicU64::new(0)),
                 file_lock_popup: None,
                 file_lock_retiring: Vec::new(),
@@ -13430,7 +13450,6 @@ pub(crate) fn run_foundation_window(
                 file_search_retiring: Vec::new(),
                 #[cfg(windows)]
                 downloads_triage: None,
-                #[cfg(windows)]
                 app_data_root: app_data_root.clone(),
                 file_search_settings: file_search_settings.clone(),
                 hash_window: HashWindowState::Closed,
@@ -13951,6 +13970,7 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::QuickNotes) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(quick_notes::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::NoteEditor) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(note_editor::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::MultiManager) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(multi_manager::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::CalculationPad) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(calculation_pad::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }
@@ -14506,7 +14526,7 @@ pub(crate) fn run_foundation_window(
                             } else if !desired_visible && !guarded_hide {
                                 root.cancel_docked_hash_preview();
                             }
-                            if !desired_visible { root.revoke_multi_manager_operation(cx); }
+                            if !desired_visible { root.revoke_focus_bound_utility_operations(cx); }
                             (root.native_window, search_focus_selected, utility_focus_delivered)
                         },
                     );

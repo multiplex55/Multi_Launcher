@@ -9,7 +9,8 @@ pub(super) fn clipboard_catalog_is_current(
     shared.read().ok().is_some_and(|live| Arc::ptr_eq(&live, expected))
 }
 
-struct CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin);
+#[derive(Default)]
+pub(super) struct CalculatorMetadata(multi_launcher::plugins_builtin::CalculatorPlugin);
 
 pub(super) struct MultiManagerBare;
 impl multi_launcher::plugin::Plugin for MultiManagerBare {
@@ -87,9 +88,13 @@ impl multi_launcher::plugin::Plugin for CalculatorMetadata {
     fn name(&self) -> &str { "calculator" }
     fn description(&self) -> &str { "Evaluate inline expressions and browse Calculator history" }
     fn capabilities(&self) -> &[&str] { self.0.capabilities() }
-    fn search(&self, _: &str) -> Vec<Action> { Vec::new() }
+    fn search(&self, query: &str) -> Vec<Action> {
+        let effective = multi_launcher::common::query::split_action_filters(query).0;
+        if !effective.trim().eq_ignore_ascii_case("calc pad") { return Vec::new(); }
+        self.0.search(&effective)
+    }
     fn commands(&self) -> Vec<Action> {
-        self.0.commands().into_iter().filter(|action| matches!(action.action.as_str(), "query:= " | "query:= history" | "query:calc list")).collect()
+        self.0.commands().into_iter().filter(|action| matches!(action.action.as_str(), "query:= " | "query:= history" | "query:calc list" | "query:calc pad")).collect()
     }
 }
 

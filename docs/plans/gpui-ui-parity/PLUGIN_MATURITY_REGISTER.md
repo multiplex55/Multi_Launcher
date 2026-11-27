@@ -145,7 +145,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 | P0.08 Clipboard Snippets | snippets | G13 | 2 → 3 | Canonical watched store and prompt | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.09 Notes, Quick Notes and Markdown | notes, markdown_studio | G12 | 2 → 3 | Checked docked Quick Notes and existing-note editor with Markdown modes. Matched native replay and the remaining G12 criteria stay open. | [Note Editor](CHECKPOINTS.md#p009-checked-existing-note-editor) |
 | P0.10 MultiManager | MultiManager | G24 | 2 → 3 | Authoring, Reconnect, Home/Target and one-shot capture delivered. Replay the primary workflow in Windows. | [Capture](CHECKPOINTS.md#p010-one-shot-multimanager-capture-active-window) |
-| P0.11 Calculation Pad | calculator entry family | G15 | 1 → 3 | Stock Pad session and persistence | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.11 Calculation Pad | calculator entry family | G15 | 2 → 3 | Retained editor, stock evaluation, checked Copy, canonical Open and Save with dirty decisions. Replay input, clipboard and cross-frontend readback. | [Pad checkpoint](CHECKPOINTS.md#p011-retained-calculation-pad-and-checked-documents) |
 | P0.12 Keyboard and numpad | — | G05 | 2 → 3 | Input routing and native keypad receipts | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.13 Global invocation and visibility | — | G01/G03/G05 | 2 → 3 | Native hotkey and foreground/desktop ownership | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.14 Settings, authoring and recovery | settings | G03/G06 | 2 → 3 | Canonical Settings, process/instance ownership | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
@@ -173,7 +173,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 
 Count built-in rows once by registration identifier. Report Stage 1–5 separately, real GPUI functionality, Search admission only, and unstarted routes. Report P0 workflow readiness separately using its 19-row register. For tier counts, use built-in rows plus separately identified non-plugin workflow rows, tallying those two denominators explicitly where overlapping workflows would otherwise be double counted. A target met means the listed interim stage passed with applicable evidence. Pending means no active implementation, and blocked requires a concrete dependency. Original GUI and acceptance counts stay in [Progress](PROGRESS.md) and the [parity matrix](PARITY_MATRIX.md).
 
-Windows snapshot after P0.10 MultiManager one-shot capture. **91 built-ins**, with **58 Stage 1, 26 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **33** have real GPUI functionality within the stated route. **0** have Search admission alone. **58** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **13 at Stage 2** and **3 at Stage 3 or higher**.
+Windows snapshot after P0.11 Calculation Pad. **91 built-ins**, with **58 Stage 1, 26 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **33** have real GPUI functionality within the stated route. **0** have Search admission alone. **58** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **14 at Stage 2** and **3 at Stage 3 or higher**.
 
 | Priority tier · built-ins only | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
@@ -187,7 +187,7 @@ The P2 interim floor is Stage 2. P4's existing functional Clipboard History is p
 
 | Priority tier · separate workflow view | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |
-| P0 · readiness workflows | 19 | 3 | 13 | 3 | 0 |
+| P0 · readiness workflows | 19 | 3 | 14 | 2 | 0 |
 | P1 · Dashboard, useful widgets and File Preview | 4 | 0 | 1 | 3 | 0 |
 | P2 · represented by its built-ins | 0 | 0 | 0 | 0 | 0 |
 | P3 · other workspace and companion groups above | 5 | 0 | 0 | 5 | 0 |

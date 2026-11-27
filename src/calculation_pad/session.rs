@@ -856,7 +856,7 @@ impl CalculationPadSession {
     }
 
     /// Enable nonblocking script evaluation for the owning GUI session.
-    pub(crate) fn enable_background_evaluation(&mut self, wake: impl Fn() + Send + Sync + 'static) {
+    pub fn enable_background_evaluation(&mut self, wake: impl Fn() + Send + Sync + 'static) {
         if self.evaluation_wake.is_none() {
             self.evaluation_wake = Some(Arc::new(wake));
         }
@@ -1751,7 +1751,7 @@ impl CalculationPadSession {
     }
 
     /// Poll a finished worker and advance automatic calculation once when needed.
-    pub(crate) fn advance_automatic(&mut self) {
+    pub fn advance_automatic(&mut self) {
         self.poll_evaluation();
         let Some(stamp) = self.evaluation_stamp() else { return; };
         if self.pending.is_some()
@@ -1795,12 +1795,12 @@ impl CalculationPadSession {
         Some((&evaluation.source, evaluation))
     }
 
-    pub(crate) fn shared_evaluation(&mut self) -> Option<Arc<SessionEvaluation>> {
+    pub fn shared_evaluation(&mut self) -> Option<Arc<SessionEvaluation>> {
         let stamp = self.evaluation_stamp()?;
         self.current.as_ref()?.cached_evaluation.as_ref().filter(|result| result.basis == stamp).cloned()
     }
 
-    pub(crate) fn displayed_evaluation(&self) -> Option<Arc<SessionEvaluation>> {
+    pub fn displayed_evaluation(&self) -> Option<Arc<SessionEvaluation>> {
         self.current.as_ref()?.cached_evaluation.clone()
     }
 
@@ -1812,13 +1812,23 @@ impl CalculationPadSession {
     }
 
     pub fn save(&mut self) -> Result<(), SessionError> {
-        self.save_with_writer(crate::common::atomic_file::save_atomic)
+        self.save_if(|| true)
     }
 
+    #[cfg(test)]
     fn save_with_writer(
         &mut self,
         writer: impl FnOnce(&Path, &[u8]) -> anyhow::Result<()>,
     ) -> Result<(), SessionError> {
+        self.save_using(|store, stored, expected| store.save_existing_with_writer(stored, expected, writer))
+    }
+
+    pub fn save_if(&mut self, current: impl Fn() -> bool) -> Result<(), SessionError> {
+        if !current() { return Err(PadStoreError::Revoked.into()); }
+        self.save_using(|store, stored, expected| store.save_existing_if(stored, expected, current))
+    }
+
+    fn save_using(&mut self, save: impl FnOnce(&PadDocumentStore, &super::persistence::StoredDocument, [u8; 32]) -> Result<[u8; 32], PadStoreError>) -> Result<(), SessionError> {
         let current = self
             .current
             .as_ref()
@@ -1834,9 +1844,7 @@ impl CalculationPadSession {
             .baseline
             .disk_sha256
             .ok_or(SessionError::SaveAsRequired)?;
-        let disk_sha256 =
-            self.store
-                .save_existing_with_writer(&stored, expected_disk_sha256, writer)?;
+        let disk_sha256 = save(&self.store, &stored, expected_disk_sha256)?;
         let current = self
             .current
             .as_mut()
@@ -1855,17 +1863,23 @@ impl CalculationPadSession {
     }
 
     pub fn save_as(&mut self, name: &str) -> Result<(), SessionError> {
+        self.save_as_if(name, || true)
+    }
+
+    pub fn save_as_if(&mut self, name: &str, is_current: impl Fn() -> bool) -> Result<(), SessionError> {
+        if !is_current() { return Err(PadStoreError::Revoked.into()); }
         let current = self
             .current
             .as_ref()
             .ok_or(SessionError::NoActiveDocument)?;
-        let (stored, disk_sha256) = self.store.save_as_with_metadata(
+        let (stored, disk_sha256) = self.store.save_as_with_metadata_if(
             name,
             current.source.clone(),
             current.line_ids.clone(),
             current.next_line_id,
             current.view.clone(),
             current.options,
+            is_current,
         )?;
         self.retire_sensitivity();
         self.retire_background_evaluation();
@@ -1889,7 +1903,12 @@ impl CalculationPadSession {
     }
 
     pub fn request_new(&mut self) -> Result<TransitionOutcome, SessionError> {
+        self.request_new_if(|| true)
+    }
+
+    pub fn request_new_if(&mut self, current: impl Fn() -> bool) -> Result<TransitionOutcome, SessionError> {
         self.ensure_no_pending()?;
+        if !current() { return Err(PadStoreError::Revoked.into()); }
         if self.is_dirty() {
             self.pending = Some(PendingAction::New);
             return Ok(TransitionOutcome::DecisionRequired);
@@ -1900,8 +1919,13 @@ impl CalculationPadSession {
 
     /// The target is read and validated before the active draft is touched.
     pub fn request_open(&mut self, id: DocumentId) -> Result<TransitionOutcome, SessionError> {
+        self.request_open_if(id, || true)
+    }
+
+    pub fn request_open_if(&mut self, id: DocumentId, current: impl Fn() -> bool) -> Result<TransitionOutcome, SessionError> {
         self.ensure_no_pending()?;
         let loaded = self.store.open(id)?;
+        if !current() { return Err(PadStoreError::Revoked.into()); }
         if self.is_dirty() {
             self.pending = Some(PendingAction::Open(id));
             return Ok(TransitionOutcome::DecisionRequired);
@@ -1914,7 +1938,12 @@ impl CalculationPadSession {
     }
 
     pub fn request_close(&mut self) -> Result<TransitionOutcome, SessionError> {
+        self.request_close_if(|| true)
+    }
+
+    pub fn request_close_if(&mut self, current: impl Fn() -> bool) -> Result<TransitionOutcome, SessionError> {
         self.ensure_no_pending()?;
+        if !current() { return Err(PadStoreError::Revoked.into()); }
         if self.current.is_none() {
             return Ok(TransitionOutcome::Applied);
         }
@@ -1949,6 +1978,15 @@ impl CalculationPadSession {
         &mut self,
         decision: TransitionDecision,
     ) -> Result<TransitionOutcome, SessionError> {
+        self.resolve_pending_if(decision, || true)
+    }
+
+    pub fn resolve_pending_if(
+        &mut self,
+        decision: TransitionDecision,
+        current: impl Fn() -> bool,
+    ) -> Result<TransitionOutcome, SessionError> {
+        if !current() { return Err(PadStoreError::Revoked.into()); }
         if self.pending.is_none() {
             return Err(SessionError::NoPendingTransition);
         }
@@ -1959,25 +1997,28 @@ impl CalculationPadSession {
             }
             TransitionDecision::Save => {
                 if self.is_dirty() {
-                    self.save()?;
+                    self.save_if(&current)?;
                 }
-                self.apply_pending()?;
+                if !current() { return Err(PadStoreError::Revoked.into()); }
+                self.apply_pending_if(&current)?;
                 Ok(TransitionOutcome::Applied)
             }
             TransitionDecision::Discard => {
-                self.apply_pending()?;
+                if !current() { return Err(PadStoreError::Revoked.into()); }
+                self.apply_pending_if(&current)?;
                 Ok(TransitionOutcome::Applied)
             }
         }
     }
 
-    fn apply_pending(&mut self) -> Result<(), SessionError> {
+    fn apply_pending_if(&mut self, is_current: impl Fn() -> bool) -> Result<(), SessionError> {
         let pending = self.pending.ok_or(SessionError::NoPendingTransition)?;
         let current = match pending {
             PendingAction::New => Some(ActiveDocument::new_blank()),
             PendingAction::Open(id) => Some(ActiveDocument::from_loaded(self.store.open(id)?)),
             PendingAction::Close => None,
         };
+        if !is_current() { return Err(PadStoreError::Revoked.into()); }
         self.retire_sensitivity();
         self.retire_background_evaluation();
         self.current = current;
@@ -4250,6 +4291,31 @@ mod tests {
             session.current.as_ref().unwrap().baseline.disk_sha256,
             Some(loaded.disk_sha256)
         );
+    }
+
+    #[test]
+    fn revoked_open_preserves_draft_and_pending_decision() {
+        let (_directory, root, mut owner) = fixture();
+        owner.replace_source("target = 7").unwrap();
+        owner.save_as("target").unwrap();
+        let target = owner.current_id().unwrap();
+        let mut draft = CalculationPadSession::new(&root);
+        draft.replace_source("draft = 9").unwrap();
+        assert!(matches!(draft.request_open_if(target, || false), Err(SessionError::Store(PadStoreError::Revoked))));
+        assert_eq!(draft.source(), Some("draft = 9"));
+        assert_eq!(draft.pending_transition(), None);
+        draft.request_open(target).unwrap();
+        assert!(matches!(draft.resolve_pending_if(TransitionDecision::Discard, || false), Err(SessionError::Store(PadStoreError::Revoked))));
+        assert_eq!(draft.source(), Some("draft = 9"));
+        assert_eq!(draft.pending_transition(), Some(PendingTransition::Open(target)));
+        let checks = std::cell::Cell::new(0);
+        let result = draft.resolve_pending_if(TransitionDecision::Discard, || {
+            checks.set(checks.get() + 1);
+            checks.get() < 3
+        });
+        assert!(matches!(result, Err(SessionError::Store(PadStoreError::Revoked))));
+        assert_eq!(draft.source(), Some("draft = 9"));
+        assert_eq!(draft.pending_transition(), Some(PendingTransition::Open(target)));
     }
 
     #[test]

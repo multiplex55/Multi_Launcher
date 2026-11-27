@@ -53,17 +53,7 @@ impl PreviewAction {
     }
 }
 
-pub(super) fn copy_if_current(backend: &dyn multi_launcher::clipboard_modify::clipboard::ClipboardBackend,
-    payload: &str, current: &dyn Fn() -> bool) -> Result<(), String> {
-    if payload.contains('\0') { return Err("Cannot copy text containing a NUL character.".into()); }
-    if !current() { return Err("Action was superseded.".into()); }
-    #[cfg(windows)]
-    let result = backend.write_text_acquired_if(payload, current);
-    #[cfg(not(windows))]
-    let result = backend.write_text_if(payload, current);
-    match result { Ok(true) => Ok(()), Ok(false) => Err("Action was superseded.".into()),
-        Err(error) => Err(format!("Could not copy: {error}")) }
-}
+use super::external_launch::copy_if_current;
 
 fn preview_shell_owns_child<T: PartialEq>(child_host: T, shell_host: T) -> bool { child_host == shell_host }
 

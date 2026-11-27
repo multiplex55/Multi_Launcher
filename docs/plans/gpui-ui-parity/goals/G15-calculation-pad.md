@@ -1,6 +1,6 @@
 # G15 — Calculation Pad and its complete companion tools
 
-**Status:** Pending. **Owner:** G15 implementer with the calculation session/evaluation owner. No implementation or validation has occurred. Continue the single migration branch.
+**Status:** In implementation. **Owner:** G15 implementer with the calculation session/evaluation owner. The ordinary retained Pad, checked document workflows and focused evidence are recorded in the [P0.11 checkpoint](../CHECKPOINTS.md#p011-retained-calculation-pad-and-checked-documents). Matched native replay and the remaining G15 controls and companions stay open.
 
 ## Objective and dependencies
 

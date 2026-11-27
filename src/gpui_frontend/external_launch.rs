@@ -16,6 +16,18 @@ use gpui_kit::component::{
     notification::{Notification, NotificationDelivery},
 };
 
+pub(super) fn copy_if_current(backend: &dyn multi_launcher::clipboard_modify::clipboard::ClipboardBackend,
+    payload: &str, current: &dyn Fn() -> bool) -> Result<(), String> {
+    if payload.contains('\0') { return Err("Cannot copy text containing a NUL character.".into()); }
+    if !current() { return Err("Action was superseded.".into()); }
+    #[cfg(windows)]
+    let result = backend.write_text_acquired_if(payload, current);
+    #[cfg(not(windows))]
+    let result = backend.write_text_if(payload, current);
+    match result { Ok(true) => Ok(()), Ok(false) => Err("Action was superseded.".into()),
+        Err(error) => Err(format!("Could not copy: {error}")) }
+}
+
 pub(super) fn saved_external(action: &Action) -> Option<ExternalCommand> {
     ordinary_external(&multi_launcher::commands::parse_action(action).ok()?).cloned()
 }
