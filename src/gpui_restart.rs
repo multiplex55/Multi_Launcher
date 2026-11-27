@@ -180,6 +180,12 @@ impl RestartAdmission {
         self.lock().phase == Phase::Fenced
     }
 
+    /// Run a short synchronous claim atomically against the terminal fence.
+    pub(crate) fn claim_if_unfenced<T>(&self, claim: impl FnOnce() -> T) -> Option<T> {
+        let state = self.lock();
+        if state.phase == Phase::Fenced { None } else { Some(claim()) }
+    }
+
     pub(crate) fn is_ready(&self) -> bool {
         self.lock().phase == Phase::Ready
     }
@@ -259,6 +265,14 @@ mod tests {
             admission.try_accept(HashWork::Idle),
             Err(RestartBlocker::ConfirmationInactive)
         );
+    }
+
+    #[test]
+    fn synchronous_claim_is_denied_after_fence() {
+        let admission = RestartAdmission::default();
+        assert_eq!(admission.claim_if_unfenced(|| 9), Some(9));
+        admission.fence();
+        assert_eq!(admission.claim_if_unfenced(|| panic!("fenced claim ran")), None::<()>);
     }
 
     #[test]

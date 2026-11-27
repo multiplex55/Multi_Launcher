@@ -679,26 +679,42 @@ pub struct HotkeyReconfigurationReceiver {
 impl HotkeyReconfigurationReceiver {
     pub fn try_recv(&self) -> Result<Option<HotkeyRuntimeMessage>, HotkeyReconfigurationError> {
         match self.commands.try_recv() {
-            Ok(RuntimeCommand::Prepare {
+            Ok(command) => Ok(Some(Self::convert(command))),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(HotkeyReconfigurationError::Disconnected),
+        }
+    }
+
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<HotkeyRuntimeMessage>, HotkeyReconfigurationError> {
+        match self.commands.recv_timeout(timeout) {
+            Ok(command) => Ok(Some(Self::convert(command))),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(HotkeyReconfigurationError::Disconnected),
+        }
+    }
+
+    fn convert(command: RuntimeCommand) -> HotkeyRuntimeMessage {
+        match command {
+            RuntimeCommand::Prepare {
                 request_id,
                 settings,
                 sequence_hotkey_bindings,
                 completion,
-            }) => Ok(Some(HotkeyRuntimeMessage::Prepare(
+            } => HotkeyRuntimeMessage::Prepare(
                 HotkeyPreparationRequest {
                     request_id,
                     settings,
                     sequence_hotkey_bindings,
                     completion: Some(completion),
                 },
-            ))),
-            Ok(RuntimeCommand::Apply {
+            ),
+            RuntimeCommand::Apply {
                 request_id,
                 generation,
                 settings,
                 sequence_hotkey_bindings,
                 completion,
-            }) => Ok(Some(HotkeyRuntimeMessage::Apply(
+            } => HotkeyRuntimeMessage::Apply(
                 HotkeyApplicationRequest {
                     request_id,
                     generation,
@@ -706,18 +722,16 @@ impl HotkeyReconfigurationReceiver {
                     sequence_hotkey_bindings,
                     completion: Some(completion),
                 },
-            ))),
-            Ok(RuntimeCommand::Cancel {
+            ),
+            RuntimeCommand::Cancel {
                 request_id,
                 completion,
-            }) => Ok(Some(HotkeyRuntimeMessage::Cancel(
+            } => HotkeyRuntimeMessage::Cancel(
                 HotkeyCancellationRequest {
                     request_id,
                     completion: Some(completion),
                 },
-            ))),
-            Err(TryRecvError::Empty) => Ok(None),
-            Err(TryRecvError::Disconnected) => Err(HotkeyReconfigurationError::Disconnected),
+            ),
         }
     }
 }

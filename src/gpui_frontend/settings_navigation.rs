@@ -4,6 +4,7 @@ use multi_launcher::settings_editor::catalog::{SettingsCatalog, ids};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Target {
+    LauncherHotkey,
     Autocomplete,
     Exact,
     Fuzzy,
@@ -28,6 +29,7 @@ pub(super) enum Target {
 impl Target {
     fn from_id(id: &str) -> Option<Self> {
         Some(match id {
+            ids::HOTKEY_LAUNCHER => Self::LauncherHotkey,
             ids::SEARCH_AUTOCOMPLETE => Self::Autocomplete,
             ids::SEARCH_MATCH_EXACT => Self::Exact,
             ids::SEARCH_FUZZY_WEIGHT | ids::SEARCH_FUZZY_WEIGHT_VALUE => Self::Fuzzy,
@@ -124,6 +126,7 @@ impl SettingsNavigation {
         root: WeakEntity<RootWindow>,
         search: Option<Entity<settings_search::SearchSettings>>,
         actions: Option<Entity<settings_actions::ActionsSettings>>,
+        hotkey: Option<Entity<settings_hotkey::SettingsHotkey>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -142,6 +145,9 @@ impl SettingsNavigation {
         }
         if let Some(actions) = actions {
             watchers.push(cx.observe(&actions, |_: &mut Self, _, cx| cx.notify()));
+        }
+        if let Some(hotkey) = hotkey {
+            watchers.push(cx.observe(&hotkey, |_: &mut Self, _, cx| cx.notify()));
         }
         Self {
             root,
@@ -233,7 +239,9 @@ impl SettingsNavigation {
             .into_iter()
             .filter_map(|entry| {
                 let target = Target::from_id(entry.id.as_str())?;
-                let available = if target.search_section() {
+                let available = if target == Target::LauncherHotkey {
+                    root.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).can_focus())
+                } else if target.search_section() {
                     root.settings_search
                         .as_ref()
                         .is_some_and(|view| view.read(cx).can_focus(target))
@@ -285,7 +293,9 @@ fn navigate(
         return;
     }
     let state = root_entity.read(app);
-    let target_live = if target.search_section() {
+    let target_live = if target == Target::LauncherHotkey {
+        state.settings_hotkey.as_ref().is_some_and(|view| view.read(app).can_focus())
+    } else if target.search_section() {
         state
             .settings_search
             .as_ref()
@@ -356,7 +366,9 @@ fn navigate(
             {
                 return;
             }
-            let focused = if target.search_section() {
+            let focused = if target == Target::LauncherHotkey {
+                root.settings_hotkey.as_ref().is_some_and(|view| view.update(cx, |view, cx| view.focus_control(window, cx)))
+            } else if target.search_section() {
                 root.settings_search.as_ref().is_some_and(|view| {
                     view.update(cx, |view, cx| view.focus_control(target, window, cx))
                 })
@@ -367,7 +379,7 @@ fn navigate(
             };
             if focused {
                 root.settings_panel_scroll
-                    .scroll_to_top_of_item(if target.search_section() { 2 } else { 3 });
+                    .scroll_to_top_of_item(if target == Target::LauncherHotkey { 2 } else if target.search_section() { 3 } else { 4 });
                 cx.notify();
             }
         });
@@ -513,5 +525,11 @@ mod tests {
         for (query, expected) in [("follow mouse", Target::FollowMouse), ("use static position", Target::StaticPosition), ("static position x", Target::StaticX), ("static window height", Target::StaticHeight)] {
             assert!(catalog.search(query).iter().any(|entry| Target::from_id(entry.id.as_str()) == Some(expected)));
         }
+    }
+
+    #[test]
+    fn real_catalog_routes_launcher_hotkey_control() {
+        let catalog = multi_launcher::settings_editor::catalog::SettingsCatalog::default();
+        assert!(catalog.search("launcher hotkey").iter().any(|entry| Target::from_id(entry.id.as_str()) == Some(Target::LauncherHotkey)));
     }
 }

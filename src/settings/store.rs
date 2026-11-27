@@ -1,6 +1,9 @@
 #[path = "scoped_preferences.rs"]
 mod scoped_preferences;
 pub use scoped_preferences::{ScopedSetting, ScopedSettingChange, ScopedSettingValue, ScopedSettingsAcknowledgement, ScopedSettingsError};
+#[path = "launcher_hotkey.rs"]
+mod launcher_hotkey;
+pub use launcher_hotkey::LauncherHotkeySnapshot;
 
 use super::Settings;
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};
@@ -140,11 +143,11 @@ impl SettingsBooleanSaveToken {
         }
     }
 
-    fn is_canceled(&self) -> bool {
+    pub(crate) fn is_canceled(&self) -> bool {
         self.state.load(Ordering::Acquire) == SAVE_CANCELED
     }
 
-    fn mark_waiting_for_settings(&self) -> bool {
+    pub(crate) fn mark_waiting_for_settings(&self) -> bool {
         loop {
             match self.state.load(Ordering::Acquire) {
                 SAVE_PENDING => {
@@ -168,7 +171,7 @@ impl SettingsBooleanSaveToken {
         }
     }
 
-    fn begin_irrevocable_commit(&self) -> bool {
+    pub(crate) fn begin_irrevocable_commit(&self) -> bool {
         loop {
             match self.state.load(Ordering::Acquire) {
                 SAVE_PENDING | SAVE_WAITING_FOR_SETTINGS => {
@@ -445,6 +448,15 @@ impl Settings {
     pub fn read_current(path: impl AsRef<Path>) -> anyhow::Result<Self> {
         let _transaction = transaction_guard();
         load_effective(path)
+    }
+
+    /// Keep the Settings transaction held through an exact live-owner claim.
+    pub fn with_current<T>(path: impl AsRef<Path>, claim: impl FnOnce(&Self, &dyn Fn() -> Result<Self, String>) -> Result<T, String>) -> Result<T, String> {
+        let _transaction = transaction_guard();
+        let path = path.as_ref();
+        let read = || load_effective(path).map_err(|error| error.to_string());
+        let settings = read()?;
+        claim(&settings, &read)
     }
 
     /// Persist every close-owned value in one atomic transaction while

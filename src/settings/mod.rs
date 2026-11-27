@@ -19,6 +19,7 @@ pub use io::{set_settings_path, settings_path};
 pub use model::*;
 pub(crate) use store::LauncherClosePreferences;
 pub use store::{
+    LauncherHotkeySnapshot,
     ScopedSetting, ScopedSettingChange, ScopedSettingValue, ScopedSettingsAcknowledgement, ScopedSettingsError,
     SearchCapabilityError, SearchCapabilitySaveAcknowledgement, SearchCapabilitySaveRequest,
     SearchCapabilitySnapshot, provider_capability_enabled, provider_search_capability_enabled,

@@ -144,12 +144,7 @@ fn build_viewport_with_icon(settings: &Settings, icon_bytes: &[u8]) -> egui::Vie
     viewport
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PasteSequenceHotkeyRoute {
-    hotkey: multi_launcher::hotkey::Hotkey,
-    chord: String,
-    action: PasteSequenceHotkeyAction,
-}
+use multi_launcher::paste_sequence::PasteSequenceHotkeyRoute;
 
 fn paste_sequence_hotkey_routes(
     settings: &Settings,
@@ -180,46 +175,7 @@ fn paste_sequence_hotkey_routes_from_bindings(
     settings: &Settings,
     bindings: &[multi_launcher::paste_sequence::SequenceHotkeyBinding],
 ) -> Result<Vec<PasteSequenceHotkeyRoute>, String> {
-    if settings
-        .enabled_plugins
-        .as_ref()
-        .is_some_and(|plugins| !plugins.contains("paste_sequence"))
-    {
-        return Ok(Vec::new());
-    }
-    let mut routes = Vec::new();
-    for (chord, action) in [
-        (
-            settings.paste_sequence.next_hotkey.as_deref(),
-            PasteSequenceHotkeyAction::Next,
-        ),
-        (
-            settings.paste_sequence.cancel_hotkey.as_deref(),
-            PasteSequenceHotkeyAction::Cancel,
-        ),
-    ] {
-        let Some(hotkey) =
-            multi_launcher::settings::PasteSequencePreferences::parse_optional_hotkey(chord)
-                .map_err(|error| format!("Paste Sequence {action:?}: {error}"))?
-        else {
-            continue;
-        };
-        routes.push(PasteSequenceHotkeyRoute {
-            hotkey,
-            chord: chord.unwrap_or_default().trim().into(),
-            action,
-        });
-    }
-    for binding in bindings {
-        let hotkey = parse_hotkey(binding.chord())
-            .ok_or_else(|| format!("sequence {} has an invalid shortcut", binding.id().get()))?;
-        routes.push(PasteSequenceHotkeyRoute {
-            hotkey,
-            chord: binding.chord().to_owned(),
-            action: PasteSequenceHotkeyAction::Start(binding.id()),
-        });
-    }
-    Ok(routes)
+    multi_launcher::paste_sequence::paste_sequence_hotkey_routes_from_bindings(settings, bindings)
 }
 
 #[cfg(test)]
@@ -1174,6 +1130,21 @@ fn resolve_hotkey_route_candidate_with_macro(
     ResolvedHotkeyRouteCandidate,
     multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError,
 > {
+    let (base, sequences, omissions) = resolve_hotkey_route_reservations(settings, radial_document, macro_document, sequence_bindings)?;
+    let physical_paste = PhysicalPastePolicy {
+        revision: physical_paste_bridge().route_revision(),
+        availability: physical_paste_availability(settings, radial_document, macro_document, &sequences),
+    };
+    Ok(ResolvedHotkeyRouteCandidate { base, sequences, omissions, physical_paste })
+}
+
+/// Resolve stock reservations without touching the physical-paste runtime.
+fn resolve_hotkey_route_reservations(
+    settings: &Settings,
+    radial_document: &RadialDocument,
+    macro_document: Option<&multi_launcher::mkmacro::MkMacroDocument>,
+    sequence_bindings: Option<&[multi_launcher::paste_sequence::SequenceHotkeyBinding]>,
+) -> Result<(multi_launcher::hotkey::validation::ValidatedHotkeyRoutes, Vec<PasteSequenceHotkeyRoute>, Vec<PasteSequenceRouteOmission>), multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError> {
     use multi_launcher::hotkey::reconfiguration::HotkeyReconfigurationError as Error;
     let base = multi_launcher::hotkey::validation::validate_hotkey_routes(
         settings,
@@ -1250,21 +1221,7 @@ fn resolve_hotkey_route_candidate_with_macro(
             });
         }
     }
-    let physical_paste = PhysicalPastePolicy {
-        revision: physical_paste_bridge().route_revision(),
-        availability: physical_paste_availability(
-            settings,
-            radial_document,
-            macro_document,
-            &sequences,
-        ),
-    };
-    Ok(ResolvedHotkeyRouteCandidate {
-        base,
-        sequences,
-        omissions,
-        physical_paste,
-    })
+    Ok((base, sequences, omissions))
 }
 
 fn resolve_startup_hotkey_route_candidate_with_macro(

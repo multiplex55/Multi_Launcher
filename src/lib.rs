@@ -93,7 +93,7 @@ pub mod search_replace;
 pub mod settings;
 pub mod settings_editor;
 mod settings_save;
-pub use settings_save::{SettingsSaveShutdownReceipt, SettingsSaveWorkerRegistry};
+pub use settings_save::{LauncherHotkeySaveAcknowledgement, LauncherHotkeySaveEvent, LauncherHotkeySaveTicket, SettingsSaveShutdownReceipt, SettingsSaveWorkerRegistry};
 pub mod sound;
 pub mod startup;
 pub mod table_utility;

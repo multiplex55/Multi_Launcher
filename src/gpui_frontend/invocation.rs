@@ -7,11 +7,11 @@ pub(super) struct Owner {
     installed: Mutex<Option<Installed>>,
 }
 
-struct Installed {
-    revision: u64,
-    listener: HotkeyListener,
-    launcher: Arc<HotkeyTrigger>,
-    quick_help: Option<Arc<HotkeyTrigger>>,
+pub(super) struct Installed {
+    pub revision: u64,
+    pub listener: HotkeyListener,
+    pub launcher: Arc<HotkeyTrigger>,
+    pub quick_help: Option<Arc<HotkeyTrigger>>,
 }
 
 #[derive(Clone)]
@@ -23,6 +23,12 @@ pub(super) struct Turn {
 }
 
 impl Owner {
+    pub fn with_generation<T>(&self, generation: u64, claim: impl FnOnce(Hotkey) -> T) -> Option<T> {
+        let installed = self.installed.lock().ok()?;
+        let active = installed.as_ref()?;
+        if active.revision != generation || self.revision.load(Ordering::Acquire) != generation { return None; }
+        Some(claim(active.launcher.hotkey()))
+    }
     pub fn install(&self, listener: HotkeyListener, launcher: Arc<HotkeyTrigger>, quick_help: Option<Arc<HotkeyTrigger>>) -> Result<(), String> {
         let mut installed = self.installed.lock().map_err(|_| "hotkey owner lock poisoned".to_owned())?;
         if installed.is_some() { return Err("hotkey owner already installed".into()); }
@@ -44,13 +50,55 @@ impl Owner {
         if let Some(mut installed) = state.take() { installed.listener.stop_checked()?; }
         Ok(())
     }
+
+    #[cfg(windows)]
+    pub(super) fn active_routes(&self) -> Option<(u64, Hotkey, Option<Hotkey>)> {
+        let installed = self.installed.lock().ok()?;
+        let active = installed.as_ref()?;
+        Some((active.revision, active.launcher.hotkey(), active.quick_help.as_ref().map(|trigger| trigger.hotkey())))
+    }
+
+    #[cfg(windows)]
+    pub(super) fn replace(&self, expected: u64, candidate: &mut Option<Installed>, fallback: &mut Option<Installed>, claim_current: impl FnOnce(&dyn Fn() -> u64) -> Option<u64>) -> Result<Option<u64>, (bool, String)> {
+        let mut installed = self.installed.lock().map_err(|_| (false, "hotkey owner lock poisoned".to_owned()))?;
+        if installed.as_ref().is_none_or(|active| active.revision != expected) { return Err((false, "hotkey generation changed".into())); }
+        let active = installed.as_ref().ok_or_else(|| (false, "hotkey owner unavailable".to_owned()))?;
+        let claim = active.launcher.with_publication_guard(|launcher_pending| {
+            if let Some(help) = &active.quick_help {
+                help.with_publication_guard(|help_pending| {
+                    if launcher_pending || help_pending { None } else { claim_current(&|| self.revision.fetch_add(1, Ordering::AcqRel).wrapping_add(1)) }
+                })
+            } else if launcher_pending { Ok(None) }
+            else { Ok(claim_current(&|| self.revision.fetch_add(1, Ordering::AcqRel).wrapping_add(1))) }
+        }).map_err(|error| (false, error))?.map_err(|error| (false, error))?;
+        let Some(next) = claim else { return Ok(None); };
+        let mut previous = installed.take().ok_or_else(|| (false, "hotkey owner unavailable".to_owned()))?;
+        let mut candidate = candidate.take().ok_or_else(|| (false, "prepared hotkey listener unavailable".to_owned()))?;
+        let mut fallback = fallback.take().ok_or_else(|| (false, "fallback hotkey listener unavailable".to_owned()))?;
+        if let Err(error) = previous.listener.stop_checked() {
+            fallback.revision = next;
+            fallback.listener.activate();
+            *installed = Some(fallback);
+            return Err((true, format!("old polling listener failed to stop: {error}")));
+        }
+        candidate.revision = next;
+        candidate.listener.activate();
+        *installed = Some(candidate);
+        Ok(Some(next))
+    }
 }
 
 impl Turn {
+    pub fn generation(&self) -> u64 { self.revision }
+    pub fn hotkey(&self) -> Option<Hotkey> { self.current().then(|| self.launcher.hotkey()) }
     pub fn current(&self) -> bool { self.owner.revision.load(Ordering::Acquire) == self.revision }
     pub fn pending(&self) -> bool {
         if !self.current() { return true; }
         self.launcher.open.lock().map(|pending| *pending || !self.current()).unwrap_or(true)
+    }
+    pub fn help_pending(&self) -> bool {
+        if !self.current() { return true; }
+        self.quick_help.as_ref().is_some_and(|trigger| trigger.with_publication_guard(|pending| pending || !self.current()).unwrap_or(true))
     }
     pub fn take(&self) -> bool { self.current() && self.launcher.take() && self.current() }
     pub fn quick_help(&self) -> Option<Option<u64>> {

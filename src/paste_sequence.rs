@@ -175,6 +175,35 @@ impl SequenceHotkeyBinding {
     }
 }
 
+/// Payload-free stock projection of Paste Sequence shortcut reservations.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasteSequenceHotkeyRoute {
+    pub hotkey: crate::hotkey::Hotkey,
+    pub chord: String,
+    pub action: crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction,
+}
+
+pub fn paste_sequence_hotkey_routes_from_bindings(
+    settings: &crate::settings::Settings,
+    bindings: &[SequenceHotkeyBinding],
+) -> Result<Vec<PasteSequenceHotkeyRoute>, String> {
+    use crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction as Action;
+    if settings.enabled_plugins.as_ref().is_some_and(|plugins| !plugins.contains("paste_sequence")) {
+        return Ok(Vec::new());
+    }
+    let mut routes = Vec::new();
+    for (chord, action) in [(settings.paste_sequence.next_hotkey.as_deref(), Action::Next), (settings.paste_sequence.cancel_hotkey.as_deref(), Action::Cancel)] {
+        let Some(hotkey) = crate::settings::PasteSequencePreferences::parse_optional_hotkey(chord)
+            .map_err(|error| format!("Paste Sequence {action:?}: {error}"))? else { continue; };
+        routes.push(PasteSequenceHotkeyRoute { hotkey, chord: chord.unwrap_or_default().trim().into(), action });
+    }
+    for binding in bindings {
+        let hotkey = crate::hotkey::parse_hotkey(binding.chord()).ok_or_else(|| format!("sequence {} has an invalid shortcut", binding.id().get()))?;
+        routes.push(PasteSequenceHotkeyRoute { hotkey, chord: binding.chord().to_owned(), action: Action::Start(binding.id()) });
+    }
+    Ok(routes)
+}
+
 impl fmt::Debug for SequenceHotkeyBinding {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1381,6 +1410,22 @@ mod tests {
     use chrono::{DateTime, FixedOffset};
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
+
+    #[test]
+    fn hotkey_reservation_projection_preserves_order_and_disabled_plugin() {
+        use super::{paste_sequence_hotkey_routes_from_bindings, SequenceHotkeyBinding};
+        use crate::hotkey::launcher_invocation::PasteSequenceHotkeyAction;
+        let mut settings = crate::settings::Settings::default();
+        settings.paste_sequence.next_hotkey = Some("Ctrl+F8".into());
+        settings.paste_sequence.cancel_hotkey = None;
+        let binding = SequenceHotkeyBinding { id: SequenceId::from_raw(9).unwrap(), chord: HotkeyChord::new("Alt+F9").unwrap() };
+        let routes = paste_sequence_hotkey_routes_from_bindings(&settings, &[binding]).unwrap();
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].action, PasteSequenceHotkeyAction::Next);
+        assert_eq!(routes[1].action, PasteSequenceHotkeyAction::Start(SequenceId::from_raw(9).unwrap()));
+        settings.enabled_plugins = Some(std::collections::HashSet::new());
+        assert!(paste_sequence_hotkey_routes_from_bindings(&settings, &[]).unwrap().is_empty());
+    }
 
     fn clipboard_step(text: &str) -> Step {
         Step::clipboard_history_reference(text)

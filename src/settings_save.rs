@@ -814,6 +814,48 @@ fn next_utility_size_revision(
 #[derive(Clone)]
 pub struct SettingsSaveWorkerRegistry(Arc<Mutex<WorkerRegistryState>>, Arc<Mutex<()>>);
 
+#[derive(Clone, Debug)]
+pub struct LauncherHotkeySaveAcknowledgement {
+    pub snapshot: crate::settings::LauncherHotkeySnapshot,
+    pub applied: AppliedHotkeyReconfiguration,
+}
+
+#[derive(Clone, Debug)]
+pub enum LauncherHotkeySaveEvent {
+    ReconciliationRequired(String),
+    Completed { result: Result<LauncherHotkeySaveAcknowledgement, String>, reconciliation_required: bool },
+}
+
+pub struct LauncherHotkeySaveTicket {
+    receiver: Receiver<LauncherHotkeySaveEvent>,
+    token: SettingsBooleanSaveToken,
+}
+
+struct LauncherHotkeyEventProducer {
+    sender: Option<mpsc::Sender<LauncherHotkeySaveEvent>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
+}
+
+impl LauncherHotkeyEventProducer {
+    fn send(&self, event: LauncherHotkeySaveEvent) {
+        if let Some(sender) = &self.sender { let _ = sender.send(event); }
+    }
+    fn notify(&self) { (self.wake)(); }
+}
+
+impl Drop for LauncherHotkeyEventProducer {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.wake)()));
+    }
+}
+
+impl LauncherHotkeySaveTicket {
+    pub fn id(&self) -> u64 { self.token.id() }
+    pub fn request_cancel(&self) -> bool { self.token.request_cancel() }
+    pub fn try_recv(&self) -> Result<LauncherHotkeySaveEvent, TryRecvError> { self.receiver.try_recv() }
+}
+
 impl Default for SettingsSaveWorkerRegistry {
     fn default() -> Self {
         Self(
@@ -856,6 +898,38 @@ impl Default for SettingsSaveWorkerRegistry {
 }
 
 impl SettingsSaveWorkerRegistry {
+    /// Start the one-leaf GPUI launcher transaction on the registered worker.
+    pub fn begin_launcher_hotkey_save(
+        &self, path: String, baseline: crate::settings::LauncherHotkeySnapshot,
+        desired: Option<String>, wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<LauncherHotkeySaveTicket, String> {
+        let token = self.reserve_preference_token()?;
+        let worker_token = token.clone();
+        let (sender, receiver) = mpsc::channel();
+        let workers = self.clone();
+        if let Err(error) = self.spawn(move || {
+            let producer = LauncherHotkeyEventProducer { sender: Some(sender), wake };
+            let reconciliation = AtomicBool::new(false);
+            let (internal_tx, internal_rx) = mpsc::channel();
+            let internal_rx = Mutex::new(internal_rx);
+            let notify = || {
+                if let Ok(receiver) = internal_rx.lock() {
+                    while let Ok(SettingsSaveWorkerMessage::ReconciliationRequired { message, .. }) = receiver.try_recv() {
+                        producer.send(LauncherHotkeySaveEvent::ReconciliationRequired(message));
+                    }
+                }
+                producer.notify();
+            };
+            let result = run_launcher_hotkey_save(&path, &baseline, desired, &worker_token, &reconciliation, &internal_tx, &notify, crate::hotkey::reconfiguration::prepare_hotkey_reconfiguration);
+            let requires_reconciliation = reconciliation.load(std::sync::atomic::Ordering::Acquire);
+            workers.complete_preference_token(worker_token.id(), result.as_ref().err().cloned());
+            producer.send(LauncherHotkeySaveEvent::Completed { result, reconciliation_required: requires_reconciliation });
+        }) {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).boolean_preference_pending.remove(&token.id());
+            return Err(format!("could not start launcher hotkey save: {error}"));
+        }
+        Ok(LauncherHotkeySaveTicket { receiver, token })
+    }
     /// Read a provider Search capability on the registered Settings worker.
     pub fn begin_search_capability_read(
         &self,
@@ -2159,6 +2233,87 @@ impl LauncherApp {
     }
 }
 
+fn run_launcher_hotkey_save<P>(
+    path: &str, baseline: &crate::settings::LauncherHotkeySnapshot, desired: Option<String>,
+    token: &SettingsBooleanSaveToken, reconciliation: &AtomicBool,
+    sender: &mpsc::Sender<SettingsSaveWorkerMessage>, notify: &dyn Fn(), prepare: P,
+) -> Result<LauncherHotkeySaveAcknowledgement, String>
+where P: FnOnce(Settings) -> Result<crate::hotkey::reconfiguration::HotkeyReconfigurationTicket, HotkeyReconfigurationError> {
+    use crate::hotkey::reconfiguration::HotkeyTerminalDisposition as Disposition;
+    let observed = Settings::launcher_hotkey_snapshot(path).map_err(|error| error.to_string())?;
+    if observed != *baseline { return Err("Launcher hotkey changed since this editor was opened.".into()); }
+    let replacement = baseline.replacement(desired.clone()).map_err(|error| error.to_string())?;
+    let mut candidate = Settings::read_current(path).map_err(|error| error.to_string())?;
+    candidate.hotkey = desired;
+    if token.is_canceled() { return Err("Launcher hotkey save was cancelled before preparation.".into()); }
+    let mut ticket = prepare(candidate).map_err(|error| error.to_string())?;
+    let cancel = |ticket: &mut crate::hotkey::reconfiguration::HotkeyReconfigurationTicket, message: &str| {
+        cancel_and_resolve(ticket, SettingsSaveSource::General, reconciliation, sender, notify, CANCELLATION_TIMEOUT, message)
+    };
+    let prepared = match ticket.wait_prepared(PREPARATION_TIMEOUT) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+        if matches!(error, HotkeyReconfigurationError::TimedOut | HotkeyReconfigurationError::Disconnected) {
+            let terminal = cancel(&mut ticket, "Hotkey preparation cancellation is awaiting confirmation.");
+            reconciliation.store(!matches!(terminal, Ok(Disposition::ConfirmedNotAppliedOrRestored(_))), std::sync::atomic::Ordering::Release);
+            return Err(format_resolution_error("hotkey preparation failed", error, &terminal));
+        }
+        return Err(format!("hotkey route preparation failed before persistence: {error}"));
+        }
+    };
+    if prepared.request_id != ticket.request_id() {
+        let terminal = cancel(&mut ticket, "Unexpected hotkey preparation acknowledgement; cancellation is awaiting confirmation.");
+        reconciliation.store(!matches!(terminal, Ok(Disposition::ConfirmedNotAppliedOrRestored(_))), std::sync::atomic::Ordering::Release);
+        return Err(format!("hotkey preparation acknowledged an unexpected request; {}", resolution_description(&terminal)));
+    }
+    if token.is_canceled() || !token.mark_waiting_for_settings() {
+        let terminal = cancel(&mut ticket, "Hotkey preparation cancellation is awaiting confirmation.");
+        reconciliation.store(!matches!(terminal, Ok(Disposition::ConfirmedNotAppliedOrRestored(_))), std::sync::atomic::Ordering::Release);
+        return Err(format!("settings save cancelled before persistence; {}", resolution_description(&terminal)));
+    }
+    let committed = std::cell::Cell::new(false);
+    let persisted = Settings::compare_exchange_launcher_hotkey(path, baseline, &replacement, || {
+        if committed.get() { true } else if token.begin_irrevocable_commit() { committed.set(true); true } else { false }
+    });
+    let (written, settings) = match persisted {
+        Ok(value) => value,
+        Err(error) => {
+            let terminal = cancel(&mut ticket, "Settings persistence failed; hotkey cancellation is awaiting confirmation.");
+            reconciliation.store(!matches!(terminal, Ok(Disposition::ConfirmedNotAppliedOrRestored(_))), std::sync::atomic::Ordering::Release);
+            return Err(format!("settings persistence failed after preparation ({error}); {}", resolution_description(&terminal)));
+        }
+    };
+    let terminal = match ticket.apply(settings) {
+        Ok(()) => match ticket.wait_terminal_disposition(TERMINAL_TIMEOUT) {
+            Ok(terminal) => Ok(terminal),
+            Err(error) => {
+                let terminal = cancel(&mut ticket, "Hotkey apply is awaiting an authoritative result.");
+                if terminal.is_err() { reconciliation.store(true, std::sync::atomic::Ordering::Release); return Err(format_resolution_error("hotkey apply did not complete", error, &terminal)); }
+                terminal
+            }
+        },
+        Err(HotkeyApplySubmissionError::NotEnqueued(error)) => {
+            let _ = ticket.cancel();
+            return match Settings::compare_exchange_launcher_hotkey(path, &written, baseline, || true) {
+                Ok(_) => Err(format!("hotkey apply was not enqueued; prior launcher hotkey restored: {error}")),
+                Err(rollback) => { reconciliation.store(true, std::sync::atomic::Ordering::Release); Err(format!("hotkey apply was not enqueued ({error}); rollback failed: {rollback}")) }
+            };
+        }
+        Err(HotkeyApplySubmissionError::AlreadyEnqueued(_)) => cancel(&mut ticket, "Hotkey Apply is awaiting an authoritative result."),
+    };
+    match terminal {
+        Ok(Disposition::Applied(applied)) if applied.request_id == prepared.request_id && applied.generation == prepared.generation => {
+            reconciliation.store(false, std::sync::atomic::Ordering::Release);
+            Ok(LauncherHotkeySaveAcknowledgement { snapshot: written, applied })
+        }
+        Ok(Disposition::ConfirmedNotAppliedOrRestored(error)) => match Settings::compare_exchange_launcher_hotkey(path, &written, baseline, || true) {
+            Ok(_) => { reconciliation.store(false, std::sync::atomic::Ordering::Release); Err(format!("hotkey application failed; prior launcher hotkey restored: {error}")) }
+            Err(rollback) => { reconciliation.store(true, std::sync::atomic::Ordering::Release); Err(format!("hotkey application failed ({error}); rollback failed: {rollback}")) }
+        },
+        other => { reconciliation.store(true, std::sync::atomic::Ordering::Release); Err(format!("Hotkey runtime could not be reconciled; persisted launcher hotkey was retained: {other:?}")) }
+    }
+}
+
 fn run_settings_save<P>(
     path: &str,
     intent: &SettingsSaveIntent,
@@ -2180,6 +2335,7 @@ where
         HotkeyReconfigurationError,
     >,
 {
+    let notify = || { repaint.request_repaint(); repaint.request_repaint_of(egui::ViewportId::ROOT); };
     let mut candidate = Settings::read_current(path).map_err(|error| error.to_string())?;
     intent
         .verify_invocation_baseline(&candidate)
@@ -2193,7 +2349,7 @@ where
             source,
             reconciliation_required,
             sender,
-            repaint,
+            &notify,
             cancellation_timeout,
         );
     }
@@ -2212,7 +2368,7 @@ where
             source,
             reconciliation_required,
             sender,
-            repaint,
+            &notify,
             cancellation_timeout,
             "Hotkey preparation cancellation is awaiting confirmation; this save remains pending.",
         );
@@ -2234,7 +2390,7 @@ where
             source,
             reconciliation_required,
             sender,
-            repaint,
+            &notify,
             cancellation_timeout,
         );
     }
@@ -2253,7 +2409,7 @@ where
                 source,
                 reconciliation_required,
                 sender,
-                repaint,
+                &notify,
                 cancellation_timeout,
                 "Settings persistence failed; hotkey cancellation is awaiting confirmation.",
             );
@@ -2301,7 +2457,7 @@ where
                 source,
                 reconciliation_required,
                 sender,
-                repaint,
+                &notify,
                 cancellation_timeout,
                 "Apply submission was already accepted; hotkey route ownership is awaiting confirmation.",
             );
@@ -2326,7 +2482,7 @@ where
                 source,
                 reconciliation_required,
                 sender,
-                repaint,
+                &notify,
                 cancellation_timeout,
                 "Hotkey apply timed out; cancellation is awaiting an authoritative route result. This save remains pending.",
             );
@@ -2390,7 +2546,7 @@ fn cancel_before_apply(
     source: SettingsSaveSource,
     reconciliation_required: &AtomicBool,
     sender: &mpsc::Sender<SettingsSaveWorkerMessage>,
-    repaint: &egui::Context,
+    notify: &dyn Fn(),
     timeout: Duration,
 ) -> Result<SettingsSaveCompletion, String> {
     use crate::hotkey::reconfiguration::HotkeyTerminalDisposition as Disposition;
@@ -2399,7 +2555,7 @@ fn cancel_before_apply(
         source,
         reconciliation_required,
         sender,
-        repaint,
+        notify,
         timeout,
         "Hotkey preparation cancellation is awaiting confirmation; this save remains pending.",
     ) {
@@ -2436,7 +2592,7 @@ fn cancel_and_resolve(
     source: SettingsSaveSource,
     reconciliation_required: &AtomicBool,
     sender: &mpsc::Sender<SettingsSaveWorkerMessage>,
-    repaint: &egui::Context,
+    notify: &dyn Fn(),
     timeout: Duration,
     pending_message: &str,
 ) -> Result<crate::hotkey::reconfiguration::HotkeyTerminalDisposition, HotkeyReconfigurationError> {
@@ -2455,8 +2611,7 @@ fn cancel_and_resolve(
                 source,
                 message: pending_message.to_owned(),
             });
-            repaint.request_repaint();
-            repaint.request_repaint_of(egui::ViewportId::ROOT);
+            notify();
             loop {
                 match ticket.wait_terminal_disposition(TERMINAL_TIMEOUT) {
                     Ok(terminal) => return Ok(terminal),
@@ -2612,6 +2767,26 @@ mod tests {
 
     type TestSaveResult = (Result<SettingsSaveCompletion, String>, bool);
 
+    #[test]
+    fn launcher_hotkey_producer_closes_before_wake_even_on_unwind() {
+        let (sender, receiver) = mpsc::channel();
+        let receiver = Arc::new(Mutex::new(receiver));
+        let awakened = Arc::new(AtomicBool::new(false));
+        let check = receiver.clone();
+        let observed = awakened.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _producer = LauncherHotkeyEventProducer {
+                sender: Some(sender),
+                wake: Arc::new(move || {
+                    observed.store(matches!(check.lock().unwrap().try_recv(), Err(TryRecvError::Disconnected)), std::sync::atomic::Ordering::Release);
+                }),
+            };
+            panic!("test producer unwind");
+        }));
+        assert!(result.is_err());
+        assert!(awakened.load(std::sync::atomic::Ordering::Acquire));
+    }
+
     struct PanicDropGate {
         workers: SettingsSaveWorkerRegistry,
         entered: mpsc::Sender<()>,
@@ -2703,6 +2878,42 @@ mod tests {
 
     fn save_path(root: &Path) -> String {
         root.join("settings.json").to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn launcher_hotkey_worker_uses_typed_apply_and_restores_only_on_confirmed_failure() {
+        use crate::hotkey::reconfiguration::{test_reconfiguration_runtime, HotkeyReconfigurationError};
+        for disposition in [0, 1, 2, 3] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = save_path(directory.path());
+            std::fs::write(&path, br#"{"other":{"opaque":123456789012345678901}}"#).unwrap();
+            let baseline = Settings::launcher_hotkey_snapshot(&path).unwrap();
+            let (client, runtime, _wake) = test_reconfiguration_runtime();
+            let worker_path = path.clone();
+            let worker_baseline = baseline.clone();
+            let worker = thread::spawn(move || {
+                let token = SettingsBooleanSaveToken::new(1);
+                let reconciliation = AtomicBool::new(false);
+                let (events, _receiver) = mpsc::channel();
+                let result = run_launcher_hotkey_save(&worker_path, &worker_baseline, Some("Ctrl+F8".into()), &token, &reconciliation, &events, &|| {}, |settings| client.prepare(settings));
+                (result, reconciliation.load(std::sync::atomic::Ordering::Acquire))
+            });
+            let HotkeyRuntimeMessage::Prepare(request) = next_runtime_message(&runtime) else { panic!("expected Prepare") };
+            complete_prepare(request, 4);
+            let HotkeyRuntimeMessage::Apply(request) = next_runtime_message(&runtime) else { panic!("expected Apply") };
+            assert_eq!(request.settings().hotkey.as_deref(), Some("Ctrl+F8"));
+            if disposition == 0 || disposition == 3 {
+                let result = AppliedHotkeyReconfiguration { request_id: request.request_id(), generation: if disposition == 3 { HotkeyRuntimeGeneration(5) } else { request.generation() } };
+                request.complete_applied(result).unwrap();
+            } else if disposition == 1 { request.complete_restored(HotkeyReconfigurationError::TransactionCancelled).unwrap(); }
+            else { request.complete_restoration_unavailable(HotkeyReconfigurationError::RuntimeUnavailable).unwrap(); }
+            let (result, reconciliation) = worker.join().unwrap();
+            assert_eq!(result.is_ok(), disposition == 0);
+            assert_eq!(reconciliation, disposition >= 2);
+            let final_snapshot = Settings::launcher_hotkey_snapshot(&path).unwrap();
+            if disposition != 1 { assert_eq!(final_snapshot.value.as_deref(), Some("Ctrl+F8")); } else { assert_eq!(final_snapshot, baseline); }
+            assert!(std::fs::read_to_string(&path).unwrap().contains("123456789012345678901"));
+        }
     }
 
     #[test]

@@ -96,3 +96,7 @@ For the paired native replay, use fuzzy Search and matched profiles. Check Menu 
 The retained Launcher Window controls match the stock Follow mouse, Use static position and signed position and size fields. Typed Settings navigation targets the available control. Applying Follow mouse clears the saved static placement and retains the editor's coordinates until reload. Save checks the entire four-field group, and the exact acknowledgement applies the new policy to the next reveal.
 
 The matched 1516 × 937 replay remains open for focus at matched scale, compact scrolling, Save and Cancel, a subsequent checked reveal, and egui settings readback. Snapshot, live hotkey editing and the remaining settings retain their original gates. [Placement checkpoint](../CHECKPOINTS.md#p014-checked-launcher-window-placement-settings)
+
+## Live Launcher hotkey
+
+The retained Launcher hotkey field is reachable through typed Settings navigation. The shared typed save worker checks the exact launcher value and the current invocation generation. Confirmed success updates the live label. Cancel and reconciliation preserve the authority of the exact durable and active values. Physical chord replay, keyboard recording, and the remaining Hotkeys controls are open. [Live hotkey checkpoint](../CHECKPOINTS.md#p014-live-launcher-hotkey-settings)

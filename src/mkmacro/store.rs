@@ -15,6 +15,23 @@ use std::{
 };
 pub const MKMACROS_FILE: &str = "mkmacros.json";
 pub const ASSET_DIRECTORY: &str = "mkmacro_assets";
+
+/// Read hotkey reservations without opening a store, migrating assets,
+/// writing recovery data, or starting a watcher.
+pub fn read_hotkey_reservation_document(directory: impl AsRef<Path>) -> Result<Option<MkMacroDocument>> {
+    let path = directory.as_ref().join(MKMACROS_FILE);
+    let _permit = crate::common::repair_watch::require_path_read(&path)?;
+    let text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if text.trim().is_empty() { return Ok(None); }
+    let value: serde_json::Value = serde_json::from_str(&text).context("mkmacros.json is malformed")?;
+    let version = value.get("schema_version").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    anyhow::ensure!(version >= 11 && version <= u64::from(SCHEMA_VERSION), "mkmacros.json requires asset migration or a newer version before hotkey validation");
+    Ok(Some(decode_document(&path, value)?.0))
+}
 pub(crate) fn managed_image_path(asset_root: &Path, image: &MkImageRef) -> Result<PathBuf> {
     if asset_root.file_name() != Some(std::ffi::OsStr::new(ASSET_DIRECTORY))
         || !image.is_valid_filename()
@@ -668,8 +685,12 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     if text.trim().is_empty() {
         return Ok(None);
     };
-    let mut value: serde_json::Value = serde_json::from_str(&text)
+    let value: serde_json::Value = serde_json::from_str(&text)
         .context("mkmacros.json is malformed; keep it for recovery or correct the JSON")?;
+    decode_document(path, value).map(Some)
+}
+
+fn decode_document(path: &Path, mut value: serde_json::Value) -> Result<(MkMacroDocument, bool)> {
     let input_version = value
         .get("schema_version")
         .and_then(|v| v.as_u64())
@@ -723,7 +744,7 @@ fn read_document(path: &Path) -> Result<Option<(MkMacroDocument, bool)>> {
     doc.settings.recorder.clamp();
     changed |= doc.settings.recorder != recorder_before;
     changed |= repair_ids(&mut doc);
-    Ok(Some((doc, changed)))
+    Ok((doc, changed))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1632,6 +1653,36 @@ mod tests {
     use super::*;
     use crate::mkmacro::{AlphaPolicy, MkPoint, MkValue, ReturnPoint, ScreenRect, SearchRegion};
     use std::{sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn hotkey_reservation_read_is_passive_and_rejects_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(MKMACROS_FILE);
+        assert!(read_hotkey_reservation_document(dir.path()).unwrap().is_none());
+        std::fs::write(&path, b"  \n").unwrap();
+        assert!(read_hotkey_reservation_document(dir.path()).unwrap().is_none());
+        std::fs::write(&path, "\u{2003}\n").unwrap();
+        assert!(read_hotkey_reservation_document(dir.path()).unwrap().is_none());
+        let document = MkMacroDocument::default();
+        let bytes = serde_json::to_vec(&document).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read_hotkey_reservation_document(dir.path()).unwrap().is_some());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        let mut legacy = document.clone();
+        legacy.schema_version = 11;
+        let legacy_bytes = serde_json::to_vec(&legacy).unwrap();
+        std::fs::write(&path, &legacy_bytes).unwrap();
+        assert_eq!(read_hotkey_reservation_document(dir.path()).unwrap().unwrap().schema_version, SCHEMA_VERSION);
+        assert_eq!(std::fs::read(&path).unwrap(), legacy_bytes);
+        let old = br#"{"schema_version":1,"macros":[]}"#;
+        std::fs::write(&path, old).unwrap();
+        assert!(read_hotkey_reservation_document(dir.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), old);
+        std::fs::write(&path, b"{").unwrap();
+        assert!(read_hotkey_reservation_document(dir.path()).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{");
+        assert!(!dir.path().join(ASSET_DIRECTORY).exists());
+    }
 
     #[test]
     fn schema_eleven_migration_adds_defaults_and_preserves_historical_fields() {

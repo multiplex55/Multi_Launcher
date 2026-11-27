@@ -21,6 +21,7 @@ mod file_search_handoff;
 mod file_search_preview;
 mod settings_actions;
 mod settings_search;
+mod settings_hotkey;
 mod settings_navigation;
 mod date_search;
 mod calculator_search;
@@ -56,6 +57,8 @@ mod timer_view;
 mod gesture_editor;
 mod gesture_query;
 mod invocation;
+#[cfg(windows)]
+mod invocation_reconfigure;
 mod tempfile_search;
 mod clipboard_modify_startup;
 mod regex_history;
@@ -1272,6 +1275,7 @@ struct SettingsEditorPanel {
     scroll: ScrollHandle,
     search: Option<Entity<settings_search::SearchSettings>>,
     actions: Option<Entity<settings_actions::ActionsSettings>>,
+    hotkey: Option<Entity<settings_hotkey::SettingsHotkey>>,
     busy: bool,
     status: Option<String>, index_busy: bool, index_status: Option<String>, width: f32,
     metrics: multi_launcher::gui::theme::ThemeMetrics,
@@ -1724,6 +1728,7 @@ impl RenderOnce for SettingsEditorPanel {
             .text_size(px(self.metrics.body_text_size)).line_height(px(self.metrics.line_height))
             .child(Label::new("Settings").text_size(px(self.metrics.heading_text_size)))
             .when_some(self.navigation, |panel, navigation| panel.child(navigation))
+            .when_some(self.hotkey, |panel, hotkey| panel.child(hotkey))
             .when_some(self.search, |panel, search| panel.child(search))
             .when_some(self.actions, |panel, actions| panel.child(actions))
             .child(Button::new("settings-reload-application-index").label("Reload application index")
@@ -2409,6 +2414,9 @@ struct RootWindow {
     settings_editor: SettingsEditorState,
     settings_search: Option<Entity<settings_search::SearchSettings>>,
     settings_navigation: Option<Entity<settings_navigation::SettingsNavigation>>,
+    settings_hotkey: Option<Entity<settings_hotkey::SettingsHotkey>>,
+    hotkey_reconciliation: Arc<AtomicBool>,
+    hotkey_reconciliation_proof: Arc<Mutex<Option<settings_hotkey::RecoveryProof>>>,
     settings_panel_scroll: ScrollHandle,
     settings_actions: Option<Entity<settings_actions::ActionsSettings>>,
     app_editor: add_action::AppEditorState,
@@ -3726,6 +3734,8 @@ enum RootCloseBlocker {
     ExternalLaunch,
     BooleanPreferenceSave,
     SettingsActionsSave,
+    LauncherHotkeySave,
+    LauncherHotkeyDraft,
     PluginPreferenceSave,
     CalculatorSearch,
 }
@@ -4648,6 +4658,7 @@ struct RestartDrafts {
     hash: HashDraft,
     hash_window_open: bool,
     settings_search: Option<settings_search::RestartDraft>,
+    settings_hotkey: Option<(Option<String>, String)>,
     show_examples: bool,
     file_search_open: bool,
     downloads_triage_open: bool,
@@ -4901,7 +4912,7 @@ fn describe_restart_drafts(drafts: &RestartDrafts) -> String {
     if drafts.hash.algorithm != HashAlgorithm::Sha256 {
         names.push("non-default Hash Generator algorithm");
     }
-    if drafts.settings_search.as_ref().is_some_and(|draft| draft.dirty()) { names.push("unsaved Settings preference"); }
+    if drafts.settings_search.as_ref().is_some_and(|draft| draft.dirty()) || drafts.settings_hotkey.as_ref().is_some_and(|(baseline, draft)| baseline.as_deref().unwrap_or("") != draft.as_str()) { names.push("unsaved Settings preference"); }
     if drafts.file_search_open {
         names.push("File Search form and results");
     }
@@ -5735,6 +5746,9 @@ impl RootWindow {
             return Err(blocker.to_owned());
         }
         if self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(settings_search::WAIT.to_owned()); }
+        if self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(settings_hotkey::WAIT.to_owned()); }
+        if self.hotkey_reconciliation.load(Ordering::Acquire) { return Err("Launcher hotkey state is unresolved. Cancel Settings to discard the draft, then close Multi Launcher and manually relaunch the desired frontend.".into()); }
+        if self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).dirty(cx)) { return Err(SETTINGS_DIRTY_RESTART_STATUS.to_owned()); }
         if self.command_help.pending.is_some() {
             return Err(
                 "The Show examples preference save is still pending. Wait for its acknowledgement before restarting in egui."
@@ -6054,6 +6068,7 @@ impl RootWindow {
                 hash: hash_draft,
                 hash_window_open,
                 settings_search: self.settings_search.as_ref().map(|view| view.read(cx).restart_draft(cx)),
+                settings_hotkey: self.settings_hotkey.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 show_examples: self.command_help.show_examples,
                 file_search_open: self.file_search.as_ref().is_some_and(|view| view.read(cx).open),
                 downloads_triage_open: self.downloads_triage_open(cx),
@@ -6989,6 +7004,7 @@ impl RootWindow {
             &mut self.restart_status,
             self.settings_search.as_ref().is_none_or(|view| !view.read(cx).restart_draft(cx).dirty())
                 && self.settings_actions.as_ref().is_none_or(|view| !view.read(cx).restart_draft(cx).dirty())
+                && self.settings_hotkey.as_ref().is_none_or(|view| !view.read(cx).dirty(cx))
                 && self.command_help.pending.is_none(),
         );
         self.finish_deferred_preference_close(failed, cx);
@@ -7054,10 +7070,12 @@ impl RootWindow {
         self.fresh_search_enter = None; self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SETTINGS_ITEM);
         self.open_search_settings(window, cx);
         self.open_actions_settings(window, cx);
+        self.open_settings_hotkey(window, cx);
         let root = cx.entity().downgrade();
         let search = self.settings_search.clone();
         let actions = self.settings_actions.clone();
-        self.settings_navigation = Some(cx.new(|cx| settings_navigation::SettingsNavigation::new(root, search, actions, window, cx)));
+        let hotkey = self.settings_hotkey.clone();
+        self.settings_navigation = Some(cx.new(|cx| settings_navigation::SettingsNavigation::new(root, search, actions, hotkey, window, cx)));
         self.settings_panel_scroll.set_offset(point(px(0.0), px(0.0)));
         self.settings_focus_handle.focus(window, cx); cx.notify();
     }
@@ -7123,11 +7141,15 @@ impl RootWindow {
         if self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy()) {
             self.settings_editor.status = Some(settings_search::WAIT.into()); cx.notify(); return;
         }
+        if self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).busy()) {
+            self.settings_editor.status = Some(settings_hotkey::WAIT.into()); cx.notify(); return;
+        }
         self.settings_editor.open = false;
         self.settings_editor.status = None;
         if let Some(view) = self.settings_navigation.take() { view.update(cx, |view, _| view.retire()); }
         if let Some(view) = self.settings_search.take() { view.update(cx, |view, _| view.retire()); }
         if let Some(view) = self.settings_actions.take() { view.update(cx, |view, _| view.retire()); }
+        if let Some(view) = self.settings_hotkey.take() { view.update(cx, |view, _| view.retire()); }
         panel_stack::retire(&mut self.panel_stack, Panel::Settings);
         clear_stale_settings_restart_status(&mut self.restart_status, true);
         let return_focus = self.settings_return_focus.take();
@@ -10516,6 +10538,8 @@ impl RootWindow {
             Some(RootCloseBlocker::RegexHistory) => { self.restart_status = Some(regex_history::WAIT_QUIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardModifyBlocked) => { self.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
             Some(RootCloseBlocker::SettingsActionsSave) => { self.restart_status = Some(settings_actions::WAIT.to_owned()); }
+            Some(RootCloseBlocker::LauncherHotkeySave) => { self.restart_status = Some(settings_hotkey::WAIT.to_owned()); }
+            Some(RootCloseBlocker::LauncherHotkeyDraft) => { self.restart_status = Some("Save the launcher hotkey or cancel Settings before closing.".into()); }
             Some(RootCloseBlocker::FileSearchEffect) => { self.restart_status = Some(file_search_preview::WAIT.to_owned()); }
             Some(RootCloseBlocker::FolderSize) => { self.restart_status = Some(folder_size::WAIT.to_owned()); }
             Some(RootCloseBlocker::FileLock) => { self.restart_status = Some(file_lock::WAIT.to_owned()); }
@@ -10654,6 +10678,8 @@ impl RootWindow {
         if self.gesture_editor.as_ref().is_some_and(|view| view.read(cx).blocks_root_close(cx)) { return Some(RootCloseBlocker::GestureEditor); }
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }
+        if self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::LauncherHotkeySave); }
+        if self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).dirty(cx)) { return Some(RootCloseBlocker::LauncherHotkeyDraft); }
         if self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::DuplicateFinder); }
         if self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::QuickNotes); }
         if self.note_editor_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::NoteEditor); }
@@ -11135,8 +11161,10 @@ impl Render for RootWindow {
         let settings_editor_panel = self.settings_editor.open.then(|| SettingsEditorPanel {
             root: cx.entity().downgrade(), navigation: self.settings_navigation.clone(), scroll: self.settings_panel_scroll.clone(),
             search: self.settings_search.clone(), actions: self.settings_actions.clone(),
+            hotkey: self.settings_hotkey.clone(),
             busy: self.settings_search.as_ref().is_some_and(|view| view.read(cx).busy())
-                || self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()),
+                || self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy())
+                || self.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).busy()),
             status: self.settings_editor.status.clone(), index_busy: self.indexed_applications.busy(),
             index_status: self.indexed_applications.status.clone(), width: root_controls_width, metrics, palette,
             settings_owner_focus_handle: self.settings_owner_focus_handle.clone(),
@@ -12783,6 +12811,19 @@ impl RootVisibilityRequest {
 
 impl RootVisibility {
     #[cfg(windows)]
+    fn has_current_visibility_request(&self) -> bool {
+        let Ok(pending) = self.requested_visible.lock() else { return true; };
+        pending.as_ref().is_some_and(|request| request.is_current(self.request_revision.load(Ordering::Acquire), self.visible.load(Ordering::Acquire), false))
+    }
+    #[cfg(windows)]
+    fn claim_without_visibility_request(&self, claim: impl FnOnce() -> u64) -> Option<u64> {
+        let sender = self.request_sender.lock().ok()?;
+        if !self.active.load(Ordering::Acquire) || self.retired.load(Ordering::Acquire) || sender.is_none() { return None; }
+        let pending = self.requested_visible.lock().ok()?;
+        if pending.as_ref().is_some_and(|request| request.is_current(self.request_revision.load(Ordering::Acquire), self.visible.load(Ordering::Acquire), false)) { None }
+        else { Some(claim()) }
+    }
+    #[cfg(windows)]
     fn has_current_established_request(&self) -> bool {
         let Ok(pending) = self.requested_visible.lock() else { return true; };
         pending.as_ref().is_some_and(|request| !matches!(request, RootVisibilityRequest::GestureQuery(_))
@@ -13234,6 +13275,7 @@ pub(crate) fn run_foundation_window(
         saved_utility_presentations,
     );
     let settings_path_for_root = settings_path.clone();
+    let settings_path_for_hotkey = settings_path.clone();
     let settings_save_workers_for_root = settings_save_workers.clone();
     let mut utility_sizes = UtilitySizeStore::new(
         settings_path,
@@ -13261,10 +13303,14 @@ pub(crate) fn run_foundation_window(
     let subscription_sink = Rc::clone(&subscriptions);
     let root_for_quit = Rc::new(RefCell::new(None::<WeakEntity<RootWindow>>));
     let root_for_quit_callback = Rc::clone(&root_for_quit);
+    let app_data_root_for_hotkey = app_data_root.clone();
     let invocation = Arc::new(invocation::Owner::default());
     let invocation_for_run = Arc::clone(&invocation);
-    let invocation_for_quit = Arc::clone(&invocation);
     let invocation_for_root = Arc::clone(&invocation);
+    #[cfg(windows)]
+    let hotkey_coordinator = Arc::new(Mutex::new(None::<invocation_reconfigure::Coordinator>));
+    #[cfg(windows)]
+    let hotkey_coordinator_for_run = hotkey_coordinator.clone();
     let restart_admission = Arc::new(RestartAdmission::default());
     let restart_admission_for_quit = Arc::clone(&restart_admission);
     let settings_save_workers_for_quit = settings_save_workers.clone();
@@ -13374,6 +13420,7 @@ pub(crate) fn run_foundation_window(
                     if let Some(owner) = &gesture { owner.fence(); }
                     root.snippets_search.wake.close();
                     if let Some(token) = root.settings_search.as_ref().and_then(|view| view.read(cx).pending_token()) { token.request_cancel(); }
+                    if let Some(view) = &root.settings_hotkey { view.read(cx).cancel_pending(); }
                     root.retire_search_jump_mode();
                     root.drain_file_search_geometry(cx, true);
                     root.drain_folder_size_geometry(cx, true);
@@ -13408,7 +13455,8 @@ pub(crate) fn run_foundation_window(
             hash_mount_generation_for_quit.store(0, Ordering::Release);
             hash_rehost_pending_for_quit.store(false, Ordering::Release);
             hash_file_picker_pending_for_quit.store(false, Ordering::Release);
-            if let Err(error) = invocation_for_quit.stop_checked() { tracing::warn!(%error, "could not stop GPUI hotkey owner"); }
+            // The app-scope owner retires this listener after Settings workers
+            // and their typed hotkey replies have settled.
             let timer_task = timer.map(|timer| app.background_executor().spawn(async move { timer.shutdown() }));
             let gesture_task = gesture.map(|gesture| app.background_executor().spawn(async move { gesture.shutdown_checked() }));
             async move { if let Some(task) = timer_task { let _ = task.await; } if let Some(task) = gesture_task { let _ = task.await; } }
@@ -13521,6 +13569,9 @@ pub(crate) fn run_foundation_window(
                 settings_editor: settings_editor_for_root,
                 settings_search: None,
                 settings_navigation: None,
+                settings_hotkey: None,
+                hotkey_reconciliation: Arc::new(AtomicBool::new(false)),
+                hotkey_reconciliation_proof: Arc::new(Mutex::new(None)),
                 settings_panel_scroll: ScrollHandle::new(),
                 settings_actions: None,
                 app_editor: add_action::AppEditorState::new(cx),
@@ -14163,6 +14214,8 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::RegexHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_history::WAIT_CLOSE.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardModifyBlocked) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_modify_view::BLOCK_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SettingsActionsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(settings_actions::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::LauncherHotkeySave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(settings_hotkey::WAIT.to_owned()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::LauncherHotkeyDraft) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Save the launcher hotkey or cancel Settings before closing.".into()); cx.notify(); }); false }
                     Some(RootCloseBlocker::FileSearchEffect) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(file_search_preview::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::FolderSize) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(folder_size::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::FileLock) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(file_lock::WAIT.to_owned()); cx.notify(); }); false }
@@ -14332,6 +14385,7 @@ pub(crate) fn run_foundation_window(
                 return;
             };
             let (event_tx, event_rx) = channel();
+            let hotkey_wake = event_tx.clone();
             visibility.bind_request_sender(event_tx.clone());
             let trigger = Arc::new(HotkeyTrigger::new(hotkey));
             let quick_help_visibility = visibility.clone();
@@ -14367,6 +14421,14 @@ pub(crate) fn run_foundation_window(
                 cx.quit();
                 return;
             }
+            let hotkey_receiver = match multi_launcher::hotkey::reconfiguration::install_main_runtime(hotkey_wake.clone()) {
+                Ok(receiver) => receiver,
+                Err(error) => { *startup_error_sink.borrow_mut() = Some(format!("Could not install GPUI hotkey reconfiguration: {error}")); cx.quit(); return; }
+            };
+            let hotkey_runtime = invocation_reconfigure::Runtime::new(invocation_for_run.clone(), app_data_root_for_hotkey.clone(), settings_path_for_hotkey.clone(), visibility.clone(), native_window, restart_admission_for_hotkey.clone(), hotkey_wake.clone());
+            if let Ok(mut slot) = hotkey_coordinator_for_run.lock() {
+                *slot = Some(invocation_reconfigure::Coordinator::new(hotkey_receiver, hotkey_runtime));
+            } else { *startup_error_sink.borrow_mut() = Some("Could not initialize GPUI hotkey settlement owner.".into()); cx.quit(); return; }
             if !visibility.activate() {
                 *startup_error_sink.borrow_mut() =
                     Some("Could not activate the GPUI visibility owner.".to_owned());
@@ -14411,6 +14473,20 @@ pub(crate) fn run_foundation_window(
                         turn.clear_quick_help();
                         break;
                     };
+                    let has_message = hotkey_coordinator_for_run.try_lock().ok().is_some_and(|mut slot| slot.as_mut().is_some_and(|owner| owner.stage_next()));
+                    if has_message {
+                        if turn.pending() || turn.help_pending() || visibility.has_current_visibility_request() {
+                            if let Ok(mut slot) = hotkey_coordinator_for_run.lock() && let Some(owner) = slot.as_mut() { owner.unclaim(); }
+                            let _ = hotkey_wake.send(());
+                        } else {
+                            let coordinator = hotkey_coordinator_for_run.clone();
+                            cx.background_executor().spawn(async move {
+                                if let Ok(mut slot) = coordinator.lock() && let Some(owner) = slot.as_mut() { owner.handle_claimed(); }
+                            }).await;
+                            let _ = hotkey_wake.send(());
+                            continue;
+                        }
+                    }
 
                     if visibility.window_search_update.swap(false, Ordering::AcqRel) {
                         let _ = root_view.update(&mut *cx, |root, cx| {
@@ -15060,6 +15136,8 @@ pub(crate) fn run_foundation_window(
         }
     });
 
+    restart_admission.fence();
+    settings_save_workers.begin_shutdown();
     gesture_wake.close();
     if let Some(owner) = &gesture_lifetime { owner.fence(); }
     timer_wake.close();
@@ -15092,9 +15170,26 @@ pub(crate) fn run_foundation_window(
         }
     }
 
-    if let Err(error) = invocation.stop_checked() { tracing::warn!(%error, "could not stop GPUI hotkey owner"); }
-
+    #[cfg(windows)]
+    let settings_save_receipt = {
+        let workers = settings_save_workers.clone();
+        let join = std::thread::Builder::new().name("gpui-settings-drain".into()).spawn(move || workers.join_all_checked()).map_err(|error| format!("Could not start Settings shutdown drain: {error}"))?;
+        while !join.is_finished() {
+            if let Ok(mut slot) = hotkey_coordinator.lock() {
+                if let Some(owner) = slot.as_mut() { owner.wait_and_drain(Duration::from_millis(20)); }
+                else { std::thread::yield_now(); }
+            }
+        }
+        if let Ok(mut slot) = hotkey_coordinator.lock() && let Some(owner) = slot.as_mut() {
+            while let Some(message) = owner.next() { owner.handle(message); }
+        }
+        join.join().map_err(|_| "Settings shutdown drain panicked".to_owned())?
+    };
+    #[cfg(not(windows))]
     let settings_save_receipt = settings_save_workers.join_all_checked();
+    if let Err(error) = invocation.stop_checked() { tracing::warn!(%error, "could not stop GPUI hotkey owner"); }
+    #[cfg(windows)]
+    if let Ok(mut slot) = hotkey_coordinator.lock() { slot.take(); }
     let (utility_size_failures, utility_size_pending) = {
         let mut store = utility_size_store_after_run
             .lock()

@@ -644,6 +644,7 @@ impl SearchSettings {
                                 .settings_actions
                                 .as_ref()
                                 .is_none_or(|actions| !actions.read(cx).restart_draft(cx).dirty())
+                                && root.settings_hotkey.as_ref().is_none_or(|view| !view.read(cx).dirty(cx))
                             {
                                 clear_stale_settings_restart_status(&mut root.restart_status, true);
                             }

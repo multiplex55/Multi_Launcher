@@ -139,6 +139,18 @@ impl HotkeyTrigger {
             .take()
     }
 
+    /// Observe an edge while holding the exact lock used to publish it.
+    /// The callback must not block or stop a listener.
+    pub fn with_publication_guard<T>(&self, callback: impl FnOnce(bool) -> T) -> Result<T, String> {
+        if let Some(route) = &self.scoped_route {
+            let pending = route.pending_stamp.lock().map_err(|_| "scoped hotkey edge lock poisoned".to_owned())?;
+            Ok(callback(pending.is_some()))
+        } else {
+            let pending = self.open.lock().map_err(|_| "hotkey edge lock poisoned".to_owned())?;
+            Ok(callback(*pending))
+        }
+    }
+
     fn fire(&self) -> bool {
         if let Some(bridge) = self.recording_stop_bridge.as_ref() {
             let Some(generation) = bridge.capture_stoppable_generation() else {
@@ -557,6 +569,21 @@ pub fn process_test_events(triggers: &[Arc<HotkeyTrigger>], events: &[EventType]
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn publication_guard_observes_exact_scoped_and_unscoped_edges_without_consuming() {
+        let hotkey = crate::hotkey::parse_hotkey("F2").unwrap();
+        let launcher = HotkeyTrigger::new(hotkey);
+        let help = HotkeyTrigger::new_scoped(hotkey, || Some(17));
+        assert!(!launcher.with_publication_guard(|pending| pending).unwrap());
+        assert!(!help.with_publication_guard(|pending| pending).unwrap());
+        assert!(launcher.fire());
+        assert!(help.fire());
+        assert!(launcher.with_publication_guard(|pending| pending).unwrap());
+        assert!(help.with_publication_guard(|pending| pending).unwrap());
+        assert!(launcher.take());
+        assert_eq!(help.take_scoped_stamp(), Some(Some(17)));
+    }
 
     #[test]
     fn reactivated_listener_suppresses_an_already_held_chord_until_release() {
