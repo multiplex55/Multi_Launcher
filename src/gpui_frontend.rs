@@ -4966,6 +4966,12 @@ impl RootWindow {
         }
     }
 
+    fn cancel_multi_manager_capture(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.multi_manager_view {
+            view.update(cx, |view, _| view.cancel_capture());
+        }
+    }
+
     fn set_root_menu_open(
         &mut self,
         menu: RootMenuKind,
@@ -6030,6 +6036,7 @@ impl RootWindow {
     }
 
     fn open_restart_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.revoke_multi_manager_operation(cx);
         self.external_launch.retire_focus_bound_effects();
         self.external_launch.retire_omni();
         self.app_editor.revoke_picker_prelaunch();
@@ -10388,6 +10395,7 @@ impl RootWindow {
     }
 
     fn request_quit(&mut self, cx: &mut Context<Self>) {
+        self.cancel_multi_manager_capture(cx);
         self.retire_context_favorite();
         let blocker = self.current_root_close_blocker(
             hash_clipboard_close_message(self.hash_clipboard_pending.kind()),
@@ -13812,6 +13820,7 @@ pub(crate) fn run_foundation_window(
                     hash_clipboard_close_message(clipboard_pending_for_root_close.kind());
                 let picker_pending = picker_pending_for_root_close.load(Ordering::Acquire);
                 let Ok(blocker) = root_for_window_close.update(app, |root, cx| {
+                    root.cancel_multi_manager_capture(cx);
                     root.retire_context_favorite();
                     root.current_root_close_blocker(clipboard_message, picker_pending, cx)
                 }) else {
@@ -14497,6 +14506,7 @@ pub(crate) fn run_foundation_window(
                             } else if !desired_visible && !guarded_hide {
                                 root.cancel_docked_hash_preview();
                             }
+                            if !desired_visible { root.revoke_multi_manager_operation(cx); }
                             (root.native_window, search_focus_selected, utility_focus_delivered)
                         },
                     );

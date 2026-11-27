@@ -361,6 +361,9 @@ impl PluginEditorView {
                 }
                 if let Some(map) = committed {
                     root.enabled_capabilities = map;
+                    if !multi_launcher::settings::provider_search_capability_enabled(root.enabled_capabilities.as_ref(), "MultiManager") {
+                        root.cancel_multi_manager_capture(cx);
+                    }
                     let query = root.query.read(cx).value().to_string();
                     root.refresh_launcher_results_with_viewport(query, false, cx);
                     cx.notify();

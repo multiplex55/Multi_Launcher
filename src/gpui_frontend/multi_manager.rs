@@ -25,6 +25,24 @@ fn overlay_current(
     overlay.index == index && overlay.revision == revision && &overlay.expected == expected
 }
 
+fn overlay_has_live_identity(
+    overlay: Option<&PlacementOverlay>,
+    rows: &[MmWorkspace],
+    revision: u64,
+    identity: multi_launcher::window_catalog::WindowNativeIdentity,
+    is_live: impl Fn(multi_launcher::window_catalog::WindowNativeIdentity) -> bool,
+) -> bool {
+    overlay.is_some_and(|overlay| {
+        rows.get(overlay.index)
+            .is_some_and(|row| overlay_current(overlay, overlay.index, row, revision))
+            && overlay
+                .reconnect
+                .identities
+                .values()
+                .any(|item| item.native == identity && is_live(item.native))
+    })
+}
+
 fn focus_out_revokes(started: bool, launcher_foreground: bool) -> bool {
     !started || launcher_foreground
 }
@@ -124,6 +142,9 @@ pub(super) struct MultiManagerView {
     focus_guard: Option<Subscription>,
     activation_guard: Option<Subscription>,
     operation_lease: Option<Arc<AtomicBool>>,
+    capture_slot: Option<multi_launcher::multi_manager::capture::CaptureCancel>,
+    capture_identities: Vec<multi_launcher::window_catalog::WindowNativeIdentity>,
+    ignore_launcher_capture: bool,
     overlay: Option<PlacementOverlay>,
 }
 
@@ -132,6 +153,225 @@ impl MultiManagerView {
         if let Some(lease) = &self.operation_lease {
             lease.store(false, Ordering::Release);
         }
+        if let Some(cancel) = &self.capture_slot {
+            cancel.cancel();
+        }
+    }
+
+    pub(super) fn cancel_capture(&mut self) {
+        if self.capture_slot.is_some() {
+            self.revoke_operation();
+        }
+    }
+
+    fn capture_available(&self, cx: &App) -> bool {
+        self.root.upgrade().is_some_and(|root| {
+            let root = root.read(cx);
+            root.enabled_plugins
+                .as_ref()
+                .is_none_or(|enabled| enabled.contains("MultiManager"))
+                && multi_launcher::settings::provider_search_capability_enabled(
+                    root.enabled_capabilities.as_ref(),
+                    "MultiManager",
+                )
+        })
+    }
+
+    fn capture_window(
+        &mut self,
+        index: usize,
+        expected: &MmWorkspace,
+        revision: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pending
+            || !self.capture_available(cx)
+            || !self.current(window, cx)
+            || !row_current(&self.rows, index, expected, revision, self.revision)
+            || expected.id.is_empty()
+            || expected.disabled
+            || !expected.valid
+            || self.rows.iter().filter(|row| row.id == expected.id).count() != 1
+        {
+            return;
+        }
+        let Some(snapshot) = self.snapshot.clone() else {
+            return;
+        };
+        let Some(native) = self.native else {
+            return;
+        };
+        let Some(permit) = self.admission.admit() else {
+            return;
+        };
+        self.focus.focus(window, cx);
+        self.pending = true;
+        self.attempt = self.attempt.wrapping_add(1);
+        let attempt = self.attempt;
+        let lease = Arc::new(AtomicBool::new(true));
+        self.operation_lease = Some(lease.clone());
+        let cheap_mount = self.mount.clone();
+        let cheap_visibility = self.visibility.clone();
+        let cheap_revision = cheap_visibility.request_revision.load(Ordering::Acquire);
+        let cheap_admission = self.admission.clone();
+        let cheap_lease = lease.clone();
+        let cancel = multi_launcher::multi_manager::capture::CaptureCancel::with_authority(
+            Arc::new(move || {
+                cheap_mount.is_current()
+                    && !cheap_admission.is_fenced()
+                    && cheap_lease.load(Ordering::Acquire)
+                    && json_utility::native_host_current(
+                        &cheap_visibility,
+                        cheap_revision,
+                        Some(native),
+                        false,
+                    )
+            }),
+        );
+        self.capture_slot = Some(cancel.clone());
+        let local = lease.clone();
+        let local_cancel = cancel.clone();
+        self.focus_guard = Some(cx.on_focus_out(&self.focus, window, move |_, _, _, _| {
+            if current_foreground_identity() == Some(native.identity) {
+                local.store(false, Ordering::Release);
+                local_cancel.cancel();
+            }
+        }));
+        let receipt = self.mount.clone();
+        let worker_receipt = receipt.clone();
+        let host_revision = self.visibility.request_revision.load(Ordering::Acquire);
+        let visibility = self.visibility.clone();
+        let admission = self.admission.clone();
+        let ignore_launcher = self.ignore_launcher_capture;
+        let expected = expected.clone();
+        let issued_lease = lease.clone();
+        self.message = Some("Preparing capture…".into());
+        let readiness = Arc::new(std::sync::atomic::AtomicU8::new(0));
+        let signal = Arc::new(HashWakeSignal::default());
+        let ready_receipt = receipt.clone();
+        let ready_lease = issued_lease.clone();
+        let ready_state = readiness.clone();
+        let ready_signal = signal.clone();
+        cx.spawn(async move |weak, cx| {
+            while ready_signal.wait().await {
+                let state = ready_state.load(Ordering::Acquire);
+                if state == 2 { break; }
+                if weak.update(cx, |view, cx| {
+                    if attempt_current(&ready_receipt, &view.mount, attempt, view.attempt)
+                        && view.capture_slot.is_some() && ready_lease.load(Ordering::Acquire) {
+                        view.message = Some(if state == 1 {
+                            "Focus a window and press Enter to capture it. Press Escape or Cancel to stop."
+                        } else { "Preparing capture…" }.into());
+                        cx.notify();
+                    }
+                }).is_err() { break; }
+            }
+        }).detach();
+        let task = cx.background_executor().spawn(async move {
+            let result = (|| {
+                let current = || {
+                    worker_receipt.is_current()
+                        && !admission.is_fenced()
+                        && lease.load(Ordering::Acquire)
+                        && store::checked_workspace_source_is_current(&snapshot)
+                        && worker_receipt.is_current()
+                        && !admission.is_fenced()
+                        && lease.load(Ordering::Acquire)
+                        && json_utility::native_host_current(
+                            &visibility,
+                            host_revision,
+                            Some(native),
+                            false,
+                        )
+                };
+                for _ in 0..3 {
+                    if !current() {
+                        return Err("Capture was superseded.".to_string());
+                    }
+                    let session =
+                        multi_launcher::multi_manager::capture::start_capture_session_with_wake(
+                            Arc::new(|| {}), cancel.clone(), multi_launcher::multi_manager::capture::CaptureMode::HookRequired,
+                        )
+                        .map_err(|error| match error {
+                            multi_launcher::multi_manager::capture::CaptureStartError::Busy => "Another capture session is already active.",
+                            multi_launcher::multi_manager::capture::CaptureStartError::Cancelled => "Capture cancelled.",
+                            multi_launcher::multi_manager::capture::CaptureStartError::NativeUnavailable => "Capture keyboard hook is unavailable.",
+                        }.to_string())?;
+                    if !lease.load(Ordering::Acquire) {
+                        session.cancel();
+                    }
+                    readiness.store(1, Ordering::Release);
+                    signal.notify();
+                    let event = session.wait();
+                    readiness.store(0, Ordering::Release);
+                    signal.notify();
+                    if !current() {
+                        return Err("Capture was superseded.".to_string());
+                    }
+                    let Some(event) = event else {
+                        return Err("Capture cancelled.".to_string());
+                    };
+                    if event.action != multi_launcher::multi_manager::win::CaptureKeyAction::Confirm
+                    {
+                        return Err("Capture cancelled.".to_string());
+                    }
+                    if let (Some(window), Some(identity)) = (event.captured, event.identity) {
+                        if (!ignore_launcher || identity.pid != std::process::id())
+                            && multi_launcher::window_catalog::native_window_identity(window.hwnd)
+                                .as_ref()
+                                == Some(&identity)
+                            && current()
+                        {
+                            return Ok((window, identity));
+                        }
+                    }
+                }
+                Err("No eligible window was captured. Try again.".to_string())
+            })();
+            readiness.store(2, Ordering::Release);
+            signal.notify();
+            (permit, result)
+        });
+        cx.spawn(async move |weak, cx| {
+            let (permit, result) = task.await;
+            let _ = weak.update(cx, |view, cx| {
+                if !attempt_current(&receipt, &view.mount, attempt, view.attempt) { return; }
+                view.pending = false;
+                view.operation_lease = None;
+                view.capture_slot = None;
+                view.focus_guard = None;
+                if !issued_lease.load(Ordering::Acquire) || view.admission.is_fenced()
+                    || !row_current(&view.rows, index, &expected, revision, view.revision)
+                    || !json_utility::native_host_current(&view.visibility, host_revision, Some(native), false) {
+                    view.message = Some("Capture cancelled or superseded.".into());
+                    view.settle_wait(cx); cx.notify(); return;
+                }
+                match result {
+                    Ok((captured, identity)) if multi_launcher::window_catalog::native_window_identity(captured.hwnd).as_ref() == Some(&identity) => {
+                        let mut shadow = view.rows.clone();
+                        for row in &mut shadow { for window in &mut row.windows { window.hwnd = 0; window.binding_verified = false; } }
+                        let duplicate = view.capture_identities.iter().any(|item| view.rows.iter().any(|row| row.windows.iter().any(|window| window.hwnd == item.hwnd)) && *item == identity && multi_launcher::window_catalog::native_window_identity(item.hwnd).as_ref() == Some(item))
+                            || overlay_has_live_identity(view.overlay.as_ref(), &view.rows, view.revision, identity, |native| multi_launcher::window_catalog::native_window_identity(native.hwnd) == Some(native));
+                        let action = multi_launcher::multi_manager::model::PendingCaptureAction::CaptureOneWindow { workspace_id: expected.id.clone() };
+                        if !duplicate && multi_launcher::multi_manager::apply_capture::apply_capture_to_workspaces(&mut shadow, &action, captured) == multi_launcher::multi_manager::apply_capture::ApplyCaptureResult::Applied {
+                            if let Some(window) = shadow[index].windows.pop() {
+                                view.rows[index].windows.push(window);
+                                view.capture_identities.push(identity);
+                                view.overlay = None;
+                                view.revision = view.revision.wrapping_add(1);
+                                view.message = Some("Window captured. Save to keep the workspace change.".into());
+                            }
+                        } else { view.message = Some("That window is already captured.".into()); }
+                    }
+                    Ok(_) => view.message = Some("The captured window changed before it could be added.".into()),
+                    Err(error) => view.message = Some(error),
+                }
+                view.settle_wait(cx); cx.notify();
+            });
+            drop(permit);
+        }).detach();
+        cx.notify();
     }
 
     fn move_windows(
@@ -453,6 +693,9 @@ impl MultiManagerView {
             focus_guard: None,
             activation_guard: None,
             operation_lease: None,
+            capture_slot: None,
+            capture_identities: Vec::new(),
+            ignore_launcher_capture: settings.ignore_launcher_window_on_capture,
             overlay: None,
         };
         view.reload(cx);
@@ -659,6 +902,7 @@ impl MultiManagerView {
         let entity = cx.entity_id();
         let native = self.native;
         let revision = self.visibility.request_revision.load(Ordering::Acquire);
+        self.revoke_operation();
         self.open = false;
         self.overlay = None;
         self.owner.retire();
@@ -758,6 +1002,7 @@ impl MultiManagerView {
 
 impl Drop for MultiManagerView {
     fn drop(&mut self) {
+        self.revoke_operation();
         self.owner.retire();
     }
 }
@@ -771,6 +1016,7 @@ enum RowAction {
     Delete,
     Expand,
     Reconnect,
+    Capture,
     Home,
     Target,
 }
@@ -835,6 +1081,7 @@ impl MultiManagerView {
                 }
             }
             RowAction::Reconnect => self.reconnect(index, expected, revision, window, cx),
+            RowAction::Capture => self.capture_window(index, expected, revision, window, cx),
             RowAction::Home => self.move_windows(
                 index,
                 expected,
@@ -1152,6 +1399,28 @@ impl Render for MultiManagerView {
                         }),
                 ),
         );
+        if self.capture_slot.is_some() {
+            let capture_mount = self.mount.clone();
+            let capture_attempt = self.attempt;
+            panel = panel.child(
+                Button::new("mm-capture-cancel")
+                    .label("Cancel Capture")
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        if view.capture_slot.is_some()
+                            && attempt_current(
+                                &capture_mount,
+                                &view.mount,
+                                capture_attempt,
+                                view.attempt,
+                            )
+                        {
+                            view.cancel_capture();
+                            view.message = Some("Cancelling capture…".into());
+                            cx.notify();
+                        }
+                    })),
+            );
+        }
         if self.rows.is_empty() && !self.pending {
             panel = panel.child(Label::new("No workspaces."));
         }
@@ -1179,6 +1448,7 @@ impl Render for MultiManagerView {
             for (label, action) in [
                 ("Details", RowAction::Expand),
                 ("Reconnect", RowAction::Reconnect),
+                ("Capture Active Window", RowAction::Capture),
                 ("Move to Home", RowAction::Home),
                 ("Move to Target", RowAction::Target),
                 ("Rename", RowAction::Rename),
@@ -1200,6 +1470,14 @@ impl Render for MultiManagerView {
                 });
                 let unavailable = self.pending
                     || match action {
+                        RowAction::Capture => {
+                            !self.capture_available(cx)
+                                || self.snapshot.is_none()
+                                || row.disabled
+                                || !row.valid
+                                || row.id.is_empty()
+                                || self.rows.iter().filter(|other| other.id == row.id).count() != 1
+                        }
                         RowAction::Reconnect => {
                             self.dirty() || self.snapshot.is_none() || row.disabled || !row.valid
                         }
@@ -1399,7 +1677,7 @@ impl RootWindow {
 mod tests {
     use super::{
         PlacementOverlay, attempt_current, current_provider, discard_draft, focus_out_revokes,
-        overlay_current, row_current,
+        overlay_current, overlay_has_live_identity, row_current,
     };
     use multi_launcher::multi_manager::model::MmWorkspace;
     use multi_launcher::plugin::Plugin;
@@ -1483,6 +1761,70 @@ mod tests {
         let mut changed = row;
         changed.name.push('!');
         assert!(!overlay_current(&overlay, 2, &changed, 4));
+    }
+
+    #[test]
+    fn capture_duplicate_uses_live_overlay_from_another_workspace() {
+        use multi_launcher::window_catalog::{
+            WindowDescriptor, WindowNativeIdentity, WindowSwitchIdentity, WindowTargetIdentity,
+        };
+        let first = MmWorkspace {
+            id: "first".into(),
+            ..Default::default()
+        };
+        let second = MmWorkspace {
+            id: "second".into(),
+            ..Default::default()
+        };
+        let descriptor = WindowDescriptor {
+            title: "Target".into(),
+            hwnd: 42,
+            pid: 9,
+            executable: None,
+            process_path: None,
+            class_name: None,
+        };
+        let native = WindowNativeIdentity {
+            hwnd: 42,
+            pid: 9,
+            tid: 3,
+        };
+        let identity = WindowSwitchIdentity {
+            native,
+            descriptor: WindowTargetIdentity::from_descriptor(&descriptor),
+        };
+        let overlay = PlacementOverlay {
+            index: 0,
+            revision: 4,
+            expected: first.clone(),
+            reconnect: multi_launcher::multi_manager::checked::ReconnectedWorkspace {
+                workspace: first.clone(),
+                identities: [(0, identity)].into_iter().collect(),
+                summary: Default::default(),
+            },
+        };
+        let rows = vec![first, second];
+        assert!(overlay_has_live_identity(
+            Some(&overlay),
+            &rows,
+            4,
+            native,
+            |_| true
+        ));
+        assert!(!overlay_has_live_identity(
+            Some(&overlay),
+            &rows,
+            5,
+            native,
+            |_| true
+        ));
+        assert!(!overlay_has_live_identity(
+            Some(&overlay),
+            &rows,
+            4,
+            native,
+            |_| false
+        ));
     }
 
     #[test]

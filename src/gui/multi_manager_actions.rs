@@ -382,7 +382,7 @@ impl LauncherApp {
         self.multi_manager_pop_recapture_queue_front_for_action(&action);
 
         self.multi_manager.pending_capture = Some(action);
-        self.multi_manager_start_capture_session(ctx);
+        if !self.multi_manager_start_capture_session(ctx) { return; }
         self.multi_manager
             .runtime
             .control
@@ -645,7 +645,7 @@ impl LauncherApp {
         self.multi_manager_pop_recapture_queue_front_for_action(&action);
 
         self.multi_manager.pending_capture = Some(action);
-        self.multi_manager_start_capture_session(ctx);
+        if !self.multi_manager_start_capture_session(ctx) { return; }
         self.multi_manager
             .runtime
             .control
@@ -754,7 +754,7 @@ impl LauncherApp {
                 workspace_id: item.workspace_id,
                 window_index: item.window_index,
             });
-            self.multi_manager_start_capture_session(ctx);
+            if !self.multi_manager_start_capture_session(ctx) { return false; }
             self.multi_manager
                 .runtime
                 .control
@@ -788,19 +788,21 @@ impl LauncherApp {
         self.multi_manager_validate_capture_state();
     }
 
-    fn multi_manager_start_capture_session(&mut self, ctx: &egui::Context) {
+    fn multi_manager_start_capture_session(&mut self, ctx: &egui::Context) -> bool {
         self.multi_manager.capture_session = None;
-        self.multi_manager.capture_session = Some(capture::start_capture_session(ctx.clone()));
+        match capture::start_capture_session(ctx.clone()) {
+            Ok(session) => { self.multi_manager.capture_session = Some(session); true }
+            Err(_) => {
+                self.multi_manager_cancel_capture();
+                self.report_error_message("multi_manager.capture", "Another capture session is already active.");
+                false
+            }
+        }
     }
 
     fn multi_manager_restart_capture_listener(&mut self, ctx: &eframe::egui::Context) {
-        self.multi_manager.capture_session = None;
-        self.multi_manager.capture_session = Some(capture::start_capture_session(ctx.clone()));
-        self.multi_manager
-            .runtime
-            .control
-            .capture_pending
-            .store(true, Ordering::Relaxed);
+        if !self.multi_manager_start_capture_session(ctx) { return; }
+        self.multi_manager.runtime.control.capture_pending.store(true, Ordering::Relaxed);
         self.multi_manager_validate_capture_state();
     }
 
@@ -1311,6 +1313,9 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let path = tempdir.path().join("actions.json");
         std::fs::write(&path, "[]").expect("write actions file");
+        let mut settings = Settings::default();
+        settings.paste_sequence.next_hotkey = None;
+        settings.paste_sequence.cancel_hotkey = None;
         LauncherApp::new(
             &ctx,
             Arc::new(Vec::new()),
@@ -1322,7 +1327,7 @@ mod tests {
                 .join("settings.json")
                 .to_string_lossy()
                 .to_string(),
-            Settings::default(),
+            settings,
             None,
             None,
             None,
@@ -1723,6 +1728,7 @@ mod tests {
             CaptureEvent {
                 action: CaptureKeyAction::Confirm,
                 captured: Some(captured(7, "Editor")),
+                identity: None,
             },
         );
 
@@ -1758,6 +1764,7 @@ mod tests {
             CaptureEvent {
                 action: CaptureKeyAction::Confirm,
                 captured: Some(captured(1, "One")),
+                identity: None,
             },
         );
 
@@ -1795,6 +1802,7 @@ mod tests {
             CaptureEvent {
                 action: CaptureKeyAction::Confirm,
                 captured: None,
+                identity: None,
             },
         );
 
@@ -1836,6 +1844,7 @@ mod tests {
             CaptureEvent {
                 action: CaptureKeyAction::Confirm,
                 captured: Some(captured(7, "Multi Launcher")),
+                identity: None,
             },
         );
 
@@ -1874,6 +1883,7 @@ mod tests {
             CaptureEvent {
                 action: CaptureKeyAction::Confirm,
                 captured: Some(captured(99, "Multi Launcher")),
+                identity: None,
             },
         );
 
@@ -1921,6 +1931,7 @@ mod tests {
             CaptureEvent {
                 action: CaptureKeyAction::Confirm,
                 captured: Some(captured(55, "Settings")),
+                identity: None,
             },
         );
 
@@ -1968,6 +1979,7 @@ mod tests {
             CaptureEvent {
                 action: CaptureKeyAction::Confirm,
                 captured: Some(captured(10, "New")),
+                identity: None,
             },
         );
 
@@ -2007,6 +2019,7 @@ mod tests {
             CaptureEvent {
                 action: CaptureKeyAction::Skip,
                 captured: None,
+                identity: None,
             },
         );
 
@@ -2052,6 +2065,7 @@ mod tests {
             CaptureEvent {
                 action: CaptureKeyAction::Cancel,
                 captured: None,
+                identity: None,
             },
         );
 

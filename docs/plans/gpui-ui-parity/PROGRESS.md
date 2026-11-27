@@ -2,7 +2,7 @@
 
 ## Current direction
 
-Use the [mandatory startup and resumption sequence](../../CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption), including the authoritative [User Priorities](USER_PRIORITIES.md), [Plugin Maturity Register](PLUGIN_MATURITY_REGISTER.md) and [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md). Pass A has focused evidence for P0.02 App Editor Browse, P0.03 and P0.04 canonical Folder and Bookmark authoring, P0.05 Explorer drop, P0.06 Omni Search with Notes, P0.09 retained Quick Notes and the existing-note editor, and P0.10 MultiManager workspace authoring, Reconnect and Home/Target. Essential native replay is still open, including the ordinary P0.07 and P0.08 clipboard paths. Continue MultiManager with Capture Active Window. Historical checkpoint continuations below record the order at the time.
+Use the [mandatory startup and resumption sequence](../../CODEX_KICKSTART_GPUI_UI_PARITY.md#mandatory-startup-and-resumption), including the authoritative [User Priorities](USER_PRIORITIES.md), [Plugin Maturity Register](PLUGIN_MATURITY_REGISTER.md) and [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md). Pass A has focused evidence for P0.02 App Editor Browse, P0.03 and P0.04 canonical Folder and Bookmark authoring, P0.05 Explorer drop, P0.06 Omni Search with Notes, P0.09 retained Quick Notes and the existing-note editor, and P0.10 MultiManager workspace authoring, Reconnect, Home/Target and Capture Active Window. Essential native replay is still open, including the ordinary P0.07 and P0.08 clipboard paths. Continue P0.11 Calculation Pad. Historical checkpoint continuations below record the order at the time.
 
 Daily-driver readiness has 19 P0 workflows, with 13 at Stage 2 and 3 at Stage 3 or higher. The 91 Windows built-ins include 33 with real GPUI routes, comprising 26 at Stage 2 and 7 at Stage 3. The remaining 58 are Stage 1. Stage 4 and 5 and Search-admission-only counts are zero. The [maturity register](PLUGIN_MATURITY_REGISTER.md#reporting-baseline) holds tier totals. The [readiness register](DAILY_DRIVER_READINESS.md#current-readiness) lists daily-driver blockers and essential replay by workflow.
 
@@ -179,7 +179,7 @@ G11 Downloads Triage now delivers a checked regular file to G04 Hash. Windows ve
 | Known migration-caused regressions | The compact Add App viewport regression was corrected and verified in its Windows replay. Open parity gaps are tracked in the matrix and current checkpoints. |
 | Required native verification | Partially exercised. See the [validation log](VALIDATION_LOG.md) for exact receipts and open gates. |
 | Evidence requiring revalidation | Recheck only affected prior evidence when an ownership or behavior change makes it stale. Each validation entry names its source and artifact. |
-| Current next action | Implement P0.10 MultiManager Capture Active Window, then P0.11 Calculation Pad. P0.02–P0.06 authoring, Explorer drop and Omni Search, Settings, G01, G04, G07, G10, G13 and G14 replay, mixed DPI and known-duration F2 remain open. [User priority order](USER_PRIORITIES.md) |
+| Current next action | Implement P0.11 Calculation Pad. MultiManager placement and capture await matched Windows replay. P0.02–P0.06 authoring, Explorer drop and Omni Search, Settings, G01, G04, G07, G10, G13 and G14 replay, mixed DPI and known-duration F2 remain open. [User priority order](USER_PRIORITIES.md) |
 
 The source candidate table remains a discovery aid while runtime inventory is open.
 

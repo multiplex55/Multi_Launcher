@@ -30,7 +30,7 @@ The initial program has 27 goals. All remain on **one migration branch**, with o
 | G21 | [Paste Sequences, gestures, and Hot Folder](goals/G21-automation-tools.md) | G00–G05; G13 clipboard contracts | Not started |
 | G22 | [Pinboard, Screen Draw, OCR, and coordinate surfaces](goals/G22-native-overlays.md) | G00–G05; native proof started in G01 | Not started |
 | G23 | [Dashboard, calendar, todos, timers, notifications, and activity](goals/G23-dashboard-and-organizers.md) | G00–G05; relevant feature adapters | In implementation for Toast Log and Activity Center |
-| G24 | [MultiManager, layouts, processes, shell, and system controls](goals/G24-system-tools.md) | G00–G05; G01 native integration | In implementation for MultiManager authoring, checked Reconnect and current-desktop placement |
+| G24 | [MultiManager, layouts, processes, shell, and system controls](goals/G24-system-tools.md) | G00–G05; G01 native integration | In implementation for MultiManager authoring, checked Reconnect and placement, and one-shot capture |
 | G25 | [Cross-feature integration and exhaustive parity reconciliation](goals/G25-integration-and-parity-reconciliation.md) | Applicable feature goals; incremental checks begin earlier | Not started |
 | G26 | [Performance, production packaging, final review, and delivery](goals/G26-final-acceptance-and-delivery.md) | G00–G25 applicable acceptance | Not started |
 
