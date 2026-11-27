@@ -269,6 +269,7 @@ impl CalculationPadView {
         self.find.basis = Some(basis);
         self.find.model.query = self.find.query.read(cx).value().to_string();
         self.find.model.refresh(session.source()?, basis.revision);
+        let palette = appearance::current(cx).palette;
         let receipt = Receipt {
             basis,
             mount: self.mount.clone(),
@@ -291,29 +292,53 @@ impl CalculationPadView {
                     .readonly(pending),
             )
             .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        Checkbox::new("calculation-pad-find-case")
-                            .accessibility_label("Match case")
-                            .checked(self.find.model.case_sensitive)
-                            .disabled(pending)
-                            .on_change({
-                                let receipt = receipt.clone();
-                                let weak = cx.entity().downgrade();
-                                move |state, _, window, app| {
-                                    let _ = weak.update(app, |view, cx| {
-                                        if view.find_receipt_current(&receipt, window, cx) {
-                                            view.find.model.case_sensitive =
-                                                state == CheckboxState::Checked;
-                                            cx.notify();
-                                        }
-                                    });
+                Checkbox::new("calculation-pad-find-case")
+                    .accessibility_label("Match case")
+                    .checked(self.find.model.case_sensitive)
+                    .disabled(pending)
+                    .border_1()
+                    .border_color(appearance::to_hsla(palette.panel_surface))
+                    .focus(|style| style.border_color(appearance::to_hsla(palette.focus)))
+                    .on_change({
+                        let receipt = receipt.clone();
+                        let weak = cx.entity().downgrade();
+                        move |state, _, window, app| {
+                            let _ = weak.update(app, |view, cx| {
+                                if view.find_receipt_current(&receipt, window, cx) {
+                                    view.find.model.case_sensitive =
+                                        state == CheckboxState::Checked;
+                                    cx.notify();
                                 }
-                            }),
-                    )
-                    .child(Label::new("Match case")),
+                            });
+                        }
+                    })
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                CheckboxIndicator::new()
+                                    .checked(self.find.model.case_sensitive)
+                                    .size(px(18.0))
+                                    .rounded(px(3.0))
+                                    .border_1()
+                                    .border_color(appearance::to_hsla(palette.control_border))
+                                    .when(self.find.model.case_sensitive, |indicator| {
+                                        indicator
+                                            .bg(appearance::to_hsla(palette.accent))
+                                            .text_color(appearance::to_hsla(palette.primary_text))
+                                    })
+                                    .items_center()
+                                    .justify_center()
+                                    .child(if self.find.model.case_sensitive {
+                                        "✓"
+                                    } else {
+                                        ""
+                                    }),
+                            )
+                            .child(Label::new("Match case")),
+                    ),
             )
             .child(Label::new(format!(
                 "{}/{}",

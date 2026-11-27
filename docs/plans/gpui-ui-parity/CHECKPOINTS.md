@@ -1985,7 +1985,7 @@ P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open with owned
 
 ### P0.11 Calculation Pad Find and Replace
 
-The retained `calc pad` editor uses the same bounded literal matcher and replacement model as egui. Its toolbar supports Find, Match case, Previous, Next, Replace and Replace All. GPUI's Pad-scoped Ctrl+F and Ctrl+H open the appropriate toolbar. Escape and Close return focus to the source while the Pad owns input. Previous and Next apply the exact UTF-8 source selection while keeping toolbar focus.
+The retained `calc pad` editor uses the same bounded literal matcher and replacement model as egui. Its toolbar supports Find, Match case, Previous, Next, Replace and Replace All. A follow-up gives Match case a visible indicator, a labeled click target and a focus border. It passed the shared Omni Settings and Pad regression batch. [Combined receipt](#p006-omni-search-category-settings) GPUI's Pad-scoped Ctrl+F and Ctrl+H open the appropriate toolbar. Escape and Close return focus to the source while the Pad owns input. Previous and Next apply the exact UTF-8 source selection while keeping toolbar focus.
 
 Each toolbar receipt binds its open or mode revision and the current document ID, incarnation, source revision and mount. Reopening the same saved document clears the old tool state even if its revision is unchanged. Changed inputs and pending document decisions retire stale actions. A same-document toolbar close retains the entered values.
 
