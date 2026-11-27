@@ -172,7 +172,7 @@ impl RootWindow {
     }
 
     pub(super) fn open_action_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.folder_authoring.revoke(); self.bookmark_authoring.revoke();
+        self.folder_authoring.revoke(); self.bookmark_authoring.revoke(); self.external_drop.revoke();
         if self.search_input_operation(window, cx).is_none()
             || self.action_sheet.is_some()
             || window.has_active_dialog(cx)

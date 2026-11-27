@@ -358,6 +358,15 @@ impl AppEditorState {
                 .is_some_and(|draft| draft.label.entity_id() == id)
     }
 
+    pub(super) fn drop_draft_id(&self) -> Option<EntityId> {
+        self.draft.as_ref().map(|draft| draft.label.entity_id())
+    }
+
+    pub(super) fn external_drop_safe(&self) -> bool { !self.write_pending() }
+    pub(super) fn accepts_external_drop(&self) -> bool {
+        self.draft.is_none() && self.external_drop_safe()
+    }
+
     pub(super) fn write_pending(&self) -> bool {
         self.writes.pending.is_some() || self.picker.pending.is_some()
     }
@@ -431,6 +440,11 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.external_drop.revoke();
+        self.open_app_editor_with_focus(origin, true, window, cx);
+    }
+
+    fn open_app_editor_with_focus(&mut self, origin: Option<FocusHandle>, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         if self.restart_admission.is_fenced() {
             return;
         }
@@ -461,10 +475,24 @@ impl RootWindow {
         }
         self.root_scroll
             .scroll_to_top_of_item(self.app_editor_scroll_item());
+        if focus {
+            if let Some(draft) = &self.app_editor.draft {
+                draft.label.focus_handle(cx).focus(window, cx);
+            } else {
+                self.app_editor.new_focus.focus(window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn open_dropped_app_draft(&mut self, path: &str, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.app_editor.accepts_external_drop() || path.contains(['\r', '\n']) { return; }
+        self.open_app_editor_with_focus(None, false, window, cx);
+        self.open_app_draft_with_focus(DraftMode::Add, None, focus, window, cx);
         if let Some(draft) = &self.app_editor.draft {
-            draft.label.focus_handle(cx).focus(window, cx);
-        } else {
-            self.app_editor.new_focus.focus(window, cx);
+            if let AppDraftField::Single(input) = &draft.path {
+                input.update(cx, |input, cx| input.set_value(path.to_owned(), window, cx));
+            }
         }
         cx.notify();
     }
@@ -548,6 +576,11 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.external_drop.revoke();
+        self.open_app_draft_with_focus(mode, original, true, window, cx);
+    }
+
+    fn open_app_draft_with_focus(&mut self, mode: DraftMode, original: Option<CatalogAction>, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.app_editor.open
             || self.restart_admission.is_fenced()
             || self.app_editor.write_pending()
@@ -641,7 +674,7 @@ impl RootWindow {
             scroll,
             _focus_subscriptions: subscriptions,
         });
-        if let Some(draft) = &self.app_editor.draft {
+        if focus && let Some(draft) = &self.app_editor.draft {
             draft.label.focus_handle(cx).focus(window, cx);
         }
         self.app_editor.status = None;

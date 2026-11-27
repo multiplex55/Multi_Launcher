@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::mpsc::{Receiver, Sender, channel};
 mod action_sheet;
 mod folder_authoring;
+mod external_drop;
 mod bookmark_authoring;
 mod activity;
 mod add_action;
@@ -2335,6 +2336,7 @@ struct RootWindow {
     settings_actions: Option<Entity<settings_actions::ActionsSettings>>,
     app_editor: add_action::AppEditorState,
     folder_authoring: folder_authoring::State,
+    external_drop: external_drop::State,
     bookmark_authoring: bookmark_authoring::State,
     plugin_editor: Option<Entity<plugin_editor::PluginEditorView>>,
     command_help: CommandHelpState,
@@ -3595,6 +3597,7 @@ enum RootCloseBlocker {
     DuplicateFinder,
     AppWrite,
     FolderAuthoring,
+    ExternalDrop,
     BookmarkAuthoring,
     ExternalLaunch,
     BooleanPreferenceSave,
@@ -4866,6 +4869,7 @@ impl RootWindow {
             self.app_editor.revoke_picker_prelaunch();
             self.folder_authoring.revoke();
             self.bookmark_authoring.revoke();
+            self.external_drop.revoke();
             self.retire_context_favorite();
         }
         let was_menu_open = self.file_menu_open || self.settings_menu_open || self.help_menu_open;
@@ -5571,6 +5575,7 @@ impl RootWindow {
         if self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).pending) {
             return Err("A plugin Search capability save is still pending.".to_owned());
         }
+        if self.external_drop.busy() { return Err(external_drop::WAIT.into()); }
         if self.folder_authoring.busy() { return Err(folder_authoring::WAIT.into()); }
         if self.bookmark_authoring.busy() { return Err(bookmark_authoring::WAIT.into()); }
         if let Some(blocker) = self.app_editor.restart_blocker(cx) {
@@ -5915,6 +5920,7 @@ impl RootWindow {
         self.app_editor.revoke_picker_prelaunch();
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
+        self.external_drop.revoke();
         self.retire_action_sheet_now(window, cx, true);
         if self.action_sheet.is_some() { return false; }
         self.retire_context_favorite();
@@ -6993,6 +6999,7 @@ impl RootWindow {
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
+        if !external_drop::same_query_projection(&self.launcher_results.query, &query) { self.external_drop.revoke(); }
         self.external_launch.retire_clipboard_effect();
         self.snippets_search.request_epoch.fetch_add(1, Ordering::AcqRel);
         self.snippets_search.projection = None;
@@ -7468,7 +7475,7 @@ impl RootWindow {
         } else {
             self.launcher_results.move_selection(movement)
         };
-        if changed { self.folder_authoring.revoke(); self.bookmark_authoring.revoke(); }
+        if changed { self.folder_authoring.revoke(); self.bookmark_authoring.revoke(); self.external_drop.revoke(); }
         if changed && let Some(row) = self.launcher_results.selected_scroll_child() {
             self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
             self.launcher_results_scroll.scroll_to_item(row);
@@ -7591,6 +7598,7 @@ impl RootWindow {
         self.app_editor.revoke_picker_prelaunch();
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
+        self.external_drop.revoke();
         self.context_favorite_popup = Some(ContextFavoritePopup {
             receipt: receipt.clone(),
             position,
@@ -7686,6 +7694,7 @@ impl RootWindow {
         };
         self.folder_authoring.revoke();
         self.bookmark_authoring.revoke();
+        self.external_drop.revoke();
         if let Some(scroll_child) = reveal_row {
             self.root_scroll.scroll_to_top_of_item(ROOT_SCROLL_SEARCH_ITEM);
             self.launcher_results_scroll.scroll_to_item(scroll_child);
@@ -10266,6 +10275,7 @@ impl RootWindow {
             Some(RootCloseBlocker::HashPinWrite) => {
                 self.restart_status = Some(hash_pin::UNPIN_PENDING.to_owned());
             }
+            Some(RootCloseBlocker::ExternalDrop) => { self.restart_status = Some(external_drop::WAIT.into()); }
             Some(RootCloseBlocker::FolderAuthoring) => { self.restart_status = Some(folder_authoring::WAIT.into()); }
             Some(RootCloseBlocker::BookmarkAuthoring) => { self.restart_status = Some(bookmark_authoring::WAIT.into()); }
             Some(RootCloseBlocker::AppWrite) => {
@@ -10382,6 +10392,7 @@ impl RootWindow {
         if self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).pending) {
             return Some(RootCloseBlocker::PluginPreferenceSave);
         }
+        if self.external_drop.busy() { return Some(RootCloseBlocker::ExternalDrop); }
         if self.folder_authoring.busy() { return Some(RootCloseBlocker::FolderAuthoring); }
         if self.bookmark_authoring.busy() { return Some(RootCloseBlocker::BookmarkAuthoring); }
         self.external_launch
@@ -10991,6 +11002,7 @@ impl Render for RootWindow {
             }));
         let mut root_shell = div()
             .id("multi-launcher-root")
+            .on_drop(cx.listener(|root, paths: &ExternalPaths, window, cx| root.receive_external_drop(paths.0.iter().cloned().collect(), window, cx)))
             .capture_key_up(cx.listener(|root, event: &KeyUpEvent, _, cx| {
                 if event.keystroke.key == "escape" { root.pane_escape_latched = false; }
                 if event.keystroke.key == "enter" {
@@ -10998,11 +11010,17 @@ impl Render for RootWindow {
                     if let Some(view) = root.settings_navigation.clone() { view.update(cx, |view, _| view.release_enter()); }
                 }
             }))
-            .capture_any_mouse_down(cx.listener(|root, _, _, _| {
+            .capture_any_mouse_down(cx.listener(|root, _, window, cx| {
                 root.external_launch.retire_focus_bound_effects();
                 root.app_editor.revoke_picker_prelaunch();
                 root.folder_authoring.revoke();
                 root.bookmark_authoring.revoke();
+                root.external_drop.pointer_down();
+                let _ = (window, cx);
+            }))
+            .capture_any_mouse_up(cx.listener(|root, _, window, cx| {
+                root.external_drop.pointer_up();
+                root.defer_queued_drop_alias(window, cx);
             }))
             .role(Role::Group)
             .flex()
@@ -11186,6 +11204,12 @@ impl Render for RootWindow {
                 }
             }))
             .child(header);
+        for button in MouseButton::all() {
+            root_shell = root_shell.on_mouse_up_out(button, cx.listener(|root, _, window, cx| {
+                root.external_drop.pointer_up();
+                root.defer_queued_drop_alias(window, cx);
+            }));
+        }
         if docked_hash.is_some() {
             root_shell = root_shell.capture_any_mouse_down(cx.listener(|this, _, _, cx| {
                 if this.cancel_docked_hash_preview() { cx.notify(); }
@@ -13110,6 +13134,7 @@ pub(crate) fn run_foundation_window(
                 settings_actions: None,
                 app_editor: add_action::AppEditorState::new(cx),
                 folder_authoring: folder_authoring::State::default(),
+                external_drop: external_drop::State::default(),
                 bookmark_authoring: bookmark_authoring::State::default(),
                 plugin_editor: None,
                 command_help: command_help_for_root,
@@ -13304,6 +13329,7 @@ pub(crate) fn run_foundation_window(
                                     root.app_editor.revoke_picker_prelaunch();
                                     root.folder_authoring.revoke();
                                     root.bookmark_authoring.revoke();
+                                    root.external_drop.revoke();
                                 }
                             });
                         }
@@ -13553,6 +13579,7 @@ pub(crate) fn run_foundation_window(
             let activation_subscription = root.update(cx, |_, cx| {
                 cx.observe_window_activation(window, |root, window, cx| {
                     if window.is_window_active() {
+                        root.defer_queued_drop_alias(window, cx);
                         if let Some(view) = root.clipboard_modify_view.clone().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
                             let receipt = view.read(cx).mount_receipt();
                             let weak = view.downgrade();
@@ -13690,6 +13717,9 @@ pub(crate) fn run_foundation_window(
                     }
                     Some(RootCloseBlocker::BookmarkAuthoring) => {
                         let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(bookmark_authoring::WAIT.into()); cx.notify(); }); false
+                    }
+                    Some(RootCloseBlocker::ExternalDrop) => {
+                        let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(external_drop::WAIT.into()); cx.notify(); }); false
                     }
                     Some(RootCloseBlocker::FolderAuthoring) => {
                         let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(folder_authoring::WAIT.into()); cx.notify(); }); false

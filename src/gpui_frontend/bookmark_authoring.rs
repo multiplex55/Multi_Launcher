@@ -108,9 +108,10 @@ impl RootWindow {
     }
     fn begin_bookmark_operation(&mut self, generation: u64, row: usize, query: &str, action: Action,
         add: Option<String>, review: Option<Review>, source: ActivationSource, secondary: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.bookmark_authoring.busy() || self.folder_authoring.busy() || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
+        if self.bookmark_authoring.busy() || self.folder_authoring.busy() || self.external_drop.busy() || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
             || !window.is_window_active() || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
         let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+        self.external_drop.revoke();
         let Some(permit) = self.restart_admission.admit() else { return; };
         let Some(serial) = self.bookmark_authoring.begin() else { return; };
         let receipt = Receipt { serial, generation, row, query: query.to_owned(), action, native,

@@ -38,13 +38,15 @@ fn refresh_folder_query(query: &str, folder_rows: bool, force: bool) -> bool {
 }
 
 #[derive(Clone)]
-struct Receipt { serial: u64, generation: u64, row: usize, query: String, action: Action, native: NativeWindow, revision: u64, source: ActivationSource, focus: Option<FocusHandle>, settings: external_launch::Settings, secondary: bool }
+struct Receipt { serial: u64, native: NativeWindow, revision: u64, focus: Option<FocusHandle>, search: Option<SearchReceipt> }
+#[derive(Clone)]
+struct SearchReceipt { generation: u64, row: usize, query: String, action: Action, source: ActivationSource, settings: external_launch::Settings, secondary: bool }
 struct Prepared { entry: Option<FolderEntry>, completion: Option<external_launch::WorkerResult> }
 
 #[derive(Clone)]
 struct CompletionData { action: Action, query: String, source: ActivationSource, settings: external_launch::Settings }
-impl From<&Receipt> for CompletionData {
-    fn from(receipt: &Receipt) -> Self { Self { action: receipt.action.clone(), query: receipt.query.clone(), source: receipt.source, settings: receipt.settings.clone() } }
+impl From<&SearchReceipt> for CompletionData {
+    fn from(receipt: &SearchReceipt) -> Self { Self { action: receipt.action.clone(), query: receipt.query.clone(), source: receipt.source, settings: receipt.settings.clone() } }
 }
 fn completion(receipt: &CompletionData, command: StorageCommand) -> external_launch::WorkerResult {
     let mut action = receipt.action.clone();
@@ -73,7 +75,7 @@ impl RootWindow {
     }
     fn folder_receipt_current(&self, receipt: &Receipt, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.folder_presentation_current(receipt, window, cx)
-            && self.search_catalog.providers.folder_row_is_current(&receipt.query, &receipt.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+            && receipt.search.as_ref().is_none_or(|search| self.search_catalog.providers.folder_row_is_current(&search.query, &search.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()))
     }
     fn folder_presentation_current(&self, receipt: &Receipt, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.folder_authoring.pending && self.folder_authoring.serial == receipt.serial
@@ -81,9 +83,9 @@ impl RootWindow {
             && self.root_window.is_some_and(|host| host.window_id() == window.window_handle().window_id())
             && self.native_window == Some(receipt.native) && current_foreground_identity() == Some(receipt.native.identity)
             && json_utility::native_host_current(&self.root_visibility, receipt.revision, Some(receipt.native), false)
-            && self.query.read(cx).value().as_str() == receipt.query
-            && self.launcher_results.resolve_result(receipt.generation, receipt.row, &receipt.query)
-                .is_some_and(|result| result.action == receipt.action && matches!(result.origin, LauncherResultOrigin::Provider(ref name) if name == "folders"))
+            && receipt.search.as_ref().is_none_or(|search| self.query.read(cx).value().as_str() == search.query
+                && self.launcher_results.resolve_result(search.generation, search.row, &search.query)
+                    .is_some_and(|result| result.action == search.action && matches!(result.origin, LauncherResultOrigin::Provider(ref name) if name == "folders")))
     }
 
     pub(super) fn start_folder_command(&mut self, generation: u64, row: usize, query: &str, action: Action, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
@@ -99,16 +101,18 @@ impl RootWindow {
     }
     fn begin_folder_operation(&mut self, generation: u64, row: usize, query: &str, action: Action,
         add: Option<String>, review: Option<Review>, source: ActivationSource, secondary: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.folder_authoring.busy() || self.bookmark_authoring.busy() || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
+        if self.folder_authoring.busy() || self.bookmark_authoring.busy() || self.external_drop.busy() || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
             || !window.is_window_active() || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
         let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+        self.external_drop.revoke();
         let Some(permit) = self.restart_admission.admit() else { return; };
         let Some(serial) = self.folder_authoring.begin() else { return; };
-        let receipt = Receipt { serial, generation, row, query: query.to_owned(), action, native,
-            revision: self.root_visibility.request_revision.load(Ordering::Acquire), source, focus: window.focused(cx), settings: self.external_launch_preferences.clone(), secondary };
+        let receipt = Receipt { serial, native, revision: self.root_visibility.request_revision.load(Ordering::Acquire), focus: window.focused(cx),
+            search: Some(SearchReceipt { generation, row, query: query.to_owned(), action, source, settings: self.external_launch_preferences.clone(), secondary }) };
         if !self.folder_receipt_current(&receipt, window, cx) { self.finish_folder_authoring(serial); return; }
         let lease = Arc::new(AtomicBool::new(true)); self.folder_authoring.lease = Some(lease.clone());
-        let worker_action = receipt.action.clone(); let worker_completion = CompletionData::from(&receipt); let worker_revision = receipt.revision;
+        let Some(search) = receipt.search.as_ref() else { self.finish_folder_authoring(serial); return; };
+        let worker_action = search.action.clone(); let worker_completion = CompletionData::from(search); let worker_revision = receipt.revision;
         let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone();
         let task = cx.background_executor().spawn(async move {
             let current = || lease.load(Ordering::Acquire) && !admission.is_fenced()
@@ -152,10 +156,10 @@ impl RootWindow {
 
     fn finish_folder_completion(&mut self, receipt: &Receipt, completion: external_launch::WorkerResult,
         current: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Ok(usage)) = completion.usage_result {
-            let key = match parse_action(&receipt.action) {
-                Ok(Command::Storage(StorageCommand::FolderAdd(_) | StorageCommand::FolderRemove(_))) => receipt.action.action.clone(),
-                _ => format!("folder:remove:{}", receipt.action.action),
+        if let (Some(search), Some(Ok(usage))) = (&receipt.search, completion.usage_result) {
+            let key = match parse_action(&search.action) {
+                Ok(Command::Storage(StorageCommand::FolderAdd(_) | StorageCommand::FolderRemove(_))) => search.action.action.clone(),
+                _ => format!("folder:remove:{}", search.action.action),
             };
             self.search_catalog.usage.insert(key, usage);
         }
@@ -168,12 +172,22 @@ impl RootWindow {
         self.folder_updated(current, cx);
     }
 
-    fn folder_updated(&mut self, force: bool, cx: &mut Context<Self>) {
+    pub(super) fn folder_updated(&mut self, force: bool, cx: &mut Context<Self>) {
         if let Some(aliases) = self.search_catalog.providers.folder_aliases() { self.search_catalog.folder_aliases_lc = aliases; }
         let query = self.query.read(cx).value().to_string();
         let folder_rows = self.launcher_results.query == query && self.launcher_results.actions.iter().any(|row| matches!(&row.origin, LauncherResultOrigin::Provider(name) if name == "folders"));
         if refresh_folder_query(&query, folder_rows, force) { self.refresh_launcher_results_with_viewport(query, false, cx); }
         if self.restart_status.as_deref() == Some(WAIT) { self.restart_status = None; }
+    }
+
+    pub(super) fn show_dropped_folder_alias(&mut self, entry: FolderEntry, native: NativeWindow, revision: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.folder_authoring.busy() || self.bookmark_authoring.busy() || self.restart_admission.is_fenced()
+            || window.has_active_dialog(cx) || !window.is_window_active()
+            || current_foreground_identity() != Some(native.identity) { return; }
+        let Some(serial) = self.folder_authoring.begin() else { return; };
+        let receipt = Receipt { serial, native, revision, focus: window.focused(cx), search: None };
+        if !self.folder_receipt_current(&receipt, window, cx) { self.finish_folder_authoring(serial); return; }
+        self.show_folder_review(receipt, entry, Review::Alias, window, cx);
     }
 
     fn show_folder_review(&mut self, receipt: Receipt, entry: FolderEntry, review: Review, window: &mut Window, cx: &mut Context<Self>) {
@@ -238,14 +252,14 @@ impl RootWindow {
         window.close_dialog(cx);
         let lease = Arc::new(AtomicBool::new(true)); self.folder_authoring.lease = Some(lease.clone());
         let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone(); let native = receipt.native; let revision = receipt.revision;
-        let worker_completion = CompletionData::from(&receipt); let secondary = receipt.secondary;
+        let worker_completion = receipt.search.as_ref().map(CompletionData::from); let secondary = receipt.search.as_ref().is_none_or(|search| search.secondary);
         let task = cx.background_executor().spawn(async move {
             let mutation = match review { Review::Alias => CheckedFolderMutation::SetAlias(alias), Review::Remove => CheckedFolderMutation::Remove };
             folders::checked_folder_update(folders::FOLDERS_FILE, &entry, mutation, || lease.load(Ordering::Acquire)
                 && !admission.is_fenced() && current_foreground_identity() == Some(native.identity)
                 && json_utility::native_host_current(&visibility, revision, Some(native), false))?;
             Ok::<_, anyhow::Error>(if matches!(review, Review::Remove) && !secondary {
-                Some(completion(&worker_completion, StorageCommand::FolderRemove(entry.path)))
+                worker_completion.map(|completion_data| completion(&completion_data, StorageCommand::FolderRemove(entry.path)))
             } else { None })
         });
         let root = cx.entity().downgrade(); let host = window.window_handle(); let serial = receipt.serial;
@@ -253,7 +267,9 @@ impl RootWindow {
             let result = task.await;
             let updated = host.update(cx, |_, window, app| { let _ = root.update(app, |root, cx| {
                 let current = root.folder_presentation_current(&receipt, window, cx)
-                    && root.external_owner_is_current(receipt.focus.as_ref(), window, cx) && !window.has_active_dialog(cx);
+                    && (if receipt.search.is_none() { root.drop_focus_current(receipt.focus.as_ref(), window, cx) }
+                       else { root.external_owner_is_current(receipt.focus.as_ref(), window, cx) })
+                    && !window.has_active_dialog(cx);
                 if root.finish_folder_authoring(serial) {
                     match result {
                         Ok(Some(completion)) => root.finish_folder_completion(&receipt, completion, current, window, cx),

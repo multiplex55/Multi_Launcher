@@ -1792,3 +1792,11 @@ Checked Alias and Remove compare the full unique raw saved record inside the can
 Independent review cleared raw record identity, cache lock order, exact current Action Sheet membership and retry semantics. Locked `fast-dev` checks passed in 26.38 s for the library, 33.22 s for library and launcher, and 4.02 s for the final launcher delta. One grouped library and launcher link took 11 min 44 s with no corrective link. Nextest run `397c6588-9416-44de-94ba-df124b151287` passed all 26 tests in 8.915 s, with 9333 skipped. The batch covered raw siblings, stale and malformed records, intervening disk changes, watcher recovery, provider recreation, normalization, command outcomes and affected Folder regressions.
 
 P0.04 remains Stage 2. Matched 1516 × 937 form, alias retry, Remove Cancel and confirmation, exact HTTP/HTTPS sibling identity and egui readback require live Windows replay. The paired owned profiles are prepared. Continue P0.05 native Explorer drop through the checked App and Folder owners.
+
+### P0.05 native Explorer drop
+
+The managed GPUI launcher receives Windows Explorer `ExternalPaths` through the existing OLE transport. It handles eligible directories in drop order through the canonical Folder writer, queues Alias for the last successful unambiguous folder, and stages the last eligible file Path in the real Add App form. File staging requires explicit Add to persist. Existing drafts are protected. The Alias waits for the original launcher and owner to become eligible and is retired if a newer interaction supersedes it.
+
+Independent review checked admission, canonical writes, partial success, owner changes and pointer release. The final locked launcher-only `fast-dev` check passed in 4.82 s. One launcher-only test link finished in 26.90 s. Nextest run `cccc3bcc-7d16-4e00-ad7f-772ec8215161` passed 15/15 in 5.893 s. Reused stock hidden-root regression `c6b663c0-f8a8-49be-84b1-ed7eb1a09a07d` passed 1/1.
+
+Stage 2. Live cross-window Explorer replay remains open at matched 1516 × 937, including visible background delivery, drag-away, protected draft, modal and changed owner, exact shortcut staging, and Folder/Alias readback from egui. The paired owned profiles and mixed-path fixtures are prepared. Continue P0.06 Omni Search.
