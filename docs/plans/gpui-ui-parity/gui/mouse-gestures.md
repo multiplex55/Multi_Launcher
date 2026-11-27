@@ -12,4 +12,4 @@ Select `gesture_delete_is_queued_until_confirmed`, `cancelling_gesture_delete_ke
 
 ## Retained GPUI catalog
 
-Stock `mg edit` opens the retained catalog. Checked Add, Rename, Four-direction tokens, Set Query, Enabled and Practice use the canonical gesture and Settings owners. The physical Windows gesture, foreground, click pass-through and retirement replay remains open. [Mouse Gestures checkpoint](../CHECKPOINTS.md#p018-checked-ordinary-mouse-gestures)
+Stock `mg edit` opens the retained catalog. Checked Add, Rename, Four-direction tokens, Set Query, individual gesture enablement, global Enabled and Practice use the canonical gesture and Settings owners. [Individual gesture enablement](../CHECKPOINTS.md#p018-checked-individual-mouse-gesture-enablement) The physical Windows gesture, foreground, click pass-through and retirement replay remains open. [Mouse Gestures checkpoint](../CHECKPOINTS.md#p018-checked-ordinary-mouse-gestures)

@@ -5023,6 +5023,9 @@ impl RootWindow {
     }
 
     fn revoke_focus_bound_utility_operations(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.gesture_editor {
+            view.update(cx, |view, _| view.revoke_enabled_operation());
+        }
         if let Some(view) = &self.timer_view {
             view.update(cx, |view, _| view.revoke_pause());
         }

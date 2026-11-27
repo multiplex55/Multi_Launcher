@@ -26,6 +26,7 @@ pub(super) struct GestureEditor {
     mount: utility_mount::MountReceipt,
     host: AnyWindowHandle,
     focus: FocusHandle,
+    row_enabled_focus: FocusHandle,
     name: Entity<InputState>,
     tokens: Entity<InputState>,
     binding: Entity<InputState>,
@@ -41,18 +42,22 @@ pub(super) struct GestureEditor {
     practice: bool,
     pending_apply: Option<(Option<bool>, Option<bool>)>,
     status: Option<String>,
+    settings_error: Option<String>,
+    enable_lease: Option<Arc<AtomicBool>>,
+    enable_blur: Option<Subscription>,
+    enable_active: Option<Subscription>,
 }
 
 impl GestureEditor {
     fn new(root: WeakEntity<RootWindow>, owner: Arc<GpuiGestureOwner>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mount_owner = utility_mount::MountOwner::default();
         let mount = mount_owner.attach();
-        Self { open: true, root, owner, mount_owner, mount, host: window.window_handle(), focus: cx.focus_handle(),
+        Self { open: true, root, owner, mount_owner, mount, host: window.window_handle(), focus: cx.focus_handle(), row_enabled_focus: cx.focus_handle(),
             name: cx.new(|cx| InputState::new(window, cx).placeholder("Gesture name")),
             tokens: cx.new(|cx| InputState::new(window, cx).placeholder("Directions: U D L R")),
             binding: cx.new(|cx| InputState::new(window, cx).placeholder("Binding name")),
             query: cx.new(|cx| InputState::new(window, cx).placeholder("Search query")),
-            snapshot: None, selected: None, selected_basis: None, renaming: false, rename_draft: None, settings_baseline_valid: false, busy: false, enabled: true, practice: false, pending_apply: None, status: None }
+            snapshot: None, selected: None, selected_basis: None, renaming: false, rename_draft: None, settings_baseline_valid: false, busy: false, enabled: true, practice: false, pending_apply: None, status: None, settings_error: None, enable_lease: None, enable_blur: None, enable_active: None }
     }
 
     fn current(&self, window: &Window, cx: &App) -> bool {
@@ -85,6 +90,10 @@ impl GestureEditor {
     }
 
     pub(super) fn blocks_root_close(&self, cx: &App) -> bool { self.busy || (self.open && self.dirty(cx)) }
+
+    pub(super) fn revoke_enabled_operation(&mut self) {
+        if let Some(lease) = &self.enable_lease { lease.store(false, Ordering::Release); }
+    }
 
     fn present_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.busy || !self.current(window, cx) || window.has_active_dialog(cx) { return; }
@@ -139,6 +148,7 @@ impl GestureEditor {
         let Some(permit) = root.restart_admission.admit() else { return; };
         let Some(native) = root.native_window else { return; };
         let visibility = root.root_visibility.clone();
+        let admission = root.restart_admission.clone();
         let settings_path = root.settings_path.clone();
         let revision = visibility.request_revision.load(Ordering::Acquire);
         let receipt = self.mount.clone();
@@ -148,14 +158,30 @@ impl GestureEditor {
         let added = matches!(edit, Some(GestureEdit::Add));
         let renamed = matches!(edit, Some(GestureEdit::Rename { .. }));
         let directions = matches!(edit, Some(GestureEdit::Tokens { .. }));
+        let row_enabled = matches!(edit, Some(GestureEdit::Enabled { .. }));
         let edited = edit.is_some();
         if added && self.dirty(cx) { self.status = Some("Save or discard the current draft before adding a gesture.".into()); cx.notify(); return; }
+        let enabled_lease = if row_enabled {
+            if self.dirty(cx) || !window.is_window_active() { return; }
+            let Some(focus) = window.focused(cx) else { return; };
+            if !root.external_owner_is_current(Some(&focus), window, cx) { return; }
+            let lease = Arc::new(AtomicBool::new(true));
+            let blur = lease.clone();
+            self.enable_blur = Some(cx.on_blur(&focus, window, move |_, _, _| blur.store(false, Ordering::Release)));
+            let inactive = lease.clone();
+            self.enable_active = Some(cx.observe_window_activation(window, move |_, window, _| {
+                if !window.is_window_active() { inactive.store(false, Ordering::Release); }
+            }));
+            self.enable_lease = Some(lease.clone());
+            Some(lease)
+        } else { None };
         self.busy = true;
         self.status = None;
         let host = self.host;
         let task = cx.background_executor().spawn(async move {
-            let durable_settings = multi_launcher::settings::Settings::read_mouse_gesture_preferences(&settings_path);
-            let current = || effect_receipt.is_current() && native_current(&visibility, revision, native);
+            let durable_settings = (!row_enabled).then(|| multi_launcher::settings::Settings::read_mouse_gesture_preferences(&settings_path));
+            let current = || effect_receipt.is_current() && native_current(&visibility, revision, native)
+                && enabled_lease.as_ref().is_none_or(|lease| lease.load(Ordering::Acquire) && !admission.is_fenced());
             let result = match edit {
                 Some(edit) => owner.commit_editor(&snapshot.ok_or_else(|| anyhow::anyhow!("Reload the gesture list first"))?, edit, current),
                 None => owner.editor_snapshot(),
@@ -169,17 +195,24 @@ impl GestureEditor {
                 let _ = update_kit_window_content(host, &view, cx, |view, window, cx| {
                     if !receipt.is_current() || !receipt.matches(&view.mount) { return; }
                     view.busy = false;
+                    if row_enabled { view.enable_lease = None; view.enable_blur = None; view.enable_active = None; }
                     match outcome {
                         Ok((Ok(mut snapshot), durable)) if view.owner.editor_snapshot_is_current(&snapshot) => {
-                            view.settings_baseline_valid = durable.is_ok();
-                            match durable { Ok((enabled, practice)) => { snapshot.enabled = enabled; snapshot.practice_mode = practice; }, Err(error) => view.status = Some(format!("Could not read Mouse Gestures settings: {error}")) }
-                            if view.snapshot.as_ref().is_none_or(|old| view.enabled == old.enabled) { view.enabled = snapshot.enabled; }
-                            if view.snapshot.as_ref().is_none_or(|old| view.practice == old.practice_mode) { view.practice = snapshot.practice_mode; }
+                            if let Some(durable) = durable {
+                                view.settings_baseline_valid = durable.is_ok();
+                                match durable { Ok((enabled, practice)) => { snapshot.enabled = enabled; snapshot.practice_mode = practice; view.settings_error = None; }, Err(error) => view.settings_error = Some(format!("Could not read Mouse Gestures settings: {error}")) }
+                                if view.snapshot.as_ref().is_none_or(|old| view.enabled == old.enabled) { view.enabled = snapshot.enabled; }
+                                if view.snapshot.as_ref().is_none_or(|old| view.practice == old.practice_mode) { view.practice = snapshot.practice_mode; }
+                            } else if let Some(old) = &view.snapshot {
+                                snapshot.enabled = old.enabled;
+                                snapshot.practice_mode = old.practice_mode;
+                            }
                             let selection = if added { snapshot.database.gestures.len().checked_sub(1) } else { view.selected.filter(|index| *index < snapshot.database.gestures.len()) };
                             view.snapshot = Some(snapshot);
                             if added { if let Some(index) = selection { view.select(index, window, cx); } }
                             else if edited && let Some(index) = selection { view.selected_basis = view.snapshot.as_ref().and_then(|snapshot| snapshot.database.gestures.get(index)).cloned(); }
                             if directions && let Some(row) = &view.selected_basis { view.tokens.update(cx, |input, cx| input.set_value(&row.tokens, window, cx)); }
+                            if row_enabled { view.status = Some("Gesture enabled setting saved.".into()); }
                             if added && view.current(window, cx) { view.present_rename(window, cx); }
                             else if renamed { view.renaming = false; view.rename_draft = None; }
                         }
@@ -248,7 +281,7 @@ impl GestureEditor {
 }
 
 impl Render for GestureEditor {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let escape = self.mount.clone();
         let mut panel = div().id("gesture-editor").track_focus(&self.focus)
             .capture_action(cx.listener(move |view, _: &gpui_kit::base::input::Escape, window, cx| {
@@ -297,6 +330,49 @@ impl Render for GestureEditor {
                 if rename_mount.is_current() && rename_mount.matches(&view.mount) && view.selected == Some(index) && view.selected_basis.as_ref() == Some(&rename_row) { view.present_rename(window, cx); }
             })));
             if row.dir_mode == multi_launcher::mouse_gestures::engine::DirMode::Four {
+                let dirty = self.dirty(cx);
+                let expected = row.clone();
+                let mount = self.mount.clone();
+                let revision = self.snapshot.as_ref().map(|snapshot| snapshot.revision);
+                let snapshot_current = self.snapshot.as_ref().is_some_and(|snapshot| self.owner.editor_snapshot_is_current(snapshot));
+                let weak = cx.entity().downgrade();
+                let palette = appearance::current(cx).palette;
+                let focused = self.row_enabled_focus.is_focused(window);
+                panel = panel.child(Checkbox::new("gesture-row-enabled")
+                    .checked(row.enabled)
+                    .disabled(!(busy && self.enable_lease.is_some()) && (busy || dirty || revision.is_none() || !snapshot_current))
+                    .accessibility_label("Gesture enabled")
+                    .track_focus(&self.row_enabled_focus)
+                    .on_change(move |state, _, window, app| {
+                        let _ = weak.update(app, |view, cx| {
+                            let enabled = state == CheckboxState::Checked;
+                            if view.busy || !mount.is_current() || !mount.matches(&view.mount)
+                                || view.selected != Some(index) || view.selected_basis.as_ref() != Some(&expected) { return; }
+                            if view.snapshot.as_ref().is_none_or(|snapshot| !view.owner.editor_snapshot_is_current(snapshot)) {
+                                view.status = Some("Gesture list changed; reload it.".into()); cx.notify(); return;
+                            }
+                            if view.busy || view.dirty(cx) || enabled == expected.enabled
+                                || !mount.is_current() || !mount.matches(&view.mount)
+                                || view.selected != Some(index) || view.selected_basis.as_ref() != Some(&expected)
+                                || !view.snapshot.as_ref().is_some_and(|snapshot| Some(snapshot.revision) == revision
+                                    && view.owner.editor_snapshot_is_current(snapshot)
+                                    && snapshot.database.gestures.get(index) == Some(&expected))
+                                || !view.current(window, cx) || !window.is_window_active() || window.has_active_dialog(cx) {
+                                return;
+                            }
+                            let focus = window.focused(cx);
+                            if !view.root.upgrade().is_some_and(|root| root.read(cx).external_owner_is_current(focus.as_ref(), window, cx)) { return; }
+                            view.run(Some(GestureEdit::Enabled { index, expected: expected.clone(), enabled }), window, cx);
+                        });
+                    })
+                    .child(div().flex().items_center().gap_2()
+                        .child(CheckboxIndicator::new().checked(row.enabled).size(px(18.0)).rounded(px(3.0)).border_1()
+                            .border_color(appearance::to_hsla(if focused { palette.focus } else { palette.control_border }))
+                            .when(row.enabled, |indicator| indicator.bg(appearance::to_hsla(palette.accent)).text_color(appearance::to_hsla(palette.primary_text)))
+                            .items_center().justify_center().child(if row.enabled { "✓" } else { "" }))
+                        .child(Label::new("Gesture enabled"))));
+                if dirty { panel = panel.child(Label::new("Save or discard the current draft before changing gesture enablement.")); }
+                if !snapshot_current { panel = panel.child(Label::new("Gesture list changed; reload it.")); }
                 panel = panel.child(Input::new(&self.tokens).readonly(busy).aria_label("Four direction tokens"));
                 let expected = row.clone();
                 let token_mount = self.mount.clone();
@@ -325,6 +401,7 @@ impl Render for GestureEditor {
                 view.status = None; cx.notify();
             }
         })));
+        if let Some(error) = &self.settings_error { panel = panel.child(Label::new(error.clone()).id("gesture-settings-error")); }
         if let Some(status) = &self.status { panel = panel.child(Label::new(status.clone()).id("gesture-editor-status")); }
         panel.child(Button::new("gesture-close").label("Close").disabled(busy).on_click(cx.listener(|view, _, window, cx| {
             if view.current(window, cx) && !view.busy {

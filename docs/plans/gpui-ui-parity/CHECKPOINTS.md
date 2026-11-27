@@ -2030,3 +2030,17 @@ Ordinary countdowns use this volatile transition. Persistent alarms continue thr
 The locked `fast-dev` shared check passed in 1m 06s, integration in 32.21 s, the retained focus correction in 4.55 s and the final snapshot check in 28.15 s. Independent review confirmed exact session mutation, old-generation rejection, stable focus and contention handling. The initial grouped build stopped at a missing timer module import in the test. The corrected library and launcher Nextest build took 7m 26s. Nextest run `3831cece-82b4-4982-b30c-fd82d136ed9f` passed 7 of 7 tests across two binaries in 2.158 s.
 
 P0.17 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Pause an owned silent countdown beyond its original deadline, verify stable remaining time, resume, then verify exactly one completion and acknowledgement without a hidden launcher reveal. Continue P0.18 individual Mouse Gesture enablement.
+
+### P0.18 checked individual Mouse Gesture enablement
+
+The selected Four-direction row in the retained `mg edit` editor has a visible **Gesture enabled** control. It acts on the current mounted snapshot, row ordinal and full row. Dirty authoring stays protected until Save or Discard. Successful publication keeps selection and the control shows the acknowledged state.
+
+The shared transaction changes only the row's enabled bit. It allows disabling a conflicting gesture and refuses re-enabling an ambiguous nonempty direction sequence. The final write checks the raw preimage and live authority after the read. An admitted toggle has one sticky focus and activation lease, with menu, modal and hide revocation. Independent global Enabled and Practice settings retain their existing draft and feedback.
+
+The canonical gesture service retires the old release generation and applies the updated database through its existing runtime owner. A disabled row refuses a fresh release. A sibling remains admissible. A re-enabled gesture requires a fresh release generation.
+
+The locked `fast-dev` shared check passed in 59.27 s, integration in 30.48 s, first corrections in 31.08 s and final integration in 27.03 s. Independent review covered persistence, stale interaction, focus authority and release. The grouped library and launcher build took 6m 05s. Nextest run `417217fd-e07f-4f8e-b7a4-54898b0656a0` passed 6 of 6 selected tests in 1.268 s.
+
+P0.18 remains Stage 2. Paired 1516 × 937 Windows replay remains open with two owned Set Query gestures. Disable the first, confirm the second still works, then re-enable the first and verify both after restart. Physical hooks and foreground, remaining direction modes and other actions retain their original criteria.
+
+Continue P1.01 Dashboard breadth with Active Timers and manual Quick Tools. Several essential P0 gates need resumed native replay, and global plugin membership needs a complete passive catalog and checked owner transitions. Original P0 scope and acceptance stay open.

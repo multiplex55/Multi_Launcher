@@ -1413,6 +1413,38 @@ mod persistence_tests {
     }
 
     #[test]
+    fn enablement_publication_requires_fresh_release_and_keeps_sibling() {
+        use crate::mouse_gestures::service::{GestureReleaseSink, GestureReleaseDisposition::{Accepted, Ignore}};
+        let mut database = db("left");
+        let binding = BindingEntry { label: "query".into(), kind: BindingKind::SetQuery, action: "hello".into(), args: None, enabled: true };
+        database.gestures[0].bindings.push(binding.clone());
+        let mut sibling = database.gestures[0].clone();
+        sibling.label = "right".into();
+        sibling.tokens = "R".into();
+        database.gestures.push(sibling);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        let owner = GpuiGestureOwner { db: Arc::new(Mutex::new(database)), generation: Arc::new(AtomicU64::new(9)), editor_revision: AtomicU64::new(0), latest_sequence: Arc::new(AtomicU64::new(0)), active: AtomicBool::new(true), ready: AtomicBool::new(true), sender, receiver: Mutex::new(receiver), wake: Arc::new(|| {}), shutdown_gate: Mutex::new(()), shutdown_complete: AtomicBool::new(false), status: Mutex::new((None, false)), shutdown_error: Mutex::new(None) };
+        let foreground = Some(crate::mouse_gestures::service::GestureForeground { hwnd: 1, process_id: 2, thread_id: 3 });
+        let initial = owner.stroke_generation();
+        assert_eq!(owner.release(initial, Some(0), foreground, Some(0), "L", DirMode::Four, 0, binding.to_action("left")), Accepted);
+        let queued = owner.take().pop().unwrap();
+        owner.close_admission();
+        owner.db.lock().unwrap().gestures[0].enabled = false;
+        owner.open_admission();
+        assert!(!owner.is_current(&queued));
+        let disabled_generation = owner.stroke_generation();
+        assert_eq!(owner.release(initial, Some(0), foreground, Some(0), "L", DirMode::Four, 0, binding.to_action("left")), Ignore);
+        assert_eq!(owner.release(disabled_generation, Some(0), foreground, Some(0), "L", DirMode::Four, 0, binding.to_action("left")), Ignore);
+        assert_eq!(owner.release(disabled_generation, Some(0), foreground, Some(0), "R", DirMode::Four, 0, binding.to_action("right")), Accepted);
+        owner.take();
+        owner.close_admission();
+        owner.db.lock().unwrap().gestures[0].enabled = true;
+        owner.open_admission();
+        assert_eq!(owner.release(disabled_generation, Some(0), foreground, Some(0), "L", DirMode::Four, 0, binding.to_action("left")), Ignore);
+        assert_eq!(owner.release(owner.stroke_generation(), Some(0), foreground, Some(0), "L", DirMode::Four, 0, binding.to_action("left")), Accepted);
+    }
+
+    #[test]
     fn gpui_reload_fence_and_duplicate_mode_admission() {
         use crate::mouse_gestures::service::{GestureReleaseSink, GestureReleaseDisposition::{Accepted, Ignore, PassThrough}};
         let mut database = db("Zebra");
