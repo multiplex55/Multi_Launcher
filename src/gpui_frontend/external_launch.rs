@@ -582,6 +582,7 @@ pub(super) enum OmniTarget {
     Indexed(super::indexed_applications::LaunchAuthority),
     Folder,
     Bookmark,
+    Tempfile(multi_launcher::actions::tempfiles::ListedTempFile),
 }
 
 #[derive(Clone)]
@@ -832,6 +833,13 @@ impl ExternalCommandHost for OmniHost<'_> {
         anyhow::ensure!(command.namespace.is_none() && command.target == action.action && command.args == action.args, "Invalid Omni target");
         let current = || self.guard.current();
         match self.target {
+            OmniTarget::Tempfile(row) => {
+                anyhow::ensure!(row.action == *action, "Temporary file result changed");
+                match multi_launcher::actions::tempfiles::open_listed_with_effect(row, || self.guard.current(), || self.guard.effect_current())? {
+                    multi_launcher::actions::tempfiles::CreateAndOpenOutcome::Opened(_) => Ok(()),
+                    multi_launcher::actions::tempfiles::CreateAndOpenOutcome::Published { reason, .. } => anyhow::bail!("Could not open temporary file: {reason:?}"),
+                }
+            }
             OmniTarget::Folder | OmniTarget::Bookmark => {
                 let kind = if matches!(self.target, OmniTarget::Folder) { AssociationKind::Folder } else { AssociationKind::Bookmark };
                 checked_association_with(kind, action, command, multi_launcher::plugins::folders::FOLDERS_FILE,

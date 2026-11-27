@@ -178,7 +178,8 @@ impl multi_launcher::plugin::Plugin for TempfileBare {
         } else { Vec::new() }
     }
     fn commands(&self) -> Vec<Action> {
-        vec![Action { label: "tmp".into(), desc: "Tempfile".into(), action: "query:tmp".into(), args: None }]
+        multi_launcher::plugin::Plugin::commands(&multi_launcher::plugins::tempfile::TempfilePlugin)
+            .into_iter().filter(|action| matches!(action.action.as_str(), "query:tmp" | "query:tmp list")).collect()
     }
 }
 

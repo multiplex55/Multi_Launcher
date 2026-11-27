@@ -11,8 +11,20 @@ pub(super) fn current_provider(query: &str, action: &Action, enabled: Option<&Ha
         && matches!(parse_action(action), Ok(Command::Storage(StorageCommand::TempfileDialog)))
 }
 
-fn same_search(issued: Option<&(String, u64)>, query: &str, generation: u64) -> bool {
-    issued.is_some_and(|(raw, issued_generation)| raw == query && *issued_generation == generation)
+#[derive(Clone)]
+enum SearchReceipt { Bare(String, u64), List(String, u64) }
+fn same_search(issued: Option<&SearchReceipt>, query: &str, generation: u64, list_revision: u64) -> bool {
+    match issued {
+        Some(SearchReceipt::Bare(raw, issued_generation)) => raw == query && *issued_generation == generation,
+        Some(SearchReceipt::List(raw, revision)) => raw == query && *revision == list_revision,
+        None => false,
+    }
+}
+fn refresh_current_list(issued: Option<&SearchReceipt>, query: &str, generation: u64, list_revision: u64) -> bool {
+    tempfile_search::list_query(query) && match issued {
+        Some(SearchReceipt::List(raw, _)) if raw == query => same_search(issued, query, generation, list_revision),
+        _ => true,
+    }
 }
 
 pub(super) struct TempfileView {
@@ -74,8 +86,11 @@ impl TempfileView {
                 || !root.external_owner_is_current(Some(&focus), window, cx) { return None; }
             let permit = root.restart_admission.admit()?;
             let query = root.query.read(cx).value().to_string();
-            let issued_search = (!search_providers::tempfile_rows(&query, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()).is_empty())
-                .then_some((query, root.launcher_results.generation));
+            let issued_search = if tempfile_search::list_query(&query) && tempfile_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()) {
+                Some(SearchReceipt::List(query, root.tempfile_search.revision()))
+            } else if !search_providers::tempfile_rows(&query, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()).is_empty() {
+                Some(SearchReceipt::Bare(query, root.launcher_results.generation))
+            } else { None };
             Some((permit, root.restart_admission.clone(), root.root_visibility.clone(),
                 root.root_visibility.request_revision.load(Ordering::Acquire), native, issued_search))
         }).ok().flatten() else { return; };
@@ -121,8 +136,11 @@ impl TempfileView {
                                 let host_current = root.root_window.is_some_and(|current| current.window_id() == host.window_id())
                                     && root.native_window == Some(native)
                                     && json_utility::native_host_current(&visibility, revision, Some(native), false);
-                                if host_current && same_search(issued_search.as_ref(), &query, root.launcher_results.generation)
-                                    && !search_providers::tempfile_rows(&query, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()).is_empty() {
+                                let same_bare = same_search(issued_search.as_ref(), &query, root.launcher_results.generation, root.tempfile_search.revision())
+                                    && !search_providers::tempfile_rows(&query, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()).is_empty();
+                                let live_list = root.launcher_results.query == query && tempfile_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref())
+                                    && refresh_current_list(issued_search.as_ref(), &query, root.launcher_results.generation, root.tempfile_search.revision());
+                                if host_current && (same_bare || live_list) {
                                     if root.external_launch_preferences.enable_toasts {
                                         let name = path.file_name().unwrap_or_else(|| path.as_os_str()).to_string_lossy();
                                         root.external_notification(NEXT_TOAST_ID.fetch_sub(1, Ordering::Relaxed), 0, format!("Created {name}"), false,
@@ -138,6 +156,17 @@ impl TempfileView {
                         Ok(CreateAndOpenOutcome::Published { path, reason }) => {
                             let detail = match reason { PublishedReason::Superseded => "opening was superseded", PublishedReason::Changed => "the file changed before opening", PublishedReason::OpenFailed => "the associated application could not be opened" };
                             view.feedback = Some(format!("File created at {} but {detail}.", path.display()));
+                            let _ = view.root.update(cx, |root, cx| {
+                                let query = root.query.read(cx).value().to_string();
+                                if root.root_window.is_some_and(|current| current.window_id() == host.window_id())
+                                    && root.native_window == Some(native)
+                                    && json_utility::native_host_current(&visibility, revision, Some(native), false)
+                                    && root.launcher_results.query == query
+                                    && refresh_current_list(issued_search.as_ref(), &query, root.launcher_results.generation, root.tempfile_search.revision())
+                                    && tempfile_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()) {
+                                    root.refresh_launcher_results_with_viewport(query, false, cx);
+                                }
+                            });
                         }
                         Err(error) => view.feedback = Some(format!("Could not create temp file: {error}")),
                     }
@@ -185,9 +214,9 @@ impl Render for TempfileView {
             }))
             .child(Label::new("Create Temp File"))
             .child(Label::new("Alias"))
-            .child(Input::new(&self.alias).aria_label("Alias"))
+            .child(Input::new(&self.alias).readonly(self.pending).aria_label("Alias"))
             .child(Label::new("Text"))
-            .child(div().id("tempfile-text-scroll").max_h(px((self.size.height.max(150.0) - 150.0).max(40.0))).overflow_y_scroll().child(Textarea::new(&self.text).aria_label("Text")));
+            .child(div().id("tempfile-text-scroll").max_h(px((self.size.height.max(150.0) - 150.0).max(40.0))).overflow_y_scroll().child(Textarea::new(&self.text).readonly(self.pending).aria_label("Text")));
         if let Some(message) = &self.feedback { panel = panel.child(Label::new(message.clone())); }
         panel.child(div().flex().gap_2()
             .child(Button::new("tempfile-save").label("Save").disabled(self.pending).on_click(cx.listener(move |view, _, window, cx| {
@@ -238,13 +267,18 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::same_search;
+    use super::{same_search, refresh_current_list, SearchReceipt};
     #[test]
     fn success_receipt_never_refreshes_a_later_query_or_generation() {
-        let issued = ("tmp".to_owned(), 12);
-        assert!(same_search(Some(&issued), "tmp", 12));
-        assert!(!same_search(Some(&issued), "calc 1+1", 12));
-        assert!(!same_search(Some(&issued), "tmp", 13));
-        assert!(!same_search(None, "tmp", 12));
+        let issued = SearchReceipt::Bare("tmp".to_owned(), 12);
+        assert!(same_search(Some(&issued), "tmp", 12, 2));
+        assert!(!same_search(Some(&issued), "calc 1+1", 12, 2));
+        assert!(!same_search(Some(&issued), "tmp", 13, 2));
+        assert!(!same_search(None, "tmp", 12, 2));
+        let list = SearchReceipt::List("tmp list café".to_owned(), 7);
+        assert!(same_search(Some(&list), "tmp list café", 99, 7));
+        assert!(!same_search(Some(&list), "tmp list café", 99, 8));
+        assert!(refresh_current_list(Some(&list), "tmp list other", 99, 8));
+        assert!(!refresh_current_list(Some(&list), "calc 1+1", 99, 8));
     }
 }

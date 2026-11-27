@@ -1,5 +1,195 @@
 use anyhow::Context;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::sync::Arc;
+
+#[cfg(windows)]
+type FileIdentity = (crate::file_operations::NativeFileIdentity, u64);
+#[cfg(unix)]
+type FileIdentity = (u64, u64);
+#[cfg(not(any(windows, unix)))]
+type FileIdentity = ();
+
+fn file_identity(file: &std::fs::File) -> Option<FileIdentity> {
+    #[cfg(windows)]
+    { use std::os::windows::fs::MetadataExt; Some((crate::file_operations::native_file_identity(file).ok()?, file.metadata().ok()?.creation_time())) }
+    #[cfg(unix)]
+    { use std::os::unix::fs::MetadataExt; let metadata = file.metadata().ok()?; Some((metadata.dev(), metadata.ino())) }
+    #[cfg(not(any(windows, unix)))]
+    { let _ = file; None }
+}
+
+/// A stock list row bound to the exact file observed during the background scan.
+#[derive(Clone)]
+pub struct ListedTempFile {
+    pub action: crate::actions::Action,
+    path: PathBuf,
+    file_identity: FileIdentity,
+    root_path: PathBuf,
+    root_identity: FileIdentity,
+    root_resolved: PathBuf,
+    #[cfg(unix)]
+    _root_hold: Arc<std::fs::File>,
+    #[cfg(unix)]
+    _file_hold: Arc<std::fs::File>,
+    #[cfg(windows)]
+    resolved_path: PathBuf,
+}
+
+/// Scan without creating a missing storage directory. The caller owns query
+/// generation and can revoke the scan between entries.
+pub fn list_checked_in(dir: &Path, query: &str, current: impl Fn() -> bool) -> anyhow::Result<Vec<ListedTempFile>> {
+    let Some(filter) = crate::plugins::tempfile::list_filter(query) else { return Ok(Vec::new()); };
+    anyhow::ensure!(current(), "Temp file search was superseded");
+    let metadata = match std::fs::symlink_metadata(dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(metadata.file_type().is_dir() && !is_reparse(&metadata), "Temp file storage is not a regular directory");
+    #[cfg(unix)]
+    let root_file = Arc::new(open_storage_root(dir, true)?);
+    #[cfg(not(unix))]
+    let root_file = open_storage_root(dir, true)?;
+    let root_identity = file_identity(&root_file).ok_or_else(|| anyhow::anyhow!("Could not identify temporary file storage"))?;
+    #[cfg(windows)]
+    let canonical = crate::file_operations::final_path_for_handle_verbatim(&root_file)?;
+    #[cfg(not(windows))]
+    let canonical = std::fs::canonicalize(dir)?;
+    anyhow::ensure!(root_matches(dir, root_identity, &canonical), "Temp file storage changed during search");
+    let scan_guard = open_storage_root(dir, false)?;
+    anyhow::ensure!(file_identity(&scan_guard) == Some(root_identity), "Temp file storage changed during search");
+    let mut rows = Vec::new();
+    for entry in std::fs::read_dir(&canonical)? {
+        anyhow::ensure!(current(), "Temp file search was superseded");
+        anyhow::ensure!(root_matches(dir, root_identity, &canonical), "Temp file storage changed during search");
+        let entry = entry?;
+        let name = entry.file_name();
+        let path = dir.join(&name);
+        let Some(name_text) = name.to_str() else { continue; };
+        if !name_text.to_lowercase().contains(&filter)
+            || !path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("txt")) { continue; }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else { continue; };
+        if !metadata.file_type().is_file() || is_reparse(&metadata) { continue; }
+        #[cfg(windows)]
+        let file = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new().access_mode(0x80).share_mode(0x1 | 0x2 | 0x4).custom_flags(0x00200000).open(&path)
+        };
+        #[cfg(not(windows))]
+        let file = std::fs::File::open(&path);
+        let Ok(file) = file else { continue; };
+        let Ok(opened) = file.metadata() else { continue; };
+        if !opened.is_file() || is_reparse(&opened) { continue; }
+        #[cfg(windows)]
+        let resolved_path = match crate::file_operations::final_path_for_handle_verbatim(&file) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        #[cfg(windows)]
+        if resolved_path.parent() != Some(canonical.as_path()) { continue; }
+        // A file swapped or redirected during enumeration is not a candidate.
+        let Ok(resolved) = std::fs::canonicalize(&path) else { continue; };
+        #[cfg(windows)]
+        if resolved.parent() != Some(canonical.as_path()) { continue; }
+        #[cfg(not(windows))]
+        if resolved.parent() != Some(canonical.as_path()) { continue; }
+        let Some(identity) = file_identity(&file) else { continue; };
+        #[cfg(windows)]
+        if open_published_guard(&path, Some(identity.0)).is_none() { continue; }
+        #[cfg(not(windows))]
+        if !same_published_file(&file, &path) { continue; }
+        rows.push(ListedTempFile { action: crate::plugins::tempfile::list_action(&path), path, file_identity: identity, root_path: dir.to_owned(), root_identity, root_resolved: canonical.clone(), #[cfg(windows)] resolved_path, #[cfg(unix)] _root_hold: root_file.clone(), #[cfg(unix)] _file_hold: Arc::new(file) });
+    }
+    anyhow::ensure!(current(), "Temp file search was superseded");
+    anyhow::ensure!(root_matches(dir, root_identity, &canonical), "Temp file storage changed during search");
+    drop(scan_guard);
+    Ok(rows)
+}
+
+fn open_storage_root(path: &Path, share_delete: bool) -> std::io::Result<std::fs::File> {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new().access_mode(0x80 | if share_delete { 0 } else { 0x1 }).share_mode(0x1 | 0x2 | if share_delete { 0x4 } else { 0 })
+            .custom_flags(0x02000000 | 0x00200000).open(path)?
+    };
+    #[cfg(not(windows))]
+    let file = { let _ = share_delete; std::fs::File::open(path)? };
+    let metadata = file.metadata()?;
+    if !metadata.is_dir() || is_reparse(&metadata) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Temp file storage is not a regular directory"));
+    }
+    Ok(file)
+}
+
+fn root_matches(path: &Path, expected: FileIdentity, resolved: &Path) -> bool {
+    let Ok(metadata) = std::fs::symlink_metadata(path) else { return false; };
+    if !metadata.file_type().is_dir() || is_reparse(&metadata) { return false; }
+    let Ok(current) = open_storage_root(path, true) else { return false; };
+    if file_identity(&current) != Some(expected) { return false; }
+    #[cfg(windows)]
+    { crate::file_operations::final_path_for_handle_verbatim(&current).ok().as_deref() == Some(resolved) }
+    #[cfg(not(windows))]
+    { std::fs::canonicalize(path).ok().as_deref() == Some(resolved) }
+}
+
+fn is_reparse(metadata: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    { use std::os::windows::fs::MetadataExt; metadata.file_attributes() & 0x400 != 0 }
+    #[cfg(not(windows))]
+    { metadata.file_type().is_symlink() }
+}
+
+pub fn open_listed_if_current(row: &ListedTempFile, current: impl Fn() -> bool) -> anyhow::Result<CreateAndOpenOutcome> {
+    open_listed_with_effect(row, current, || true)
+}
+
+pub fn open_listed_with_effect(row: &ListedTempFile, current: impl Fn() -> bool, before_effect: impl Fn() -> bool) -> anyhow::Result<CreateAndOpenOutcome> {
+    open_listed_with(row, &current, |path, guard| crate::actions::exec::launch_association_if_current(path.as_os_str(), || guard() && before_effect()))
+}
+
+fn open_listed_with(row: &ListedTempFile, current: &dyn Fn() -> bool, launch: impl FnOnce(&Path, &dyn Fn() -> bool) -> anyhow::Result<()>) -> anyhow::Result<CreateAndOpenOutcome> {
+    let held_root = open_storage_root(&row.root_path, false).ok().filter(|held| file_identity(held) == Some(row.root_identity));
+    #[cfg(windows)]
+    let held_file = open_published_guard(&row.path, Some(row.file_identity.0)).filter(|file| file_identity(file) == Some(row.file_identity));
+    #[cfg(not(windows))]
+    let held_file = std::fs::File::open(&row.path).ok().filter(|file| file_identity(file) == Some(row.file_identity));
+    let same_original = || {
+        if held_root.is_none() || held_file.is_none() || !root_matches(&row.root_path, row.root_identity, &row.root_resolved) { return false; }
+        let Ok(metadata) = std::fs::symlink_metadata(&row.path) else { return false; };
+        if !metadata.file_type().is_file() || is_reparse(&metadata) { return false; }
+        #[cfg(windows)]
+        {
+            let Some(file) = open_published_guard(&row.path, Some(row.file_identity.0)) else { return false; };
+            file_identity(&file) == Some(row.file_identity)
+                && crate::file_operations::final_path_for_handle_verbatim(&file).ok().as_ref() == Some(&row.resolved_path)
+        }
+        #[cfg(not(windows))]
+        { std::fs::File::open(&row.path).ok().is_some_and(|file| file_identity(&file) == Some(row.file_identity)) }
+    };
+    if !current() { return Ok(CreateAndOpenOutcome::Published { path: row.path.clone(), reason: PublishedReason::Superseded }); }
+    if !same_original() { return Ok(CreateAndOpenOutcome::Published { path: row.path.clone(), reason: PublishedReason::Changed }); }
+    #[cfg(windows)]
+    let shell_path = shell_path_from_resolved(&row.resolved_path);
+    #[cfg(not(windows))]
+    let shell_path = row.path.clone();
+    let reason = std::cell::Cell::new(None);
+    let result = launch(&shell_path, &|| {
+        if !current() { reason.set(Some(PublishedReason::Superseded)); return false; }
+        if !same_original() { reason.set(Some(PublishedReason::Changed)); return false; }
+        #[cfg(windows)]
+        if open_published_guard(&shell_path, Some(row.file_identity.0)).is_none_or(|file| file_identity(&file) != Some(row.file_identity)) {
+            reason.set(Some(PublishedReason::Changed)); return false;
+        }
+        if !current() { reason.set(Some(PublishedReason::Superseded)); return false; }
+        true
+    });
+    Ok(match result {
+        Ok(()) => CreateAndOpenOutcome::Opened(row.path.clone()),
+        Err(_) => CreateAndOpenOutcome::Published { path: row.path.clone(), reason: reason.get().unwrap_or(PublishedReason::OpenFailed) },
+    })
+}
 
 /// Publication succeeds independently from the operating-system association.
 pub enum CreateAndOpenOutcome {
@@ -113,14 +303,6 @@ fn same_published_file(original: &std::fs::File, path: &Path) -> bool {
     same_file_identity(original, &current)
 }
 
-#[cfg(windows)]
-fn same_file_identity(original: &std::fs::File, current: &std::fs::File) -> bool {
-    match (crate::file_operations::native_file_identity(original), crate::file_operations::native_file_identity(current)) {
-        (Ok(first), Ok(second)) => first == second,
-        _ => false,
-    }
-}
-
 #[cfg(unix)]
 fn same_file_identity(original: &std::fs::File, current: &std::fs::File) -> bool {
     use std::os::unix::fs::MetadataExt;
@@ -175,6 +357,94 @@ pub fn set_alias(path: &str, alias: &str) -> anyhow::Result<()> {
 mod checked_creation_tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn listed_files_match_stock_unicode_without_creating_missing_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing");
+        assert!(list_checked_in(&missing, "tmp list", || true).unwrap().is_empty());
+        assert!(!missing.exists());
+        std::fs::write(root.path().join("Café.txt"), b"one").unwrap();
+        std::fs::write(root.path().join("other.md"), b"two").unwrap();
+        std::fs::create_dir(root.path().join("dir.txt")).unwrap();
+        let rows = list_checked_in(root.path(), "TMP LIST CAFÉ", || true).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, crate::plugins::tempfile::list_action(&root.path().join("Café.txt")));
+        assert!(list_checked_in(root.path(), "tmp list", || false).is_err());
+    }
+
+    #[test]
+    fn listed_file_association_checks_exact_identity_and_current_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owned.txt");
+        std::fs::write(&path, b"original").unwrap();
+        let row = list_checked_in(root.path(), "tmp list", || true).unwrap().remove(0);
+        let calls = std::cell::Cell::new(0);
+        let outcome = open_listed_with(&row, &|| true, |_, guard| {
+            calls.set(calls.get() + 1);
+            assert!(guard());
+            Ok(())
+        }).unwrap();
+        assert!(matches!(outcome, CreateAndOpenOutcome::Opened(_)));
+        assert_eq!(calls.get(), 1);
+        let active = std::cell::Cell::new(true);
+        let outcome = open_listed_with(&row, &|| active.get(), |_, guard| {
+            active.set(false);
+            assert!(!guard());
+            anyhow::bail!("revoked during association")
+        }).unwrap();
+        assert!(matches!(outcome, CreateAndOpenOutcome::Published { reason: PublishedReason::Superseded, .. }));
+        let moved = root.path().join("moved.txt");
+        std::fs::rename(&path, moved).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        let outcome = open_listed_with(&row, &|| true, |_, _| panic!("replacement must not launch")).unwrap();
+        assert!(matches!(outcome, CreateAndOpenOutcome::Published { reason: PublishedReason::Changed, .. }));
+        let outcome = open_listed_with(&row, &|| false, |_, _| panic!("revoked request must not launch")).unwrap();
+        assert!(matches!(outcome, CreateAndOpenOutcome::Published { reason: PublishedReason::Superseded, .. }));
+    }
+
+    #[test]
+    fn listed_file_rejects_replaced_storage_root() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("storage");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("owned.txt"), b"original").unwrap();
+        let row = list_checked_in(&root, "tmp list", || true).unwrap().remove(0);
+        std::fs::rename(&root, base.path().join("moved")).unwrap();
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("owned.txt"), b"replacement").unwrap();
+        let outcome = open_listed_with(&row, &|| true, |_, _| panic!("replacement root must not launch")).unwrap();
+        assert!(matches!(outcome, CreateAndOpenOutcome::Published { reason: PublishedReason::Changed, .. }));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn listed_association_pins_root_only_until_callback_settles() {
+        let base = tempfile::tempdir().unwrap();
+        let root = base.path().join("storage");
+        let moved = base.path().join("moved");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("owned.txt"), b"original").unwrap();
+        let row = list_checked_in(&root, "tmp list", || true).unwrap().remove(0);
+        let outcome = open_listed_with(&row, &|| true, |_, guard| {
+            assert!(guard());
+            assert!(std::fs::rename(&root, &moved).is_err());
+            Ok(())
+        }).unwrap();
+        assert!(matches!(outcome, CreateAndOpenOutcome::Opened(_)));
+        std::fs::rename(&root, &moved).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn listed_files_exclude_symbolic_links() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("owned.txt"), b"data").unwrap();
+        std::os::unix::fs::symlink(root.path().join("owned.txt"), root.path().join("alias.txt")).unwrap();
+        let rows = list_checked_in(root.path(), "tmp list", || true).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action.label, "owned.txt");
+    }
 
     fn owned_file(root: &Path) -> crate::plugins::tempfile::CreatedTempFile {
         let path = root.join("owned.txt");

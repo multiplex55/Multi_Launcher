@@ -9761,6 +9761,11 @@ pub(crate) fn native_file_identity(file: &std::fs::File) -> std::io::Result<Nati
 
 #[cfg(windows)]
 pub(crate) fn final_path_for_handle(file: &std::fs::File) -> std::io::Result<PathBuf> {
+    final_path_for_handle_verbatim(file).map(|path| strip_extended_prefix(path.into_os_string()))
+}
+
+#[cfg(windows)]
+pub(crate) fn final_path_for_handle_verbatim(file: &std::fs::File) -> std::io::Result<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
@@ -9786,7 +9791,7 @@ pub(crate) fn final_path_for_handle(file: &std::fs::File) -> std::io::Result<Pat
         }
         if length < buffer.len() {
             buffer.truncate(length);
-            return Ok(strip_extended_prefix(OsString::from_wide(&buffer)));
+            return Ok(PathBuf::from(OsString::from_wide(&buffer)));
         }
         if length > batch_rename::MAX_WINDOWS_PATH_UTF16_UNITS_WITH_NUL {
             return Err(std::io::Error::new(

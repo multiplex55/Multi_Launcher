@@ -52,6 +52,7 @@ mod snippets;
 mod snippet_fill;
 mod clipboard_modify_view;
 mod tempfile_view;
+mod tempfile_search;
 mod clipboard_modify_startup;
 mod regex_history;
 mod regex_presets;
@@ -601,7 +602,7 @@ impl LauncherSearchCatalog {
                 let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || calculation_pad_result || note_source.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || provider == "tempfile" || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || calculation_pad_result || note_source.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -2483,6 +2484,7 @@ struct RootWindow {
     clipboard_history: Option<Entity<clipboard_history::ClipboardHistory>>,
     snippets_view: Option<Entity<snippets::SnippetsView>>,
     tempfile_view: Option<Entity<tempfile_view::TempfileView>>,
+    tempfile_search: tempfile_search::Owner,
     snippet_fill: Option<Entity<snippet_fill::SnippetFill>>,
     pane_escape_latched: bool,
     pane_enter_latched: bool,
@@ -6212,6 +6214,7 @@ impl RootWindow {
         self.snippets_search.wake.close();
         self.window_search.retire();
         self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
+        self.tempfile_search.retire();
         self.note_open_epoch.fetch_add(1, Ordering::AcqRel);
         self.omni_search.retire(); self.search_catalog.providers.omni.install(None);
         self.indexed_applications.retire();
@@ -7147,6 +7150,7 @@ impl RootWindow {
         self.calculator_search.retire_history();
         self.window_search.retire();
         self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
+        self.tempfile_search.retire();
         if query.trim().is_empty() {
             self.publish_launcher_provider_results(query, Vec::new(), scroll_to_search);
             return;
@@ -7161,6 +7165,10 @@ impl RootWindow {
             .take_clipboard_modify_projection().map(|(effective, catalog)| (query.clone(), effective, catalog));
         self.snippets_search.projection = self.search_catalog.providers.take_snippets_projection()
             .map(|(effective, snapshot)| (query.clone(), effective, snapshot));
+        if tempfile_search::list_query(&query) && tempfile_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+            self.start_tempfile_search(query, raw_provider_actions, scroll_to_search, cx);
+            return;
+        }
         if file_search::typed_query(&query) && file_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
             self.start_file_search_probe(query, raw_provider_actions, scroll_to_search, cx);
             return;
@@ -7226,6 +7234,7 @@ impl RootWindow {
                     clipboard_history::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "tempfile" {
                     tempfile_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                        || self.tempfile_search.projected(&query, action)
                 } else if provider == "snippets" {
                     snippets::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                         || self.snippets_search.projection.as_ref().is_some_and(|(raw, _, snapshot)| {
@@ -8018,6 +8027,22 @@ impl RootWindow {
             return;
         };
         if !self.launcher_result_activation_is_live(origin, window, cx) {
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "tempfile")
+            && tempfile_search::list_query(&query) {
+            if !tempfile_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
+                || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
+            let Some((row, catalog)) = self.tempfile_search.receipt(generation, &query, &result.action) else { return; };
+            let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+            let guard = external_launch::OmniGuard {
+                catalog, lease: Arc::new(AtomicBool::new(true)), effect_entered: Arc::new(AtomicBool::new(false)),
+                visibility: self.root_visibility.clone(), revision: self.root_visibility.request_revision.load(Ordering::Acquire),
+                native, admission: self.restart_admission.clone(),
+            };
+            let command = multi_launcher::commands::ExternalCommand { target: result.action.action.clone(), args: None, namespace: None };
+            self.start_omni_launch(result.action, command, external_launch::OmniTarget::Tempfile(row), guard, query, source, window, cx);
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Omni(_)) {
@@ -10506,6 +10531,7 @@ impl RootWindow {
         if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         self.window_search.retire();
         self.file_search_popup_intent.store(false, Ordering::Release); self.file_search_probe.retire();
+        self.tempfile_search.retire();
         self.note_open_epoch.fetch_add(1, Ordering::AcqRel);
         self.omni_search.retire(); self.search_catalog.providers.omni.install(None);
         self.indexed_applications.retire();
@@ -11133,6 +11159,16 @@ impl Render for RootWindow {
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .id("launcher-search-error")
+                    .text_color(appearance::to_hsla(palette.error))
+                    .text_size(px(metrics.small_text_size))
+                    .line_height(px(metrics.line_height))
+            }))
+            .children(self.tempfile_search.diagnostic().map(|error| {
+                Label::new(error.clone())
+                    .w_full()
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .id("launcher-tempfile-search-error")
                     .text_color(appearance::to_hsla(palette.error))
                     .text_size(px(metrics.small_text_size))
                     .line_height(px(metrics.line_height))
@@ -13414,6 +13450,7 @@ pub(crate) fn run_foundation_window(
                 clipboard_history: None,
                 snippets_view: None,
                 tempfile_view: None,
+                tempfile_search: tempfile_search::Owner::default(),
                 snippet_fill: None,
                 pane_escape_latched: false,
                 pane_enter_latched: false,
@@ -13859,7 +13896,7 @@ pub(crate) fn run_foundation_window(
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.retire_json_workspace(cx);
                             if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
-                            root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
+                            root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire(); root.tempfile_search.retire();
                             root.note_open_epoch.fetch_add(1, Ordering::AcqRel);
                             root.omni_search.retire(); root.search_catalog.providers.omni.install(None);
                             root.indexed_applications.retire();
@@ -13895,7 +13932,7 @@ pub(crate) fn run_foundation_window(
                             if let Some(view) = &root.file_search { view.read(cx).retire_explorer(); }
                             root.retire_json_workspace(cx);
                             if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
-                            root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
+                            root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire(); root.tempfile_search.retire();
                             root.note_open_epoch.fetch_add(1, Ordering::AcqRel);
                             root.omni_search.retire(); root.search_catalog.providers.omni.install(None);
                             root.indexed_applications.retire();
@@ -14459,6 +14496,8 @@ pub(crate) fn run_foundation_window(
                                     && window_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
                                     || (file_search::typed_query(&query)
                                         && file_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
+                                    || (tempfile_search::list_query(&query)
+                                        && tempfile_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()))
                                 {
                                     root.refresh_launcher_results_with_viewport(query, false, cx);
                                 }
@@ -14638,14 +14677,14 @@ pub(crate) fn run_foundation_window(
                                     root.retire_context_favorite();
                                     root.retire_search_jump_mode();
                                     root.cancel_docked_hash_preview();
-                                    root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
+                                    root.window_search.retire(); root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire(); root.tempfile_search.retire();
                                     if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { view.retire_inline_preview(cx); }); }
                                 },
                             );
                         } else {
                             let _ = root_view.update(&mut *cx, |root, cx| {
                                 root.window_search.retire();
-                                root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire();
+                                root.file_search_popup_intent.store(false, Ordering::Release); root.file_search_probe.retire(); root.tempfile_search.retire();
                                 if let Some(view) = root.file_search.clone() { view.update(cx, |view, cx| { view.retire_inline_preview(cx); }); }
                             });
                         }

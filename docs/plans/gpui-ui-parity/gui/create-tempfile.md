@@ -9,3 +9,7 @@ G13 owns `create-tempfile`. Bare `tmp` offers `tmp: create` and the dashboard Te
 | TEMPFILE-03 | Open the file association after a successful write. Successful open refreshes search, optionally toasts, closes and restores query focus. Write failure keeps the draft. Open failure reports the error and retains the file and draft. |
 
 Select `search_tmp_returns_dialog`, `create_named_file_rejects_invalid_alias`, `typed_simple_dialogs_preserve_interactive_lifecycle` and `long_text_scrolls_above_reachable_footer_without_render_mutation`. `G13-EGUI-SNIPPET-TEMPFILE-DRAFTS` covers native bare route, multiline Unicode draft, Cancel and blank reopen in an explicit empty scratch `ML_TMP_DIR`. The [GPUI checkpoint](../CHECKPOINTS.md#g13-checked-create-temp-file) records tested Windows publication and fake association. Matched native association, dashboard invocation and resize persistence remain open.
+
+## Listing and opening temporary text files
+
+Stock `tmp list [filter]` shows the current ordinary text files from the configured store. The exact result uses checked Windows association through the existing external-effect owner. Create refreshes the list when the relevant query still owns the launcher. Matched native association and the wider management and alias routes remain open. [List and Open checkpoint](../CHECKPOINTS.md#p016-checked-temporary-file-list-and-open)

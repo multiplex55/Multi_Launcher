@@ -218,6 +218,19 @@ pub fn list_files() -> anyhow::Result<Vec<PathBuf>> {
 
 pub struct TempfilePlugin;
 
+/// Stock list filter, shared with frontends that must scan off the UI thread.
+pub fn list_filter(query: &str) -> Option<String> {
+    crate::common::strip_prefix_ci(query.trim(), "tmp list")
+        .map(|rest| rest.trim().to_lowercase())
+}
+
+/// Construct the exact stock list action from its raw path.
+pub fn list_action(path: &Path) -> Action {
+    let name = path.file_name().map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned());
+    Action { label: name, desc: "Tempfile".into(), action: path.to_string_lossy().into(), args: None }
+}
+
 impl Plugin for TempfilePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
@@ -328,9 +341,7 @@ impl Plugin for TempfilePlugin {
                 }
             }
         }
-        const LIST_PREFIX: &str = "tmp list";
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, LIST_PREFIX) {
-            let filter = rest.trim().to_lowercase();
+        if let Some(filter) = list_filter(trimmed) {
             let files = list_files().unwrap_or_default();
             return files
                 .into_iter()
@@ -341,18 +352,7 @@ impl Plugin for TempfilePlugin {
                             .map(|n| n.to_lowercase().contains(&filter))
                             .unwrap_or(false)
                 })
-                .map(|p| {
-                    let name = p
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| p.to_string_lossy().into_owned());
-                    Action {
-                        label: name,
-                        desc: "Tempfile".into(),
-                        action: p.to_string_lossy().into(),
-                        args: None,
-                    }
-                })
+                .map(|p| list_action(&p))
                 .collect();
         }
         Vec::new()
