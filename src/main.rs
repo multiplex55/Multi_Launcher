@@ -4881,6 +4881,7 @@ fn main() -> anyhow::Result<()> {
             #[cfg(windows)]
             app_data_root.clone(),
             gpui_frontend::ExternalLaunchPreferences {
+                preserve_command: settings.preserve_command,
                 clear_query_after_run: settings.clear_query_after_run,
                 hide_after_run: settings.hide_after_run,
                 history_limit: settings.history_limit,

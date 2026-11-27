@@ -280,6 +280,7 @@ pub(super) const CLOSE_STATUS: &str =
 
 #[derive(Clone)]
 pub(crate) struct Settings {
+    pub(crate) preserve_command: bool,
     pub(crate) clear_query_after_run: bool,
     pub(crate) hide_after_run: bool,
     pub(crate) history_limit: usize,
@@ -1831,36 +1832,34 @@ fn bookkeep(
     history: impl FnOnce(HistoryEntry, usize) -> Result<(), String>,
     usage: impl FnOnce(&str) -> Result<u32, String>,
 ) -> WorkerResult {
+    let query = match &request.command { RunCommand::ClipboardExecute { canonical, .. } => canonical.clone(), RunCommand::SnippetRun { history_query, .. } => history_query.clone(), _ => request.query.clone() };
+    let mut action = request.action.clone();
+    if let Some(label) = &request.history_label { action.label = label.clone(); }
+    bookkeep_action(outcome, action, query, request.source, request.settings.history_limit, history, usage)
+}
+
+fn bookkeep_action(
+    outcome: Result<CommandOutcome, CommandError>, action: Action, query: String, source: ActivationSource,
+    limit: usize, history: impl FnOnce(HistoryEntry, usize) -> Result<(), String>,
+    usage: impl FnOnce(&str) -> Result<u32, String>,
+) -> WorkerResult {
     let mut history_error = None;
     let mut usage_result = None;
-    if outcome
-        .as_ref()
-        .is_ok_and(|outcome| outcome.history == HistoryPolicy::Record)
-    {
-        history_error = history(
-            HistoryEntry {
-                query: match &request.command { RunCommand::ClipboardExecute { canonical, .. } => canonical.clone(), RunCommand::SnippetRun { history_query, .. } => history_query.clone(), _ => request.query.clone() },
-                query_lc: String::new(),
-                action: {
-                    let mut action = request.action.clone();
-                    if let Some(label) = &request.history_label {
-                        action.label = label.clone();
-                    }
-                    action
-                },
-                source: Some(request.source.label().to_owned()),
-                timestamp: 0,
-            },
-            request.settings.history_limit,
-        )
-        .err();
-        usage_result = Some(usage(&request.action.action));
+    if outcome.as_ref().is_ok_and(|outcome| outcome.history == HistoryPolicy::Record) {
+        let usage_key = action.action.clone();
+        history_error = history(HistoryEntry { query, query_lc: String::new(), action,
+            source: Some(source.label().to_owned()), timestamp: 0 }, limit).err();
+        usage_result = Some(usage(&usage_key));
     }
-    WorkerResult {
-        outcome,
-        history_error,
-        usage_result,
-    }
+    WorkerResult { outcome, history_error, usage_result }
+}
+
+pub(super) fn bookkeep_folder(outcome: Result<CommandOutcome, CommandError>, action: Action,
+    query: String, source: ActivationSource, limit: usize) -> WorkerResult {
+    bookkeep_action(outcome, action, query, source, limit,
+        |entry, limit| multi_launcher::history::append_history(entry, limit).map_err(|error| error.to_string()),
+        |key| multi_launcher::usage::record_usage(multi_launcher::usage::USAGE_FILE, key).map_err(|error| error.to_string()))
+
 }
 
 #[cfg(test)]
@@ -1898,7 +1897,7 @@ mod tests {
                 current: Arc::new(|| true), lease: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             },
             query: "CM UPPERCASE -id:other".into(), source: ActivationSource::Click,
-            settings: Settings { clear_query_after_run: false, hide_after_run: false, history_limit: 10, enable_toasts: true, show_error_toasts: true, show_inline_errors: true, toast_duration: 1.0, clipboard_modify_hide_after_apply: true },
+            settings: Settings { preserve_command: false, clear_query_after_run: false, hide_after_run: false, history_limit: 10, enable_toasts: true, show_error_toasts: true, show_inline_errors: true, toast_duration: 1.0, clipboard_modify_hide_after_apply: true },
         };
         let hidden = clipboard_execute_outcome(Ok(true), &action.label, true).unwrap();
         assert_eq!(hidden.query, QueryPolicy::Keep);
@@ -1925,7 +1924,7 @@ mod tests {
             history_label: None,
             command: RunCommand::ClipboardUndo(Arc::new(|| true), Arc::new(std::sync::atomic::AtomicBool::new(true))),
             query: "cm undo".into(), source: ActivationSource::Enter,
-            settings: Settings { clear_query_after_run: true, hide_after_run: false, history_limit: 10, enable_toasts: true, show_error_toasts: true, show_inline_errors: true, toast_duration: 1.0, clipboard_modify_hide_after_apply: true },
+            settings: Settings { preserve_command: false, clear_query_after_run: true, hide_after_run: false, history_limit: 10, enable_toasts: true, show_error_toasts: true, show_inline_errors: true, toast_duration: 1.0, clipboard_modify_hide_after_apply: true },
         };
         let outcome = clipboard_undo_outcome(Ok(true)).unwrap();
         assert_eq!(outcome.query, QueryPolicy::Keep);
@@ -1971,6 +1970,7 @@ mod tests {
             .remove(0);
         let text = super::super::base_convert_search::classify("base_convert", &action).unwrap();
         let settings = Settings {
+            preserve_command: false,
             clear_query_after_run: false,
             hide_after_run: false,
             history_limit: 10,
@@ -2015,6 +2015,7 @@ mod tests {
     fn date_copy_uses_exact_published_text_and_diagnostics_never_copy() {
         use crate::gpui_frontend::date_search::{DateRoute, classify};
         let settings = Settings {
+            preserve_command: false,
             clear_query_after_run: false,
             hide_after_run: false,
             history_limit: 10,
@@ -2478,7 +2479,8 @@ mod tests {
             query: "tool".into(),
             source: ActivationSource::Enter,
             settings: Settings {
-                clear_query_after_run: false,
+                preserve_command: false,
+            clear_query_after_run: false,
                 hide_after_run: false,
                 history_limit: 10,
                 enable_toasts: false,
@@ -2566,7 +2568,8 @@ mod tests {
             query: " \t".into(),
             source: ActivationSource::Click,
             settings: Settings {
-                clear_query_after_run: false, hide_after_run: false, history_limit: 10,
+                preserve_command: false,
+            clear_query_after_run: false, hide_after_run: false, history_limit: 10,
                 enable_toasts: true, show_error_toasts: true, show_inline_errors: true,
                 toast_duration: 2.0, clipboard_modify_hide_after_apply: true,
             },
@@ -2604,7 +2607,8 @@ mod tests {
             query: "tool".into(),
             source: ActivationSource::Click,
             settings: Settings {
-                clear_query_after_run: false,
+                preserve_command: false,
+            clear_query_after_run: false,
                 hide_after_run: false,
                 history_limit: 10,
                 enable_toasts: true,

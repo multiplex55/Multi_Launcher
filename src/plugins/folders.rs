@@ -282,6 +282,104 @@ pub fn append_folder(path: &str, folder: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Read the unique complete record represented by a current folder Search row.
+/// Ambiguous legacy rows cannot authorize a mutation.
+pub fn checked_folder_search_entry(path: &str, action: &Action, removing: bool) -> anyhow::Result<FolderEntry> {
+    let entries = load_folders(path)?;
+    let mut matches = entries.iter().filter(|entry| {
+        let expected = if removing {
+            Action { label: format!("Remove folder {} ({})", entry.label, entry.path), desc: entry.path.clone(),
+                action: format!("folder:remove:{}", entry.path), args: None }
+        } else {
+            let (label, desc, target) = folder_search_row(entry);
+            Action { label: label.to_owned(), desc: desc.to_owned(), action: target.to_owned(), args: None }
+        };
+        expected == *action
+    });
+    let entry = matches.next().ok_or_else(|| anyhow::anyhow!("Folder result is stale; refresh Search."))?;
+    if matches.next().is_some() { anyhow::bail!("Folder result is ambiguous; resolve duplicate entries first."); }
+    if entries.iter().filter(|other| other.path == entry.path).count() != 1 {
+        anyhow::bail!("Folder path is ambiguous; resolve duplicate entries first.");
+    }
+    Ok(entry.clone())
+}
+
+fn checked_folder_mutate(
+    path: &str,
+    current: impl Fn() -> bool,
+    prepublish: impl Fn() -> bool,
+    mutate: impl FnOnce(&mut Vec<FolderEntry>) -> anyhow::Result<bool>,
+) -> anyhow::Result<Vec<FolderEntry>> {
+    use std::cell::Cell;
+    use std::io::ErrorKind;
+    let path = Path::new(path);
+    let _permit = crate::common::repair_watch::require_path_read(path)?;
+    let _transaction = folders_transaction_guard();
+    let read = || -> std::io::Result<Option<Vec<u8>>> {
+        match std::fs::read(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    };
+    anyhow::ensure!(current(), "Folder operation was superseded.");
+    let observed = read()?;
+    let mut entries = match observed.as_deref() {
+        None => default_folders(),
+        Some(bytes) if bytes.iter().all(u8::is_ascii_whitespace) => default_folders(),
+        Some(bytes) => serde_json::from_slice::<Vec<FolderEntry>>(bytes)?,
+    };
+    if !mutate(&mut entries)? {
+        anyhow::ensure!(current() && read()? == observed && current(), "Folder store changed or the operation was superseded; refresh and retry.");
+        anyhow::ensure!(prepublish(), "Folder is no longer a directory; choose it again.");
+        return Ok(entries);
+    }
+    let bytes = serde_json::to_vec_pretty(&entries)?;
+    let rejected = Cell::new(None);
+    let result = crate::common::atomic_file::save_atomic_if(path, &bytes, || {
+        if !current() || !read().is_ok_and(|latest| latest == observed) || !current() {
+            rejected.set(Some("Folder store changed or the operation was superseded; refresh and retry.")); return false;
+        }
+        if !prepublish() { rejected.set(Some("Folder is no longer a directory; choose it again.")); return false; }
+        if !current() { rejected.set(Some("Folder operation was superseded.")); return false; }
+        true
+    });
+    if let Some(reason) = rejected.get() { anyhow::bail!(reason); }
+    result?;
+    LIVE_FOLDERS.publish(path.to_string_lossy().as_ref(), &entries);
+    bump_folders_version();
+    Ok(entries)
+}
+
+/// A checked folder record mutation.
+pub enum CheckedFolderMutation { SetAlias(String), Remove }
+
+/// Atomically mutate one unchanged, unambiguous canonical folder record.
+pub fn checked_folder_update(path: &str, expected: &FolderEntry, mutation: CheckedFolderMutation, current: impl Fn() -> bool) -> anyhow::Result<Vec<FolderEntry>> {
+    let expected = expected.clone();
+    checked_folder_mutate(path, current, || true, move |entries| {
+        let mut matching = entries.iter().enumerate().filter(|(_, entry)| entry.path == expected.path);
+        let (index, entry) = matching.next().ok_or_else(|| anyhow::anyhow!("Folder was removed; refresh Search."))?;
+        if matching.next().is_some() || *entry != expected { anyhow::bail!("Folder changed or is ambiguous; refresh Search."); }
+        let alias = match mutation { CheckedFolderMutation::Remove => { entries.remove(index); return Ok(true); }, CheckedFolderMutation::SetAlias(alias) => alias };
+        let replacement = (!alias.is_empty()).then_some(alias);
+        if entries[index].alias == replacement { return Ok(false); }
+        entries[index].alias = replacement; Ok(true)
+    })
+}
+
+/// Add a real directory without silently accepting a stale non-directory target.
+pub fn checked_add_folder(path: &str, folder: &str, current: impl Fn() -> bool) -> anyhow::Result<Vec<FolderEntry>> {
+    let folder = folder.to_owned();
+    let publish_folder = folder.clone();
+    checked_folder_mutate(path, current, || Path::new(&publish_folder).is_dir(), move |entries| {
+        if !Path::new(&folder).is_dir() { anyhow::bail!("Folder does not exist or is not a directory: {folder}"); }
+        if entries.iter().any(|entry| entry.path == folder) { return Ok(false); }
+        let label = Path::new(&folder).file_name().and_then(|name| name.to_str()).unwrap_or(&folder).to_owned();
+        entries.push(FolderEntry { label, path: folder, alias: None }); Ok(true)
+    })
+}
+
 /// Remove a folder entry matching `folder` from the file at `path`.
 pub fn remove_folder(path: &str, folder: &str) -> anyhow::Result<()> {
     let folder = folder.to_owned();
@@ -409,6 +507,7 @@ enum FolderQuery<'a> {
 }
 
 fn parse_folder_query(query: &str) -> FolderQuery<'_> {
+    if query.trim().eq_ignore_ascii_case("f rm") { return FolderQuery::Remove(""); }
     if let Some(rest) = crate::common::strip_prefix_ci(query, "f add ") {
         let path = rest.trim();
         if !path.is_empty() {
@@ -603,6 +702,59 @@ mod tests {
             path: path.into(),
             alias: alias.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn checked_authoring_requires_exact_unique_current_record() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("folders.json"); let store = store.to_str().unwrap();
+        let target = dir.path().join("owned"); std::fs::create_dir(&target).unwrap();
+        let path = target.to_str().unwrap();
+        checked_add_folder(store, path, || true).unwrap();
+        let entries = load_folders(store).unwrap();
+        let entry = entries.iter().find(|entry| entry.path == path).unwrap().clone();
+        let row = query_folder_entries("f rm", std::slice::from_ref(&entry)).remove(0);
+        assert_eq!(checked_folder_search_entry(store, &row, true).unwrap(), entry);
+        checked_folder_update(store, &entry, CheckedFolderMutation::SetAlias("alias".into()), || true).unwrap();
+        let committed = std::fs::read(store).unwrap();
+        assert!(checked_folder_update(store, &entry, CheckedFolderMutation::Remove, || true).is_err());
+        assert_eq!(std::fs::read(store).unwrap(), committed);
+        let current = load_folders(store).unwrap().into_iter().find(|row| row.path == path).unwrap();
+        update_folders(store, |rows| { rows.push(current.clone()); Ok(true) }).unwrap();
+        let duplicate = std::fs::read(store).unwrap();
+        assert!(checked_folder_update(store, &current, CheckedFolderMutation::Remove, || true).is_err());
+        assert_eq!(std::fs::read(store).unwrap(), duplicate);
+        update_folders(store, |rows| { rows.pop(); Ok(true) }).unwrap();
+        checked_folder_update(store, &current, CheckedFolderMutation::Remove, || true).unwrap();
+        assert!(!load_folders(store).unwrap().iter().any(|row| row.path == path));
+        assert!(target.is_dir());
+        assert!(checked_add_folder(store, store, || true).is_err());
+    }
+
+    #[test]
+    fn checked_authoring_rejects_external_change_at_commit() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("folders.json"); let store = path.to_str().unwrap();
+        let entry = folder("One", "fixture", None);
+        save_folders(store, &[entry.clone()]).unwrap();
+        let replacement = serde_json::to_vec_pretty(&vec![folder("External", "other", None)]).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let result = checked_folder_update(store, &entry, CheckedFolderMutation::Remove, || {
+            let next = calls.get() + 1; calls.set(next);
+            if next == 2 { std::fs::write(&path, &replacement).unwrap(); }
+            true
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
+    }
+
+    #[test]
+    fn bare_remove_routes_without_stealing_similar_folder_queries() {
+        let entries = vec![folder("rmfoo", "owned", None)];
+        assert!(query_folder_entries("f rm", &entries)[0].action.starts_with("folder:remove:"));
+        assert_eq!(query_folder_entries("f rmfoo", &entries)[0].action, "owned");
     }
 
     #[test]

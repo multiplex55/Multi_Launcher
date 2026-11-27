@@ -34,6 +34,17 @@ pub fn normalize_outcome_for_root_policy(
 }
 
 impl CommandBus {
+    /// Complete a checked folder write without repeating its filesystem effect.
+    pub fn complete_checked_folder(&self, command: super::StorageCommand, action: &Action,
+        source: ActivationSource, preserve_command: bool, preferences: LauncherRunPreferences,
+        result: anyhow::Result<()>) -> Result<CommandOutcome, CommandError> {
+        if !matches!(command, super::StorageCommand::FolderAdd(_) | super::StorageCommand::FolderRemove(_)) {
+            return Err(CommandError::new("launcher", "Invalid checked folder command"));
+        }
+        let invocation = CommandInvocation { command: Command::Storage(command), original_action: action.clone(), query_override: None, source };
+        super::handlers::checked_folder_outcome(&invocation, preserve_command, preferences, result)
+    }
+
     /// Apply the normal alias-only launcher policy to a completed checked snippet write.
     pub fn complete_checked_snippet_run(
         &self,
@@ -239,6 +250,21 @@ impl CommandBus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_folder_completion_matches_stock_query_and_hide_policy() {
+        use super::{CommandBus, LauncherRunPreferences};
+        use crate::commands::{ActivationSource, HistoryPolicy, QueryPolicy, StorageCommand, VisibilityPolicy};
+        let action = crate::actions::Action { label: "Add folder".into(), desc: "Folder".into(), action: "folder:add:owned".into(), args: None };
+        let prefs = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: true };
+        let add = CommandBus.complete_checked_folder(StorageCommand::FolderAdd("owned".into()), &action, ActivationSource::Enter, true, prefs, Ok(())).unwrap();
+        assert_eq!(add.query, QueryPolicy::Set("f add ".into()));
+        assert_eq!(add.history, HistoryPolicy::Record); assert_eq!(add.visibility, VisibilityPolicy::Keep);
+        assert!(add.search && add.invalidate_results);
+        let remove = CommandBus.complete_checked_folder(StorageCommand::FolderRemove("owned".into()), &action, ActivationSource::Click, false, prefs, Ok(())).unwrap();
+        assert_eq!(remove.query, QueryPolicy::Set(String::new()));
+        assert_eq!(remove.history, HistoryPolicy::Record); assert_eq!(remove.visibility, VisibilityPolicy::Keep);
+    }
+
     use super::*;
     use crate::actions::Action;
     use crate::commands::{

@@ -177,10 +177,41 @@ fn handle_history_snippet_replay<H: HeadlessCommandHost + ?Sized>(
     .map(Some)
 }
 
+pub(crate) fn checked_folder_outcome(
+    invocation: &CommandInvocation,
+    preserve_command: bool,
+    preferences: super::super::LauncherRunPreferences,
+    result: anyhow::Result<()>,
+) -> Result<CommandOutcome, CommandError> {
+    let Some(outcome) = folder_success_outcome(invocation, preserve_command, preferences) else {
+        return Err(CommandError::new("launcher", "Invalid checked folder command"));
+    };
+    finish_execution(invocation, result, || outcome)
+}
+
+fn folder_success_outcome(invocation: &CommandInvocation, preserve_command: bool,
+    preferences: super::super::LauncherRunPreferences) -> Option<CommandOutcome> {
+    let mut outcome = initial_success_outcome(invocation);
+    let changed = match &invocation.command {
+        Command::Storage(StorageCommand::FolderAdd(_)) => {
+            outcome.query = QueryPolicy::Set(if preserve_command { "f add ".into() } else { String::new() });
+            outcome.search = true; outcome.invalidate_results = true; outcome.focus = true; true
+        }
+        Command::Storage(StorageCommand::FolderRemove(_)) => {
+            outcome.search = true; outcome.invalidate_results = true; outcome.focus = true; false
+        }
+        _ => return None,
+    };
+    Some(finish_success_with_preferences(preferences, invocation, outcome, changed))
+}
+
 pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
     host: &H,
     invocation: &CommandInvocation,
 ) -> CommandOutcome {
+    if let Some(outcome) = folder_success_outcome(invocation, host.preserve_command(), super::super::LauncherRunPreferences {
+        clear_query_after_run: host.clear_query_after_run(), hide_after_run: host.hide_after_run(), refocus: host.launcher_should_refocus(),
+    }) { return outcome; }
     let mut outcome = initial_success_outcome(invocation);
     let mut command_changed_query = false;
 
@@ -196,20 +227,8 @@ pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
             outcome.focus = true;
             command_changed_query = true;
         }
-        Command::Storage(StorageCommand::FolderAdd(_)) => {
-            outcome.query = QueryPolicy::Set(if host.preserve_command() {
-                "f add ".into()
-            } else {
-                String::new()
-            });
-            outcome.search = true;
-            outcome.invalidate_results = true;
-            outcome.focus = true;
-            command_changed_query = true;
-        }
         Command::Storage(
             StorageCommand::BookmarkRemove(_)
-            | StorageCommand::FolderRemove(_)
             | StorageCommand::SnippetRemove(_)
             | StorageCommand::FavoriteAdd { .. }
             | StorageCommand::FavoriteRemove(_)

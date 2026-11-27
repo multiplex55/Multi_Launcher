@@ -670,6 +670,7 @@ mod tests {
     #[test]
     fn live_actions_change_only_after_exact_acknowledgement() {
         let mut settings = super::external_launch::Settings {
+            preserve_command: false,
             clear_query_after_run: false,
             hide_after_run: false,
             history_limit: 10,

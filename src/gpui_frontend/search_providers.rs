@@ -380,6 +380,19 @@ impl InstalledLauncherProviders {
         )
     }
 
+    pub(super) fn folder_aliases(&self) -> Option<std::collections::HashMap<String, Option<String>>> {
+        let folder = self.folders.as_ref()?;
+        let rows = multi_launcher::plugin::Plugin::search(folder, "f list");
+        let targets = rows.iter().map(|row| row.action.as_str()).collect::<HashSet<_>>();
+        Some(folder.search_aliases_lc(&targets))
+    }
+
+    pub(super) fn folder_row_is_current(&self, query: &str, action: &Action, enabled: Option<&HashSet<String>>,
+        caps: Option<&std::collections::HashMap<String, Vec<String>>>) -> bool {
+        self.folders.as_ref().is_some_and(|provider| search_routed([provider as &dyn multi_launcher::plugin::Plugin], query, enabled, caps)
+            .iter().any(|(name, candidate)| name == "folders" && candidate == action))
+    }
+
     pub(super) fn aliased_folder_rows(&self) -> std::collections::HashMap<String, HashSet<String>> {
         self.folders
             .as_ref()
@@ -493,7 +506,7 @@ fn admitted_commands(provider: &dyn multi_launcher::plugin::Plugin) -> Vec<Actio
     supported_launcher_search_actions(provider.commands())
         .into_iter()
         .filter(|action| match provider.name() {
-            "folders" => matches!(action.action.as_str(), "query:f " | "query:f list "),
+            "folders" => matches!(action.action.as_str(), "query:f " | "query:f list " | "query:f add " | "query:f rm "),
             "bookmarks" => action.action == "query:bm list",
             _ => true,
         })
@@ -813,7 +826,7 @@ mod tests {
                 .iter()
                 .map(|a| a.label.as_str())
                 .collect::<Vec<_>>(),
-            vec!["f", "f list"]
+            vec!["f", "f list", "f add", "f rm"]
         );
         assert_eq!(
             admitted_commands(&bookmark)

@@ -172,6 +172,7 @@ impl RootWindow {
     }
 
     pub(super) fn open_action_sheet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.folder_authoring.revoke();
         if self.search_input_operation(window, cx).is_none()
             || self.action_sheet.is_some()
             || window.has_active_dialog(cx)
@@ -192,7 +193,7 @@ impl RootWindow {
         else {
             return;
         };
-        if matches!(&action.origin, LauncherResultOrigin::Provider(name) if super::external_launch::AssociationKind::from_provider_name(name).is_some())
+        if matches!(&action.origin, LauncherResultOrigin::Provider(name) if name != "folders" && super::external_launch::AssociationKind::from_provider_name(name).is_some())
         {
             return;
         }
@@ -225,6 +226,10 @@ impl RootWindow {
             UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite {
                 action: candidate,
             }) => candidate == action && context.can_add_favorite,
+            UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path }) =>
+                matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders") && *path == action.action,
+            UniversalActionOperation::Command { command: Command::Storage(StorageCommand::FolderRemove(path)), .. } =>
+                matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders") && *path == action.action,
             _ => false,
         });
         let choices = ActionSheetChoices::new(actions, &self.search_catalog.matcher);
@@ -493,6 +498,14 @@ impl RootWindow {
                         action,
                     }) if action == sheet.result.action => {
                         root.open_result_favorites(action, Some(sheet.return_focus), window, cx)
+                    }
+                    UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path })
+                        if path == sheet.result.action.action => {
+                        root.start_folder_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), false, source, window, cx);
+                    }
+                    UniversalActionOperation::Command { command: Command::Storage(StorageCommand::FolderRemove(path)), .. }
+                        if path == sheet.result.action.action => {
+                        root.start_folder_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, window, cx);
                     }
                     _ => {}
                 }
