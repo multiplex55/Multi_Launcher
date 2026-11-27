@@ -55,6 +55,8 @@ fn primary_allowed(
     candidate == &result.action
         && (parse_installed_search_invocation(candidate.clone(), ActivationSource::Enter).is_ok()
             || matches!(&result.origin, LauncherResultOrigin::Omni(source) if super::omni_search::supported_child(source, candidate))
+            || (matches!(&result.origin, LauncherResultOrigin::OmniNote { .. })
+                && super::omni_search::supported_child(&multi_launcher::plugins::omni_search::OmniSource::Note, candidate))
             || result.saved_external().is_some()
             || saved_shortcut
             || result.saved_document().is_some()

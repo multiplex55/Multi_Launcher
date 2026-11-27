@@ -231,6 +231,7 @@ enum LauncherResultOrigin {
     Saved,
     Indexed { generation: u64, index: usize },
     Omni(multi_launcher::plugins::omni_search::OmniSource),
+    OmniNote { version: u64, note: Arc<multi_launcher::plugins::note::Note> },
     Note { version: u64, note: Arc<multi_launcher::plugins::note::Note> },
     CachedCommand,
     Provider(String),
@@ -568,6 +569,9 @@ impl LauncherSearchCatalog {
             .filter_map(|(provider, action)| {
                 let omni_source = (provider == "omni_search")
                     .then(|| omni_projection.as_ref().and_then(|projection| projection.source_for(&action))).flatten();
+                let omni_note = (omni_source == Some(multi_launcher::plugins::omni_search::OmniSource::Note))
+                    .then(|| omni_projection.as_ref().and_then(|projection| projection.note_for(&action))).flatten();
+                if omni_source == Some(multi_launcher::plugins::omni_search::OmniSource::Note) && omni_note.is_none() { return None; }
                 let note_source = (provider == "notes").then(|| self.providers.note_source(&note_effective, &action)).flatten();
                 if provider == "omni_search" && omni_source.is_none() { return None; }
                 let date_result = date_search::classify(&provider, &action).is_some();
@@ -607,10 +611,16 @@ impl LauncherSearchCatalog {
                 } else {
                     0.0
                 };
-                let origin = omni_source.map(LauncherResultOrigin::Omni).or_else(|| note_source.map(|(version, note)| LauncherResultOrigin::Note { version, note })).unwrap_or(LauncherResultOrigin::Provider(provider));
+                let origin = omni_note.map(|(version, note)| LauncherResultOrigin::OmniNote { version, note })
+                    .or_else(|| omni_source.map(LauncherResultOrigin::Omni))
+                    .or_else(|| note_source.map(|(version, note)| LauncherResultOrigin::Note { version, note })).unwrap_or(LauncherResultOrigin::Provider(provider));
                 Some((action, score, origin))
             })
             .collect::<Vec<_>>();
+        scored_provider_actions.retain(|(_, _, origin)| match origin {
+            LauncherResultOrigin::OmniNote { version, .. } => *version == multi_launcher::plugins::note::note_version(),
+            _ => true,
+        });
         scored_provider_actions.extend(
             command_fallback
                 .scored_actions
@@ -7967,6 +7977,12 @@ impl RootWindow {
         }
         if matches!(&result.origin, LauncherResultOrigin::Omni(_)) {
             self.activate_omni(&result, query, source, window, cx);
+            return;
+        }
+        if let LauncherResultOrigin::OmniNote { version, note } = &result.origin {
+            self.open_checked_note(note.as_ref().clone(), *version, note_editor::OpenOrigin::Omni {
+                generation, index, query, action: result.action.clone(),
+            }, window, cx);
             return;
         }
         if let LauncherResultOrigin::Note { version, note } = &result.origin {

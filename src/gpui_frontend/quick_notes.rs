@@ -4,6 +4,18 @@ use multi_launcher::plugins::note::{self, Note, NotePlugin, QuickNoteDraft, Quic
 
 pub(super) const WAIT: &str = "Save or Cancel the Quick Notes draft before closing.";
 
+fn notes_owner_needed(direct: bool, omni_search: bool, include_notes: bool) -> bool {
+    direct || (omni_search && include_notes)
+}
+
+fn notes_wake_reprojects(query: &str, omni_allowed: bool) -> bool {
+    let effective = multi_launcher::common::query::split_action_filters(query).0;
+    let first = effective.split_whitespace().next().unwrap_or("");
+    first.eq_ignore_ascii_case("note")
+        || first.eq_ignore_ascii_case("notes")
+        || (omni_allowed && super::omni_search::is_omni_query(query))
+}
+
 pub(super) fn current_provider(
     query: &str,
     action: &Action,
@@ -690,11 +702,19 @@ impl Render for QuickNotesView {
 
 impl RootWindow {
     pub(super) fn start_notes_owner(&mut self, cx: &mut Context<Self>) {
-        if self
+        let direct = self
             .enabled_plugins
             .as_ref()
-            .is_some_and(|enabled| !enabled.contains("notes"))
-        {
+            .is_none_or(|enabled| enabled.contains("notes"));
+        let omni = self
+            .enabled_plugins
+            .as_ref()
+            .is_none_or(|enabled| enabled.contains("omni_search"));
+        if !notes_owner_needed(
+            direct,
+            omni,
+            self.search_catalog.providers.omni.settings().include_notes,
+        ) {
             return;
         }
         let owner = self.search_catalog.providers.notes_owner();
@@ -741,12 +761,18 @@ impl RootWindow {
                             view.update(cx, |view, cx| view.refresh(cx));
                         }
                         let query = root.query.read(cx).value().to_string();
-                        let effective =
-                            multi_launcher::common::query::split_action_filters(&query).0;
-                        let first = effective.split_whitespace().next().unwrap_or("");
-                        if first.eq_ignore_ascii_case("note") || first.eq_ignore_ascii_case("notes")
-                        {
-                            root.refresh_launcher_results_with_viewport(query, false, cx);
+                        let omni = super::omni_search::notes_enabled(
+                            root.enabled_plugins.as_ref(),
+                            root.enabled_capabilities.as_ref(),
+                            root.search_catalog.providers.omni.settings().include_notes,
+                        );
+                        if notes_wake_reprojects(&query, omni) {
+                            if !(omni
+                                && super::omni_search::is_omni_query(&query)
+                                && root.external_launch.defer_notes_wake_for_omni())
+                            {
+                                root.refresh_launcher_results_with_viewport(query, false, cx);
+                            }
                         }
                     })
                     .is_err()
@@ -862,7 +888,10 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{current_provider, draft_blocks, row_receipt_current};
+    use super::{
+        current_provider, draft_blocks, notes_owner_needed, notes_wake_reprojects,
+        row_receipt_current,
+    };
     use std::collections::{HashMap, HashSet};
 
     #[test]
@@ -894,6 +923,34 @@ mod tests {
         let mut forged = action;
         forged.args = Some("other".into());
         assert!(!current_provider("note", &forged, None, None));
+    }
+
+    #[test]
+    fn omni_notes_owner_and_wake_are_independent_of_direct_gate() {
+        assert!(notes_owner_needed(false, true, true));
+        let enabled = HashSet::from(["omni_search".to_owned()]);
+        let initially_disabled = HashMap::from([("omni_search".to_owned(), Vec::new())]);
+        assert!(!super::super::omni_search::notes_enabled(
+            Some(&enabled),
+            Some(&initially_disabled),
+            true
+        ));
+        assert!(notes_owner_needed(
+            false,
+            enabled.contains("omni_search"),
+            true
+        ));
+        assert!(super::super::omni_search::notes_enabled(
+            Some(&enabled),
+            None,
+            true
+        ));
+        assert!(!notes_owner_needed(false, true, false));
+        assert!(!notes_owner_needed(false, false, true));
+        assert!(notes_owner_needed(true, false, false));
+        assert!(notes_wake_reprojects("kind:omni o missing", true));
+        assert!(!notes_wake_reprojects("o missing", false));
+        assert!(!notes_wake_reprojects("= 2+2", true));
     }
 
     #[test]

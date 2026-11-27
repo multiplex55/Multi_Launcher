@@ -15,6 +15,16 @@ pub(super) fn is_omni_query(raw: &str) -> bool {
         .is_some_and(|head| head.eq_ignore_ascii_case("o"))
 }
 
+pub(super) fn notes_enabled(
+    enabled: Option<&HashSet<String>>,
+    capabilities: Option<&HashMap<String, Vec<String>>>,
+    include_notes: bool,
+) -> bool {
+    include_notes
+        && enabled.is_none_or(|enabled| enabled.contains("omni_search"))
+        && multi_launcher::settings::provider_search_capability_enabled(capabilities, "omni_search")
+}
+
 fn action_hash(action: &Action) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     action.label.hash(&mut hasher);
@@ -26,14 +36,35 @@ fn action_hash(action: &Action) -> u64 {
 pub(super) struct Projection {
     query: String,
     rows: HashMap<u64, Vec<OmniRow>>,
+    notes: Option<Arc<super::search_providers::NoteSnapshot>>,
 }
 impl Projection {
     pub fn source_for(&self, action: &Action) -> Option<OmniSource> {
-        self.rows
+        let source = self
+            .rows
             .get(&action_hash(action))?
             .iter()
             .find(|row| &row.action == action)
-            .map(|row| row.source.clone())
+            .map(|row| row.source.clone())?;
+        if source == OmniSource::Note && self.note_for(action).is_none() {
+            return None;
+        }
+        Some(source)
+    }
+    pub fn note_for(
+        &self,
+        action: &Action,
+    ) -> Option<(u64, Arc<multi_launcher::plugins::note::Note>)> {
+        let snapshot = self.notes.as_ref()?;
+        if snapshot.version != multi_launcher::plugins::note::note_version() {
+            return None;
+        }
+        let Command::Note(multi_launcher::commands::NoteCommand::Open { slug }) =
+            parse_action(action).ok()?
+        else {
+            return None;
+        };
+        Some((snapshot.version, snapshot.by_slug.get(&slug)?.clone()))
     }
 }
 
@@ -62,13 +93,21 @@ pub(super) fn supported_child(source: &OmniSource, action: &Action) -> bool {
                     }
                 }
         }),
-        OmniSource::Note | OmniSource::Todo | OmniSource::Calendar => false,
+        OmniSource::Note => matches!(
+            parse_action(action),
+            Ok(Command::Note(
+                multi_launcher::commands::NoteCommand::Open { .. }
+            ))
+        ),
+        OmniSource::Todo | OmniSource::Calendar => false,
     }
 }
 
 pub(super) struct Provider {
     folders: Option<Arc<multi_launcher::plugins::folders::FoldersPlugin>>,
     bookmarks: Option<Arc<multi_launcher::plugins::bookmarks::BookmarksPlugin>>,
+    notes: Arc<Mutex<Option<Arc<multi_launcher::plugins::note::NotePlugin>>>>,
+    note_snapshots: Arc<super::search_providers::NoteSnapshots>,
     settings: RwLock<OmniSearchSettings>,
     catalog: RwLock<Option<Arc<OmniAppCatalog>>>,
     projected: Mutex<Option<Arc<Projection>>>,
@@ -78,10 +117,14 @@ impl Provider {
     pub fn new(
         folders: Option<Arc<multi_launcher::plugins::folders::FoldersPlugin>>,
         bookmarks: Option<Arc<multi_launcher::plugins::bookmarks::BookmarksPlugin>>,
+        notes: Arc<Mutex<Option<Arc<multi_launcher::plugins::note::NotePlugin>>>>,
+        note_snapshots: Arc<super::search_providers::NoteSnapshots>,
     ) -> Self {
         Self {
             folders,
             bookmarks,
+            notes,
+            note_snapshots,
             settings: RwLock::new(OmniSearchSettings::default()),
             catalog: RwLock::new(None),
             projected: Mutex::new(None),
@@ -425,18 +468,29 @@ impl Plugin for Provider {
     fn search(&self, query: &str) -> Vec<Action> {
         let settings = self.settings();
         let catalog = self.catalog.read().ok().and_then(|value| value.clone());
-        let rows = project_omni(
+        let notes = if settings.include_notes {
+            self.notes.lock().ok().and_then(|owner| owner.clone())
+        } else {
+            None
+        };
+        let note_snapshot = notes.as_ref().and_then(|_| self.note_snapshots.current());
+        let mut rows = project_omni(
             query,
             &settings,
             &OmniSources {
                 folders: self.folders.as_deref().map(|owner| owner as &dyn Plugin),
                 bookmarks: self.bookmarks.as_deref().map(|owner| owner as &dyn Plugin),
                 apps: catalog.as_deref(),
-                notes: None,
+                notes: notes.as_deref().map(|owner| owner as &dyn Plugin),
                 todos: None,
                 calendar: None,
             },
         );
+        if note_snapshot.as_ref().is_none_or(|snapshot| {
+            snapshot.version != multi_launcher::plugins::note::note_version()
+        }) {
+            rows.retain(|row| row.source != OmniSource::Note);
+        }
         let actions = rows.iter().map(|row| row.action.clone()).collect();
         let mut indexed = HashMap::<u64, Vec<OmniRow>>::new();
         for row in rows {
@@ -449,6 +503,7 @@ impl Plugin for Provider {
             *projected = Some(Arc::new(Projection {
                 query: query.to_owned(),
                 rows: indexed,
+                notes: note_snapshot,
             }));
         }
         actions
@@ -463,28 +518,60 @@ mod tests {
     use multi_launcher::plugins::omni_search::{OmniAppCatalog, OmniSource};
     use std::{
         collections::{HashMap, HashSet},
-        sync::Arc,
+        sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn omni_note_gate_does_not_depend_on_direct_notes_search() {
+        let enabled = HashSet::from(["omni_search".to_owned()]);
+        let caps = HashMap::from([("notes".to_owned(), Vec::new())]);
+        assert!(super::notes_enabled(Some(&enabled), Some(&caps), true));
+        assert!(!super::notes_enabled(Some(&enabled), Some(&caps), false));
+        assert!(!super::notes_enabled(Some(&HashSet::new()), None, true));
+        let omni_disabled = HashMap::from([("omni_search".to_owned(), Vec::new())]);
+        assert!(!super::notes_enabled(
+            Some(&enabled),
+            Some(&omni_disabled),
+            true
+        ));
+    }
 
     #[cfg(windows)]
     #[test]
     fn app_child_accepts_indexed_and_saved_windows_shapes() {
-        let source = OmniSource::App { generation: 1, ordinal: 0 };
+        let source = OmniSource::App {
+            generation: 1,
+            ordinal: 0,
+        };
         let action = |path: &str| Action {
             label: "Target".into(),
             desc: path.into(),
             action: path.into(),
             args: None,
         };
-        assert!(super::supported_child(&source, &action(r"\\?\C:\Apps\Editor.exe")));
+        assert!(super::supported_child(
+            &source,
+            &action(r"\\?\C:\Apps\Editor.exe")
+        ));
         assert!(super::supported_child(&source, &action(r"C:\Data")));
-        assert!(super::supported_child(&source, &action(r"C:\Apps\Editor.lnk")));
-        assert!(!super::supported_child(&source, &action(r"\\.\C:\Apps\Editor.lnk")));
+        assert!(super::supported_child(
+            &source,
+            &action(r"C:\Apps\Editor.lnk")
+        ));
+        assert!(!super::supported_child(
+            &source,
+            &action(r"\\.\C:\Apps\Editor.lnk")
+        ));
     }
 
     #[test]
     fn projection_retains_exact_action_and_current_catalog_generation() {
-        let provider = Provider::new(None, None);
+        let provider = Provider::new(
+            None,
+            None,
+            Arc::new(Mutex::new(None)),
+            Arc::new(super::super::search_providers::NoteSnapshots::default()),
+        );
         let action = Action {
             label: "Editor".into(),
             desc: "App".into(),
@@ -515,7 +602,12 @@ mod tests {
 
     #[test]
     fn omni_routing_obeys_its_own_search_capability() {
-        let provider = Provider::new(None, None);
+        let provider = Provider::new(
+            None,
+            None,
+            Arc::new(Mutex::new(None)),
+            Arc::new(super::super::search_providers::NoteSnapshots::default()),
+        );
         provider.install(Some(Arc::new(
             OmniAppCatalog::build(
                 Arc::new(vec![Action {
@@ -560,7 +652,12 @@ mod tests {
             action: "alpha.exe".into(),
             args: None,
         };
-        let provider = Provider::new(None, None);
+        let provider = Provider::new(
+            None,
+            None,
+            Arc::new(Mutex::new(None)),
+            Arc::new(super::super::search_providers::NoteSnapshots::default()),
+        );
         provider.install(Some(Arc::new(
             OmniAppCatalog::build(Arc::new(vec![action.clone()]), 1, || true).unwrap(),
         )));

@@ -1824,3 +1824,11 @@ The stock Notes `list`, `open` and `search` routes and the separate Quick Notes 
 The locked shared library check passed in 28.24 s. The first combined check found an incorrect unit return in the Quick Notes snapshot task. The corrected library, launcher and two Notes integration targets passed in 9.70 s. The focus-only launcher check passed in 32.43 s. Independent review cleared canonical identity, newer Open ownership, terminal Discard, saved revision wakes and mounted editor/preview focus. One grouped locked `fast-dev` link covered the library, launcher, `notes_plugin` and `note_panel_auto_save` in 14 min 19 s. Nextest run `33d77f5c-c7bd-408e-a187-db486e67e712` passed 15/15 in 6.446 s.
 
 P0.09 remains Stage 2. Matched 1516 × 937 replay still needs body-only Search, Quick Notes Open, mode focus, exact save and egui readback, dirty Keep/Discard/Save, same-note reuse and external-conflict refusal. Omni Notes admission can now reuse the checked Open boundary before MultiManager.
+
+### P0.06 checked Omni Notes
+
+Omni now includes stock existing-note results and opens the checked Note Editor, even when the dedicated Notes Search route is disabled. It reuses the one background Notes owner and a versioned source snapshot, preserves Omni source order and scoring, and refuses old Note rows after source revision changes. A Notes wake can refresh an active empty Omni query. It waits for an unrelated pending Omni external launch to settle before updating the rows. Direct Notes Search keeps its own capability gate.
+
+Independent review cleared exact published source, live capability admission and wake retirement. Locked launcher checks passed in 10.03 s and 4.62 s. The launcher-only link took 24.88 s. Nextest run `ee050d42-b39c-4c8f-bfda-5f317ff05452` passed 13/13 in 6.570 s. Reused linked shared Notes and Omni tests passed 5/5 in 1.134 s under `c2431548-377a-41bc-99ee-c76d0ed64980`.
+
+Stage 2. Paired 1516 × 937 replay remains open for Notes-only Omni, checked open after a watched source edit, same-note draft retention and stock result comparison. Todo, Calendar and the category editor remain open. Continue P0.10 MultiManager.

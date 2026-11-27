@@ -14,6 +14,12 @@ pub(super) enum OpenOrigin {
         query: String,
         action: Action,
     },
+    Omni {
+        generation: u64,
+        index: usize,
+        query: String,
+        action: Action,
+    },
     Quick {
         mount: utility_mount::MountReceipt,
         version: u64,
@@ -689,6 +695,37 @@ impl Render for NoteEditor {
 }
 
 impl RootWindow {
+    fn note_origin_enabled(&self, origin: &OpenOrigin, expected: &Note, version: u64) -> bool {
+        match origin {
+            OpenOrigin::Omni { query, action, .. } => {
+                super::omni_search::notes_enabled(
+                    self.enabled_plugins.as_ref(),
+                    self.enabled_capabilities.as_ref(),
+                    self.search_catalog.providers.omni.settings().include_notes,
+                ) && self
+                    .search_catalog
+                    .providers
+                    .omni
+                    .projection(query)
+                    .is_some_and(|projection| {
+                        projection.source_for(action)
+                            == Some(multi_launcher::plugins::omni_search::OmniSource::Note)
+                            && projection.note_for(action).is_some_and(|(current, note)| {
+                                current == version && note.as_ref() == expected
+                            })
+                    })
+            }
+            OpenOrigin::Search { .. } | OpenOrigin::Quick { .. } => {
+                self.enabled_plugins
+                    .as_ref()
+                    .is_none_or(|enabled| enabled.contains("notes"))
+                    && multi_launcher::settings::provider_search_capability_enabled(
+                        self.enabled_capabilities.as_ref(),
+                        "notes",
+                    )
+            }
+        }
+    }
     pub(super) fn open_checked_note(
         &mut self,
         expected: Note,
@@ -701,14 +738,7 @@ impl RootWindow {
             || !window.is_window_active()
             || window.has_active_dialog(cx)
             || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
-            || self
-                .enabled_plugins
-                .as_ref()
-                .is_some_and(|enabled| !enabled.contains("notes"))
-            || !multi_launcher::settings::provider_search_capability_enabled(
-                self.enabled_capabilities.as_ref(),
-                "notes",
-            )
+            || !self.note_origin_enabled(&origin, &expected, version)
         {
             return;
         }
@@ -760,18 +790,29 @@ impl RootWindow {
                             false,
                         )
                         || !root.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
-                        || root
-                            .enabled_plugins
-                            .as_ref()
-                            .is_some_and(|enabled| !enabled.contains("notes"))
-                        || !multi_launcher::settings::provider_search_capability_enabled(
-                            root.enabled_capabilities.as_ref(),
-                            "notes",
-                        )
+                        || !root.note_origin_enabled(&origin, &expected, version)
                     {
                         return;
                     }
                     let origin_current = match &origin {
+                        OpenOrigin::Omni {
+                            generation,
+                            index,
+                            query,
+                            action,
+                        } => {
+                            root.launcher_results
+                                .resolve_result(*generation, *index, query)
+                                .is_some_and(|row| {
+                                    row.action == *action
+                                        && row.origin
+                                            == LauncherResultOrigin::OmniNote {
+                                                version,
+                                                note: Arc::new(expected.clone()),
+                                            }
+                                })
+                                && root.query.read(cx).value().as_str() == query
+                        }
                         OpenOrigin::Search {
                             generation,
                             index,

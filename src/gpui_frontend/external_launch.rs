@@ -646,11 +646,23 @@ struct Pending {
 pub(super) struct ExternalLaunch {
     pending: Option<Pending>,
     next_ticket: u64,
+    notes_wake_deferred: bool,
     preview_lease: Option<Arc<std::sync::atomic::AtomicBool>>,
     auxiliary_effect: Option<(Arc<std::sync::atomic::AtomicBool>, bool)>,
 }
 
 impl ExternalLaunch {
+    pub(super) fn defer_notes_wake_for_omni(&mut self) -> bool {
+        if self.pending.as_ref().is_some_and(|pending| pending.omni_lease.is_some()) {
+            self.notes_wake_deferred = true;
+            true
+        } else { false }
+    }
+
+    fn take_deferred_notes_wake(&mut self) -> bool {
+        if self.pending.is_some() { false } else { std::mem::take(&mut self.notes_wake_deferred) }
+    }
+
     pub fn is_pending(&self) -> bool {
         self.pending.is_some()
     }
@@ -1569,6 +1581,9 @@ impl RootWindow {
                         return;
                     };
                     root.apply_external_receipt(ticket, receipt, window, cx);
+                    if root.external_launch.take_deferred_notes_wake() {
+                        root.search_catalog.providers.notes_wake.notify();
+                    }
                     if root.window_search.take_deferred_update() {
                         root.root_visibility.notify_window_search();
                     }
@@ -1992,6 +2007,30 @@ pub(super) fn bookkeep_bookmark(outcome: Result<CommandOutcome, CommandError>, a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notes_wake_waits_for_exact_omni_settlement_without_revoking_lease() {
+        let admission = Arc::new(RestartAdmission::default());
+        let lease = Arc::new(AtomicBool::new(true));
+        let mut owner = ExternalLaunch::default();
+        assert!(!owner.defer_notes_wake_for_omni());
+        owner.pending = Some(Pending {
+            ticket: 1,
+            stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "o".into(), focus: None },
+            permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
+            clipboard_lease: None, focus_guard: None, snippet_effect: false,
+            omni_lease: Some(lease.clone()), omni_effect_entered: Some(Arc::new(AtomicBool::new(false))),
+        });
+        assert!(owner.defer_notes_wake_for_omni());
+        assert!(owner.defer_notes_wake_for_omni());
+        assert!(!owner.take_deferred_notes_wake());
+        assert!(lease.load(Ordering::Acquire));
+        owner.retire_omni();
+        assert!(!lease.load(Ordering::Acquire));
+        owner.pending.take();
+        assert!(owner.take_deferred_notes_wake());
+        assert!(!owner.take_deferred_notes_wake());
+    }
 
     #[test]
     fn omni_final_effect_rechecks_current_and_marks_only_entered_calls() {
