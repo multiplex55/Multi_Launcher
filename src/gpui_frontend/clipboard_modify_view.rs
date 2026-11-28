@@ -83,6 +83,9 @@ fn current_completion(pending: Option<u64>, serial: u64) -> bool {
 fn rehost_idle(open: bool, rehosting: bool, reading: bool, effect: bool, management: bool, same_mode: bool) -> bool {
     open && !rehosting && !reading && !effect && !management && !same_mode
 }
+fn configuration_reload_blocked(rehosting: bool, effect: bool, review: bool, management: bool, pipeline_review: bool) -> bool {
+    rehosting || effect || review || management || pipeline_review
+}
 fn queued_read_can_start(queued: Option<bool>, reading: bool, runtime_ready: bool) -> bool {
     queued.is_some() && !reading && runtime_ready
 }
@@ -283,6 +286,19 @@ pub(super) struct ClipboardModifyView {
     _source_sub: Subscription,
 }
 impl ClipboardModifyView {
+    pub(super) fn configuration_reload_blocked(&self) -> bool {
+        configuration_reload_blocked(self.rehosting, self.effect_pending.is_some(), self.review.is_some(),
+            self.management.pending.is_some(), self.pipelines.review.is_some())
+    }
+    pub(super) fn adopt_configuration_reload(&mut self, catalog: Arc<ClipboardModifierCatalog>, cx: &mut Context<Self>) {
+        if self.runtime.as_ref().is_none_or(|runtime| !clipboard_modify_startup::catalog_is_current(runtime, &catalog)) { return; }
+        self.catalog = Some(catalog);
+        self.catalog_feedback = None;
+        self.sections.template = None;
+        self.sections.pipeline = None;
+        self.preview.cancel_and_invalidate();
+        cx.notify();
+    }
     pub(super) fn mount_receipt(&self) -> utility_mount::MountReceipt {
         self.mount.clone()
     }
@@ -2505,6 +2521,16 @@ mod tests {
         assert!(!super::rehost_idle(true, false, false, false, true, false));
         assert!(!super::rehost_idle(true, false, false, false, false, true));
     }
+    #[test]
+    fn configuration_reload_refuses_effects_and_reviews() {
+        assert!(!super::configuration_reload_blocked(false, false, false, false, false));
+        assert!(super::configuration_reload_blocked(false, true, false, false, false));
+        assert!(super::configuration_reload_blocked(false, false, true, false, false));
+        assert!(super::configuration_reload_blocked(false, false, false, true, false));
+        assert!(super::configuration_reload_blocked(false, false, false, false, true));
+        assert!(super::configuration_reload_blocked(true, false, false, false, false));
+    }
+
     #[test]
     fn queued_read_wakes_only_once_after_runtime_and_prior_read_are_ready() {
         assert!(super::queued_read_can_start(Some(true), false, true));

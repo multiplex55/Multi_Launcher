@@ -119,6 +119,7 @@ pub(super) struct ActionsSettings {
     reading: bool,
     pending: Option<(SettingsBooleanSaveToken, Vec<Change>)>,
     status: Option<String>,
+    clipboard_status: Option<String>,
 }
 impl ActionsSettings {
     pub(super) fn new(
@@ -158,6 +159,7 @@ impl ActionsSettings {
             reading: false,
             pending: None,
             status: None,
+            clipboard_status: None,
         }
     }
     pub(super) fn can_focus(&self, target: settings_navigation::Target) -> bool {
@@ -323,6 +325,145 @@ impl ActionsSettings {
             }
         })
         .detach();
+        cx.notify();
+    }
+    fn open_clipboard_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy() || !self.mount.is_current() || !window.is_window_active() || window.has_active_dialog(cx) { return; }
+        let Some(root) = self.root.upgrade() else { return; };
+        let state = root.read(cx);
+        if !state.settings_editor.open || state.restart_admission.is_fenced() || state.clipboard_modify_startup.pending
+            || state.clipboard_modify_startup.refresh_pending
+            || !state.settings_actions.as_ref().is_some_and(|view| view.entity_id() == cx.entity_id())
+            || state.root_window.is_none_or(|host| host.window_id() != window.window_handle().window_id())
+            || !state.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
+        let Some(native) = state.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+        let Some(path) = state.clipboard_modify_startup.runtime.as_ref().map(|runtime| runtime.store.path.clone()) else { return; };
+        let Some(permit) = state.restart_admission.admit() else { return; };
+        let Some(focus) = window.focused(cx) else { return; };
+        let visibility = state.root_visibility.clone(); let admission = state.restart_admission.clone();
+        let host_revision = visibility.request_revision.load(Ordering::Acquire);
+        let mount = self.mount.clone(); let worker_mount = mount.clone();
+        let lease = Arc::new(AtomicBool::new(true)); let revoked = lease.clone();
+        let guard = cx.on_blur(&focus, window, move |_, _, _| { revoked.store(false, Ordering::Release); });
+        if !root.update(cx, |root, cx| {
+            if root.clipboard_modify_startup.refresh_pending || !root.external_launch.begin_auxiliary_effect(lease.clone(), false) { return false; }
+            root.clipboard_modify_startup.refresh_pending = true; cx.notify(); true
+        }) { return; }
+        self.clipboard_status = None;
+        let worker_lease = lease.clone(); let presentation_visibility = visibility.clone();
+        let task = cx.background_executor().spawn(async move {
+            clipboard_modify_startup::open_configuration_with(&path, &|| worker_mount.is_current()
+                && worker_lease.load(Ordering::Acquire) && !admission.is_fenced()
+                && current_foreground_identity() == Some(native.identity)
+                && json_utility::native_host_current(&visibility, host_revision, Some(native), false),
+                |path, current| multi_launcher::actions::exec::launch_association_if_current(path, current))
+        });
+        let host = window.window_handle(); let weak_root = root.downgrade();
+        cx.spawn(async move |weak, cx| {
+            let result = task.await; let _permit = permit; let _guard = guard;
+            let _ = weak_root.update(cx, |root, cx| {
+                root.external_launch.finish_auxiliary_effect(&lease); root.clipboard_modify_startup.refresh_pending = false;
+                if root.restart_status.as_deref() == Some(clipboard_modify_view::BLOCK_WAIT) { root.restart_status = None; }
+                if root.launcher_search_error.as_deref() == Some(clipboard_modify_view::BLOCK_WAIT) || root.launcher_search_error.as_deref() == Some(clipboard_modify_view::LAUNCHER_EFFECT_WAIT) { root.launcher_search_error = None; }
+                cx.notify();
+            });
+            let _ = host.update(cx, |_, window, cx| {
+                let active = lease.load(Ordering::Acquire) && focus.is_focused(window) && window.is_window_active()
+                    && !window.has_active_dialog(cx) && current_foreground_identity() == Some(native.identity)
+                    && json_utility::native_host_current(&presentation_visibility, host_revision, Some(native), false);
+                let _ = weak.update(cx, |view, cx| {
+                    if !active || !mount.is_current() || !mount.matches(&view.mount) || !view.root.upgrade().is_some_and(|root| {
+                        let root = root.read(cx); root.settings_editor.open && root.settings_actions.as_ref().is_some_and(|current| current.entity_id() == cx.entity_id())
+                            && root.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+                    }) { return; }
+                    view.clipboard_status = Some(if result.is_ok() { "Opened configuration." } else { "Configuration could not be opened." }.into()); cx.notify();
+                });
+            });
+        }).detach();
+        cx.notify();
+    }
+    fn reload_clipboard_configuration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy() || !self.mount.is_current() || !window.is_window_active() || window.has_active_dialog(cx) { return; }
+        let Some(root) = self.root.upgrade() else { return; };
+        let state = root.read(cx);
+        if !state.settings_editor.open || state.restart_admission.is_fenced() || state.clipboard_modify_startup.pending
+            || state.clipboard_modify_startup.refresh_pending || state.external_launch.clipboard_effect_pending()
+            || state.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).configuration_reload_blocked())
+            || !state.settings_actions.as_ref().is_some_and(|view| view.entity_id() == cx.entity_id())
+            || state.root_window.is_none_or(|host| host.window_id() != window.window_handle().window_id())
+            || !state.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
+        let Some(native) = state.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+        let Some(runtime) = state.clipboard_modify_startup.runtime.clone() else { return; };
+        let Some(permit) = state.restart_admission.admit() else { return; };
+        let Some(focus) = window.focused(cx) else { return; };
+        let visibility = state.root_visibility.clone(); let admission = state.restart_admission.clone();
+        let revision = visibility.request_revision.load(Ordering::Acquire);
+        let mount = self.mount.clone(); let worker_mount = mount.clone();
+        let lease = Arc::new(AtomicBool::new(true)); let revoked = lease.clone();
+        let guard = cx.on_blur(&focus, window, move |_, _, _| { revoked.store(false, Ordering::Release); });
+        if !root.update(cx, |root, cx| {
+            if root.clipboard_modify_startup.refresh_pending || !root.external_launch.begin_auxiliary_effect(lease.clone(), true) { return false; }
+            root.clipboard_modify_startup.refresh_pending = true;
+            cx.notify(); true
+        }) { return; }
+        self.clipboard_status = None;
+        let presentation_visibility = visibility.clone();
+        let worker_lease = lease.clone();
+        let task = cx.background_executor().spawn(async move {
+            runtime.store.refresh_checked(&|| worker_mount.is_current() && worker_lease.load(Ordering::Acquire)
+                && !admission.is_fenced() && current_foreground_identity() == Some(native.identity)
+                && json_utility::native_host_current(&visibility, revision, Some(native), false))
+        });
+        let host = window.window_handle(); let weak_root = root.downgrade();
+        cx.spawn(async move |weak, cx| {
+            let result = task.await; let _permit = permit; let _guard = guard;
+            let status = match &result {
+                Ok(multi_launcher::clipboard_modify::store::CheckedCatalogRead::Loaded(_)) => "Configuration reloaded.",
+                Ok(multi_launcher::clipboard_modify::store::CheckedCatalogRead::Changed) => "Configuration changed during reload; try again.",
+                Ok(multi_launcher::clipboard_modify::store::CheckedCatalogRead::Superseded) => "Reload cancelled.",
+                Err(multi_launcher::clipboard_modify::store::CheckedCatalogError::InvalidCurrent) => "Configuration is invalid; previous settings retained.",
+                Err(_) => "Configuration unavailable; previous settings retained.",
+            };
+            let presentation_current = host.update(cx, |_, window, cx| {
+                let active = lease.load(Ordering::Acquire) && window.is_window_active() && !window.has_active_dialog(cx)
+                    && current_foreground_identity() == Some(native.identity)
+                    && json_utility::native_host_current(&presentation_visibility, revision, Some(native), false);
+                weak.upgrade().is_some_and(|view| {
+                    let entity_id = view.entity_id();
+                    let view = view.read(cx);
+                    mount.is_current() && mount.matches(&view.mount) && focus.is_focused(window)
+                        && active
+                        && view.root.upgrade().is_some_and(|root| {
+                            let root = root.read(cx);
+                            root.settings_editor.open && root.settings_actions.as_ref().is_some_and(|current| current.entity_id() == entity_id)
+                                && root.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+                        })
+                })
+            }).unwrap_or(false);
+            let mut target = None;
+            let _ = weak_root.update(cx, |root, cx| {
+                if let Ok(multi_launcher::clipboard_modify::store::CheckedCatalogRead::Loaded(catalog)) = &result {
+                    if root.clipboard_modify_startup.runtime.as_ref().is_some_and(|runtime| clipboard_modify_startup::catalog_is_current(runtime, catalog)) {
+                        root.clipboard_modify_startup.diagnostic = None;
+                        let query = root.query.read(cx).value().to_string();
+                        if clipboard_modify_startup::is_clipboard_modify_search(&query) { root.refresh_launcher_results_with_viewport(query, false, cx); }
+                        target = root.clipboard_modify_view.clone();
+                    }
+                }
+                cx.notify();
+            });
+            if let (Some(view), Ok(multi_launcher::clipboard_modify::store::CheckedCatalogRead::Loaded(catalog))) = (target, result) {
+                let _ = view.update(cx, |view, cx| view.adopt_configuration_reload(catalog, cx));
+            }
+            let _ = weak_root.update(cx, |root, cx| {
+                root.external_launch.finish_auxiliary_effect(&lease);
+                root.clipboard_modify_startup.refresh_pending = false;
+                if root.restart_status.as_deref() == Some(clipboard_modify_view::BLOCK_WAIT) { root.restart_status = None; }
+                if root.launcher_search_error.as_deref() == Some(clipboard_modify_view::BLOCK_WAIT) || root.launcher_search_error.as_deref() == Some(clipboard_modify_view::LAUNCHER_EFFECT_WAIT) { root.launcher_search_error = None; }
+                cx.notify();
+            });
+            if presentation_current { let _ = host.update(cx, |_, _, cx| { let _ = weak.update(cx, |view, cx| { view.clipboard_status = Some(status.to_owned()); cx.notify(); }); }); }
+        }).detach();
         cx.notify();
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -662,6 +803,15 @@ impl Render for ActionsSettings {
                     .disabled(busy)
                     .on_click(cx.listener(|view, _, window, cx| view.save(window, cx))),
             );
+                    let (loading, status) = self.root.upgrade().map(|root| {
+                        let root = root.read(cx);
+                        (root.clipboard_modify_startup.refresh_pending, self.clipboard_status.clone().or_else(|| root.clipboard_modify_startup.diagnostic.clone()))
+                    }).unwrap_or((false, None));
+                    panel = panel.child(Button::new("clipboard-modify-config-reload").label("Reload configuration").disabled(busy || loading)
+                        .on_click(cx.listener(|view, _, window, cx| view.reload_clipboard_configuration(window, cx))));
+                    panel = panel.child(Button::new("clipboard-modify-config-open").label("Open clipboard_modifiers.json").disabled(busy || loading)
+                        .on_click(cx.listener(|view, _, window, cx| view.open_clipboard_configuration(window, cx))));
+                    if let Some(status) = status { panel = panel.child(Label::new(status)); }
         } else if self.reading {
             panel = panel.child(Label::new("Reading Actions and Feedback…"));
         }

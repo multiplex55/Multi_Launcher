@@ -5928,7 +5928,7 @@ impl RootWindow {
                     .to_owned(),
             );
         }
-        if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Err(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
+        if self.clipboard_modify_startup.pending || self.clipboard_modify_startup.refresh_pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Err(clipboard_modify_view::BLOCK_WAIT.to_owned()); }
         if self.external_launch.auxiliary_effect_pending() { return Err(file_search_preview::WAIT.to_owned()); }
         if self.tempfile_alias.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(tempfile_alias::WAIT.to_owned()); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Err(tempfile_view::WAIT.to_owned()); }
@@ -10979,7 +10979,7 @@ impl RootWindow {
         if self.timer_busy.load(Ordering::Acquire) { return Some(RootCloseBlocker::TimerOperation); }
         if self.dashboard_editor.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Some(RootCloseBlocker::DashboardEditor); }
         if self.gesture_editor.as_ref().is_some_and(|view| view.read(cx).blocks_root_close(cx)) { return Some(RootCloseBlocker::GestureEditor); }
-        if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
+        if self.clipboard_modify_startup.pending || self.clipboard_modify_startup.refresh_pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_omni.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsOmniSave); }
         if self.settings_omni.as_ref().is_some_and(|view| view.read(cx).dirty()) { return Some(RootCloseBlocker::SettingsOmniDraft); }
         if self.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsActionsSave); }

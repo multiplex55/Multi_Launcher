@@ -7,9 +7,41 @@ pub(super) fn is_clipboard_modify_search(query: &str) -> bool {
     effective.split_whitespace().next().is_some_and(|head| head.eq_ignore_ascii_case("cm"))
 }
 
+pub(super) fn catalog_is_current(runtime: &ClipboardModifyRuntime, catalog: &std::sync::Arc<multi_launcher::clipboard_modify::model::ClipboardModifierCatalog>) -> bool {
+    std::sync::Arc::ptr_eq(&runtime.catalog_snapshot(), catalog)
+}
+
+fn check_configuration_file(path: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(windows)]
+    { multi_launcher::actions::exec::checked_local_file(path) }
+    #[cfg(not(windows))]
+    {
+        anyhow::ensure!(path.is_absolute(), "Configuration path is not absolute");
+        for part in path.ancestors() {
+            let metadata = std::fs::symlink_metadata(part)?;
+            anyhow::ensure!(!metadata.file_type().is_symlink(), "Configuration path contains a link");
+            if part == path { anyhow::ensure!(metadata.is_file(), "Configuration is not a file"); }
+        }
+        Ok(())
+    }
+}
+
+pub(super) fn open_configuration_with(
+    path: &std::path::Path,
+    current: &dyn Fn() -> bool,
+    launch: impl FnOnce(&std::path::Path, &dyn Fn() -> bool) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let absolute = std::path::absolute(path)?;
+    anyhow::ensure!(current(), "Configuration open was superseded");
+    check_configuration_file(&absolute)?;
+    anyhow::ensure!(current(), "Configuration open was superseded");
+    launch(&absolute, &|| check_configuration_file(&absolute).is_ok() && current())
+}
+
 #[derive(Default)]
 pub(super) struct Owner {
     pub pending: bool,
+    pub refresh_pending: bool,
     pub runtime: Option<ClipboardModifyRuntime>,
     pub diagnostic: Option<String>,
     pub projection: Option<(String, String, std::sync::Arc<multi_launcher::clipboard_modify::model::ClipboardModifierCatalog>)>,
@@ -24,6 +56,43 @@ mod tests {
         assert!(super::is_clipboard_modify_search(" CM template"));
         assert!(!super::is_clipboard_modify_search("cmother uppercase"));
         assert!(!super::is_clipboard_modify_search("-id:unrelated other cm"));
+    }
+
+    #[test]
+    fn open_configuration_passes_exact_path_and_fences_late_revoke() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clipboard_modifiers.json");
+        std::fs::write(&path, "{}").unwrap();
+        let live = AtomicBool::new(true);
+        let opened = AtomicBool::new(false);
+        super::open_configuration_with(&path, &|| live.load(Ordering::Acquire), |actual, current| {
+            assert_eq!(actual, std::path::absolute(&path).unwrap());
+            assert!(current()); opened.store(true, Ordering::Release); Ok(())
+        }).unwrap();
+        assert!(opened.load(Ordering::Acquire));
+        opened.store(false, Ordering::Release);
+        super::open_configuration_with(&path, &|| live.load(Ordering::Acquire), |_, current| {
+            live.store(false, Ordering::Release);
+            if current() { opened.store(true, Ordering::Release); }
+            Ok(())
+        }).unwrap();
+        assert!(!opened.load(Ordering::Acquire));
+        assert!(super::open_configuration_with(&dir.path().join("missing"), &|| true, |_, _| panic!("missing path launched")).is_err());
+    }
+
+    #[test]
+    fn reload_adoption_requires_the_exact_published_catalog() {
+        use multi_launcher::clipboard_modify::{defaults::default_catalog, runtime::ClipboardModifyRuntime};
+        use std::sync::{Arc, RwLock};
+        let directory = tempfile::tempdir().unwrap();
+        let shared = Arc::new(RwLock::new(Arc::new(default_catalog())));
+        let (runtime, _) = ClipboardModifyRuntime::new(&directory.path().join("settings.json"), shared.clone());
+        let old = runtime.catalog_snapshot();
+        assert!(super::catalog_is_current(&runtime, &old));
+        *shared.write().unwrap() = Arc::new(default_catalog());
+        assert!(!super::catalog_is_current(&runtime, &old));
+        assert!(super::catalog_is_current(&runtime, &runtime.catalog_snapshot()));
     }
 
     #[test]

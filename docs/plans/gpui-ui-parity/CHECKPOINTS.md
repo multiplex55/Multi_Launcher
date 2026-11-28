@@ -2382,3 +2382,13 @@ The shared locked `fast-dev` library check passed in 26.26s. Corrected library a
 P0.09 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned Markdown profiles with both Paste Sequence shortcuts disabled. Follow the explicit and wiki links, exercise dirty Cancel and accepted navigation, and verify both files. Test a context click, an absent target and a stale large-preview click. External, filesystem and Todo destinations, missing-target authoring and the remaining G12 behavior stay open.
 
 Continue P0.07/P0.14 checked Clipboard Modify configuration Reload and external edit from Settings.
+
+### P0.07 P0.14 checked Clipboard Modify configuration
+
+Retained Settings offers Open clipboard_modifiers.json and Reload configuration beside the Clipboard Modify preferences. Open captures the singleton runtime's canonical configuration path and verifies the existing ordinary local file before Shell handoff. It rechecks the path and request at native entry. It leaves file creation, migration and factory reset to their own effects.
+
+Reload uses the existing strict checked catalog reader and a shared reservation with Clipboard Modify effects and manager writes. It publishes only a stable current-schema read and keeps the last good catalog on malformed, unavailable or changed input. The accepted exact current catalog updates the effective Search query and mounted Clipboard Modify pane, retires stale named Preview authority and preserves source, stage text and staged manager drafts. Settings retains its independent Save draft. Both actions report redacted status to the current Settings mount and perform no clipboard I/O.
+
+Locked `fast-dev` launcher checks passed in 6.86s, 4.06s and 5.82s. Independent review checked two-way effect admission, exact catalog acknowledgement, child Preview retirement, the final Shell guard and status cleanup. The grouped link took 19.57s. Nextest run `ff1bcf46-3140-4a56-beff-359cc65ca25f` passed all ten selected cases in 4.398s across two binaries with 9651 skipped.
+
+P0.07 and P0.14 remain Stage 2. Paired 1516 × 937 Windows replay remains open with both Paste Sequence shortcuts disabled. Use the owned external editor variant, then Reload. Confirm new labels in Search and the existing utility, unchanged draft input, last-good behavior on malformed data and unchanged source bytes by Reload. Replay can use synthetic pane text without clipboard access. Native Shell handoff and the remaining settings retain their own gates.
