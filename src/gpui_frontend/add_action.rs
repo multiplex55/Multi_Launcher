@@ -1,15 +1,15 @@
 use super::*;
 
-const ACTIONS_FILE: &str = "actions.json";
+pub(super) const ACTIONS_FILE: &str = "actions.json";
 type CatalogAction = multi_launcher::actions::Action;
 
-struct CatalogSnapshot {
-    rows: Vec<CatalogAction>,
+pub(super) struct CatalogSnapshot {
+    pub(super) rows: Vec<CatalogAction>,
     verified_folders: Vec<CatalogAction>,
 }
 
 impl CatalogSnapshot {
-    fn from_rows(rows: Vec<CatalogAction>) -> Self {
+    pub(super) fn from_rows(rows: Vec<CatalogAction>) -> Self {
         let verified_folders = super::saved_folder::verified_actions(&rows);
         Self { rows, verified_folders }
     }
@@ -69,6 +69,7 @@ pub(super) const APP_WRITE_CLOSE_STATUS: &str =
 pub(super) const APP_WRITE_RESTART_STATUS: &str =
     "Wait for the App Editor save to finish before restarting in egui.";
 pub(super) const APP_PICKER_STATUS: &str = "Wait for the App Editor file picker to finish.";
+pub(super) const APP_EDIT_READ_STATUS: &str = "Wait for the selected app to finish loading before continuing.";
 pub(super) const APP_DRAFT_RESTART_STATUS: &str =
     "Save or Cancel the App Editor draft before restarting in egui.";
 
@@ -89,7 +90,7 @@ fn checked_action_error(error: multi_launcher::actions::CheckedActionError) -> A
 fn clear_app_diagnostic(status: &mut Option<String>) {
     if matches!(
         status.as_deref(),
-        Some(APP_WRITE_CLOSE_STATUS | APP_WRITE_RESTART_STATUS | APP_DRAFT_RESTART_STATUS | APP_PICKER_STATUS)
+        Some(APP_WRITE_CLOSE_STATUS | APP_WRITE_RESTART_STATUS | APP_DRAFT_RESTART_STATUS | APP_PICKER_STATUS | APP_EDIT_READ_STATUS)
     ) {
         *status = None;
     }
@@ -116,6 +117,7 @@ pub(super) struct AppEditorState {
     picker: AddAppWrites,
     browse_focus: FocusHandle,
     picker_lease: Option<Arc<AtomicBool>>,
+    pub(super) sheet_lease: Option<Arc<AtomicBool>>,
     picker_guard: Option<Subscription>,
     owner_focus: FocusHandle,
     new_focus: FocusHandle,
@@ -287,6 +289,7 @@ impl AppEditorState {
             picker: AddAppWrites::default(),
             browse_focus: cx.focus_handle(),
             picker_lease: None,
+            sheet_lease: None,
             picker_guard: None,
             owner_focus: cx.focus_handle(),
             new_focus: cx.focus_handle(),
@@ -297,6 +300,7 @@ impl AppEditorState {
     }
 
     pub(super) fn restart_blocker(&self, cx: &App) -> Option<&'static str> {
+        if self.sheet_lease.is_some() { return Some(APP_EDIT_READ_STATUS); }
         if self.picker.pending.is_some() { return Some(APP_PICKER_STATUS); }
         if self.write_pending() {
             return Some(APP_WRITE_RESTART_STATUS);
@@ -351,7 +355,7 @@ impl AppEditorState {
 
     fn is_current_draft(&self, id: EntityId) -> bool {
         self.open
-            && !self.write_pending()
+            && !self.operation_pending()
             && self
                 .draft
                 .as_ref()
@@ -362,7 +366,7 @@ impl AppEditorState {
         self.draft.as_ref().map(|draft| draft.label.entity_id())
     }
 
-    pub(super) fn external_drop_safe(&self) -> bool { !self.write_pending() }
+    pub(super) fn external_drop_safe(&self) -> bool { !self.operation_pending() }
     pub(super) fn accepts_external_drop(&self) -> bool {
         self.draft.is_none() && self.external_drop_safe()
     }
@@ -370,16 +374,22 @@ impl AppEditorState {
     pub(super) fn write_pending(&self) -> bool {
         self.writes.pending.is_some() || self.picker.pending.is_some()
     }
+    pub(super) fn operation_pending(&self) -> bool {
+        self.write_pending() || self.sheet_lease.is_some()
+    }
 
     pub(super) fn owns_focus_for_escape(&self, window: &Window, cx: &App) -> bool {
         self.owner_focus.contains_focused(window, cx)
     }
     pub(super) fn close_wait_status(&self) -> &'static str {
-        if self.picker.pending.is_some() { APP_PICKER_STATUS } else { APP_WRITE_CLOSE_STATUS }
+        if self.sheet_lease.is_some() { APP_EDIT_READ_STATUS } else if self.picker.pending.is_some() { APP_PICKER_STATUS } else { APP_WRITE_CLOSE_STATUS }
     }
 
     pub(super) fn revoke_picker_prelaunch(&mut self) {
         if let Some(lease) = &self.picker_lease { lease.store(false, Ordering::Release); }
+    }
+    pub(super) fn revoke_sheet_handoff(&mut self) {
+        if let Some(lease) = &self.sheet_lease { lease.store(false, Ordering::Release); }
     }
 
     fn begin_write(&mut self) -> Option<u64> {
@@ -427,6 +437,34 @@ impl AppEditorState {
 }
 
 impl RootWindow {
+    pub(super) fn install_sheet_app_edit(
+        &mut self,
+        snapshot: CatalogSnapshot,
+        index: usize,
+        action: Action,
+        target: multi_launcher::actions::CustomActionRowTarget,
+        focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.app_editor.accepts_external_drop()
+            || snapshot.rows.get(index) != Some(&action)
+            || multi_launcher::actions::custom_action_row_target(&snapshot.rows, index).as_ref()
+                != Some(&target)
+        {
+            return;
+        }
+        self.open_app_editor_with_focus(Some(focus), false, false, window, cx);
+        self.app_editor.reads.invalidate();
+        self.app_editor.publish_catalog(snapshot.rows);
+        let selection = CatalogSelection {
+            revision: self.app_editor.catalog_revision,
+            index,
+            original: action,
+        };
+        self.edit_app(selection, window, cx);
+        self.publish_app_editor_search_actions(snapshot.verified_folders, window, cx);
+    }
     fn app_editor_scroll_item(&self) -> usize {
         self.quick_help_scroll_item()
             + usize::from(self.quick_help.open)
@@ -441,10 +479,11 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         self.external_drop.revoke();
-        self.open_app_editor_with_focus(origin, true, window, cx);
+        self.open_app_editor_with_focus(origin, true, true, window, cx);
     }
 
-    fn open_app_editor_with_focus(&mut self, origin: Option<FocusHandle>, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_app_editor_with_focus(&mut self, origin: Option<FocusHandle>, focus: bool, refresh: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(lease) = &self.app_editor.sheet_lease { lease.store(false, Ordering::Release); }
         if self.restart_admission.is_fenced() {
             return;
         }
@@ -471,7 +510,7 @@ impl RootWindow {
                 self.app_editor.filter = Some(filter);
                 self.app_editor.filter_subscription = Some(subscription);
             }
-            self.refresh_app_catalog(window, cx);
+            if refresh { self.refresh_app_catalog(window, cx); }
         }
         self.root_scroll
             .scroll_to_top_of_item(self.app_editor_scroll_item());
@@ -487,7 +526,7 @@ impl RootWindow {
 
     pub(super) fn open_dropped_app_draft(&mut self, path: &str, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.app_editor.accepts_external_drop() || path.contains(['\r', '\n']) { return; }
-        self.open_app_editor_with_focus(None, false, window, cx);
+        self.open_app_editor_with_focus(None, false, true, window, cx);
         self.open_app_draft_with_focus(DraftMode::Add, None, focus, window, cx);
         if let Some(draft) = &self.app_editor.draft {
             if let AppDraftField::Single(input) = &draft.path {
@@ -508,7 +547,7 @@ impl RootWindow {
     }
 
     fn refresh_app_catalog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.app_editor.open || self.app_editor.write_pending() {
+        if !self.app_editor.open || self.app_editor.operation_pending() {
             return;
         }
         let receipt = self.app_editor.reads.begin();
@@ -550,7 +589,7 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         if !self.app_editor.open
-            || self.app_editor.write_pending()
+            || self.app_editor.operation_pending()
             || self.app_editor.draft.is_some()
         {
             return;
@@ -583,7 +622,7 @@ impl RootWindow {
     fn open_app_draft_with_focus(&mut self, mode: DraftMode, original: Option<CatalogAction>, focus: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !self.app_editor.open
             || self.restart_admission.is_fenced()
-            || self.app_editor.write_pending()
+            || self.app_editor.operation_pending()
             || self.app_editor.draft.is_some()
         {
             return;
@@ -753,7 +792,7 @@ impl RootWindow {
     }
 
     fn submit_add_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.app_editor.write_pending()
+        if self.app_editor.operation_pending()
             || (self.app_editor.catalog_stale
                 && matches!(
                     self.app_editor.draft.as_ref().map(|draft| &draft.mode),
@@ -813,7 +852,7 @@ impl RootWindow {
         cx: &mut Context<Self>,
     ) {
         if !self.app_editor.open
-            || self.app_editor.write_pending()
+            || self.app_editor.operation_pending()
             || self.app_editor.draft.is_some()
         {
             return;
@@ -893,7 +932,7 @@ impl RootWindow {
     }
 
     fn cancel_add_app(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.app_editor.write_pending() {
+        if self.app_editor.operation_pending() {
             return;
         }
         let Some(draft) = self.app_editor.draft.take() else {
@@ -919,7 +958,7 @@ impl RootWindow {
 
     fn close_app_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.app_editor.open
-            || self.app_editor.write_pending()
+            || self.app_editor.operation_pending()
             || self.app_editor.draft.is_some()
         {
             return;
@@ -1035,7 +1074,7 @@ impl AppEditorPanel {
             indexed_actions: state.indexed_actions.clone(),
             indexed_generation: state.indexed_generation,
             indexed_matches: state.indexed_matches.clone(),
-            pending: state.write_pending(),
+            pending: state.operation_pending(),
             draft: state.draft.as_ref().map(|draft| AddAppPanelDraft {
                 label: draft.label.clone(),
                 description: draft.description.clone(),

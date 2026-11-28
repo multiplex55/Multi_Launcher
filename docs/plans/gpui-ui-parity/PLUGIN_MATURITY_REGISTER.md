@@ -136,7 +136,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 | Workflow and order | Registration | Owner | Stage → target | Shared dependency | Detailed readiness |
 | --- | --- | --- | --- | --- | --- |
 | P0.01 Main Launcher and Search | — | G05 | 3 → 3 | Search, retained root and checked dispatch | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
-| P0.02 Applications and indexed execution | — | G05/G06 | 2 → 3 | Action store, index, execution and App Editor | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
+| P0.02 Applications and indexed execution | — | G05/G06 | 2 → 3 | Action store, index, execution, App Editor and checked Edit App from saved Search. Paired Windows Browse and Search-edit replay remain open. | [Saved Search Edit App](CHECKPOINTS.md#p002-edit-app-from-saved-search) |
 | P0.03 Folders and aliases | folders | G05/G06 | 2 → 3 | Folder store and Explorer | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.04 Bookmarks and aliases | bookmarks | G05/G06 | 2 → 3 | Bookmark store and checked URL open | [P0 readiness](DAILY_DRIVER_READINESS.md#current-readiness) |
 | P0.05 Windows Explorer drag-and-drop | — | G01/G05/G06 | 2 → 3 | Checked OLE ExternalPaths receiver, canonical Folder writes and Add App staging. Cross-window native replay pending. | [Explorer drop](CHECKPOINTS.md#p005-native-explorer-drop) |

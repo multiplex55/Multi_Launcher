@@ -312,6 +312,8 @@ struct LauncherSearchCatalog {
     command_help_providers: Arc<[CommandHelpProvider]>,
     quick_help_providers: Arc<[QuickHelpProvider]>,
     actions: Arc<Vec<Action>>,
+    canonical_saved: Arc<[Action]>,
+    canonical_revision: u64,
     saved_count: usize,
     index_config: multi_launcher::indexer::coordinator::IndexConfig,
     index_generation: Option<u64>,
@@ -345,7 +347,8 @@ impl LauncherSearchCatalog {
         // Keep only persisted actions that the installed typed activation
         // boundary can execute without changing their Search payload. Saved
         // typed actions retain the shared local-action admission semantics.
-        let actions = supported_saved_search_actions(startup.actions, &startup.verified_folders);
+        let canonical_saved: Arc<[Action]> = startup.actions.into();
+        let actions = supported_saved_search_actions(canonical_saved.to_vec(), &startup.verified_folders);
         let saved_count = actions.len();
         #[cfg(not(test))]
         let providers = InstalledLauncherProviders::new(enabled_plugins);
@@ -387,6 +390,8 @@ impl LauncherSearchCatalog {
             command_help_providers,
             quick_help_providers,
             actions: Arc::new(actions),
+            canonical_saved,
+            canonical_revision: 1,
             saved_count,
             index_config: startup.index_config,
             index_generation: None,
@@ -417,6 +422,10 @@ impl LauncherSearchCatalog {
     }
 
     fn replace_saved_actions_with(&mut self, rows: Vec<Action>, verified_folders: Vec<Action>, before_change: impl FnOnce()) -> bool {
+        if self.canonical_saved.as_ref() != rows.as_slice() {
+            self.canonical_revision = self.canonical_revision.wrapping_add(1).max(1);
+            self.canonical_saved = rows.clone().into();
+        }
         let saved = supported_saved_search_actions(rows, &verified_folders);
         if self.actions[..self.saved_count] == saved && self.verified_folders == verified_folders {
             return false;
@@ -5069,6 +5078,7 @@ impl RootWindow {
     }
 
     fn revoke_focus_bound_utility_operations(&mut self, cx: &mut Context<Self>) {
+        self.app_editor.revoke_sheet_handoff();
         if let Some(view) = &self.plugin_editor { view.update(cx, |view, _| view.revoke_membership()); }
         if let Some(view) = &self.dashboard_editor { view.update(cx, |view, _| view.revoke()); }
         self.dashboard_epoch = self.dashboard_epoch.wrapping_add(1);
@@ -10910,7 +10920,7 @@ impl RootWindow {
             .then_some(RootCloseBlocker::ExternalLaunch)
             .or_else(|| {
                 self.app_editor
-                    .write_pending()
+                    .operation_pending()
                     .then_some(RootCloseBlocker::AppWrite)
             })
             .or_else(|| {
@@ -16552,6 +16562,20 @@ mod tests {
         let rows = catalog.compose("app Same", Vec::new(), true);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].origin, super::LauncherResultOrigin::Indexed { generation: 7, index: 0 });
+    }
+
+    #[test]
+    fn canonical_saved_revision_changes_when_only_hidden_row_changes() {
+        let visible = saved_action("Visible", "hash:open", None);
+        let hidden = saved_action("Hidden", "todo:done:99", None);
+        let mut catalog = completion_catalog(vec![hidden.clone(), visible.clone()], true, None);
+        let revision = catalog.canonical_revision;
+        let before = catalog.saved_actions().to_vec();
+        let mut changed = hidden; changed.label = "Changed hidden".into();
+        assert!(!catalog.replace_saved_actions(vec![changed.clone(), visible], Vec::new()));
+        assert_eq!(catalog.saved_actions(), before.as_slice());
+        assert_ne!(catalog.canonical_revision, revision);
+        assert_eq!(catalog.canonical_saved[0], changed);
     }
 
     #[test]

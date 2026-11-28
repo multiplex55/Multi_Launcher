@@ -2146,3 +2146,15 @@ Locked `fast-dev` library checks passed in 2m 07s and 26.06s, the combined launc
 P0.11 remains Stage 2. Paired 1516 × 937 Windows replay remains open with matching scaling, owned Settings and both Paste Sequence shortcuts disabled. Check visible and copied Fixed 2 output `333.33` for `x = 1000 / 3`, canonical Copy `333.333`, exact and percent eligibility, checked Save readback in egui, options focus after a repaint, and unchanged document bytes. Layout, advanced editor and companion criteria remain open.
 
 Continue P0.02 Edit App from an exact saved Search Action Sheet result through the existing checked App Editor.
+
+### P0.02 Edit App from saved Search
+
+The stock Action Sheet **Edit App** action opens the same checked App Editor draft for a unique exact saved Search result. It resolves the absolute ordinal in the unfiltered canonical action publication, which has its own revision. Indexed, provider and Omni results cannot claim saved authority. Identical duplicates remain editable through their exact App Editor rows.
+
+After dismissing the Action Sheet, a single off-UI read checks the same canonical store and full ordered snapshot. The handoff revalidates Search, row, host, native visibility, focus and competing editor operations before publishing and opening the draft. Browse, Cancel, Save and row-staleness handling use the existing App Editor. Drift gives an explicit App Editor Refresh route.
+
+The final locked `fast-dev` launcher check passed in 4.23s and the single launcher test link took 1m 26s. Independent review cleared canonical identity, choice admission, late ownership, status and cleanup. Nextest run `f1e99652-b61a-4a53-a5ff-8a272b64a314` passed all seven selected launcher tests in 3.637s with 567 skipped. Nextest run `c8be299b-3da5-4501-a1a5-c3d45627446f` reused the library artifact to pass the stock egui Edit App case in 0.645s.
+
+P0.02 remains Stage 2. Paired 1516 × 937 Windows replay remains open. The isolated profiles contain a saved app behind an unprojected canonical row and an identical duplicate pair, with both Paste Sequence shortcuts disabled. Verify selecting the second app, prefilled path and Args, Browse Cancel, exact single-row Save and explicit egui readback. Direct duplicate rows and the indexed App Editor tail retain their existing paths.
+
+Continue P0.03/P0.04/P0.06 Set Alias on Omni Folder and Bookmark results through the existing checked Alias owners.

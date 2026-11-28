@@ -9,6 +9,7 @@ pub(super) struct Sheet {
     row: usize,
     query: String,
     result: LauncherSearchResult,
+    saved_row: Option<(u64, usize, multi_launcher::actions::CustomActionRowTarget)>,
     revision: u64,
     return_focus: FocusHandle,
     owner: FocusHandle,
@@ -17,6 +18,61 @@ pub(super) struct Sheet {
     choices: ActionSheetChoices,
     _subscription: Subscription,
     retirement_pending: bool,
+}
+
+fn saved_row_receipt(
+    results: &LauncherSearchResults,
+    row: usize,
+    canonical: &[Action],
+    revision: u64,
+) -> Option<(u64, usize, multi_launcher::actions::CustomActionRowTarget)> {
+    let selected = results.actions.get(row)?;
+    if selected.origin != LauncherResultOrigin::Saved {
+        return None;
+    }
+    let mut matches = canonical
+        .iter()
+        .enumerate()
+        .filter(|(_, action)| **action == selected.action);
+    let (index, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    Some((
+        revision,
+        index,
+        multi_launcher::actions::custom_action_row_target(canonical, index)?,
+    ))
+}
+
+const APP_EDIT_CONFLICT: &str =
+    "App catalog changed; open App Editor and refresh before trying again.";
+const APP_EDIT_READ_ERROR: &str = "Could not read app catalog: ";
+
+fn clear_sheet_edit_error(error: &mut Option<String>) {
+    if error.as_deref().is_some_and(|message| {
+        message == APP_EDIT_CONFLICT || message.starts_with(APP_EDIT_READ_ERROR)
+    }) {
+        *error = None;
+    }
+}
+
+fn sheet_native_current(
+    visibility: &RootVisibility,
+    revision: u64,
+    native: Option<NativeWindow>,
+) -> bool {
+    if !json_utility::native_host_current(visibility, revision, native, false) {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        native.is_some_and(|window| current_foreground_identity() == Some(window.identity))
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
 }
 
 impl Sheet {
@@ -239,8 +295,11 @@ impl RootWindow {
                 self.search_catalog.saved_actions()
             },
         );
-        let target = ActionTargetResolver.resolve(action, &resolver);
+        let saved_row = saved_row_receipt(&self.launcher_results, row, &self.search_catalog.canonical_saved, self.search_catalog.canonical_revision);
+        let mut target = ActionTargetResolver.resolve(action, &resolver);
+        target.custom_action_index = saved_row.as_ref().map(|(_, index, _)| *index);
         let mut context = ActionResolutionContext::new(ActionSurface::ActionSheet, &query);
+        context.custom_action_row = saved_row.as_ref().map(|(_, _, target)| target.clone());
         context.can_add_favorite = target.target.persistent_ref().is_some();
         let mut actions = UniversalActionRegistry.resolve(&target, &context);
         actions.retain(|choice| match &choice.operation {
@@ -250,6 +309,7 @@ impl RootWindow {
             UniversalActionOperation::UiIntent(UniversalUiIntent::AddFavorite {
                 action: candidate,
             }) => candidate == action && context.can_add_favorite,
+            UniversalActionOperation::UiIntent(UniversalUiIntent::EditCustomAction { index, action: candidate, row: Some(target) }) => saved_row.as_ref().is_some_and(|(_, expected, saved)| index == expected && candidate == action && target == saved),
             UniversalActionOperation::UiIntent(UniversalUiIntent::OpenTempfileAlias { path }) =>
                 super::tempfile_alias::admitted(&result, &query, path, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                     && self.tempfile_search.receipt(generation, &query, action).is_some(),
@@ -295,6 +355,7 @@ impl RootWindow {
             row,
             query,
             result,
+            saved_row,
             revision: self
                 .root_visibility
                 .request_revision
@@ -532,6 +593,10 @@ impl RootWindow {
                     }) if action == sheet.result.action => {
                         root.open_result_favorites(action, Some(sheet.return_focus), window, cx)
                     }
+                    UniversalActionOperation::UiIntent(UniversalUiIntent::EditCustomAction { index, action, row: Some(target) })
+                        if sheet.saved_row.as_ref().is_some_and(|(_, expected, expected_target)| *expected == index && *expected_target == target) && action == sheet.result.action => {
+                        root.start_sheet_app_edit(sheet, index, action, target, window, cx);
+                    }
                     UniversalActionOperation::UiIntent(UniversalUiIntent::OpenTempfileAlias { path }) => {
                         root.open_tempfile_alias(sheet.generation, sheet.row, sheet.query.clone(), sheet.result.action.clone(), path, window, cx);
                     }
@@ -557,6 +622,162 @@ impl RootWindow {
         });
         cx.notify();
     }
+
+    fn start_sheet_app_edit(
+        &mut self,
+        sheet: Sheet,
+        index: usize,
+        action: Action,
+        target: multi_launcher::actions::CustomActionRowTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((canonical_revision, _, _)) = sheet.saved_row.as_ref() else {
+            return;
+        };
+        let canonical_revision = *canonical_revision;
+        if canonical_revision != self.search_catalog.canonical_revision
+            || !self.app_editor.accepts_external_drop()
+            || self.app_editor.sheet_lease.is_some()
+        {
+            return;
+        }
+        let Some(permit) = self.restart_admission.admit() else {
+            return;
+        };
+        let canonical = self.search_catalog.canonical_saved.clone();
+        let native = self.native_window;
+        clear_sheet_edit_error(&mut self.launcher_search_error);
+        let lease = Arc::new(AtomicBool::new(true));
+        let blur = lease.clone();
+        let blur_guard = cx.on_blur(&sheet.return_focus, window, move |_, _, _| {
+            blur.store(false, Ordering::Release)
+        });
+        let inactive = lease.clone();
+        let active_guard = cx.observe_window_activation(window, move |_, window, _| {
+            if !window.is_window_active() {
+                inactive.store(false, Ordering::Release);
+            }
+        });
+        self.app_editor.sheet_lease = Some(lease.clone());
+        let serial = self.action_sheet_serial;
+        let task = cx.background_executor().spawn(async move {
+            multi_launcher::actions::load_actions(add_action::ACTIONS_FILE)
+                .map(add_action::CatalogSnapshot::from_rows)
+        });
+        let root = cx.entity().downgrade();
+        let host = window.window_handle();
+        cx.spawn(async move |_, cx| {
+            let _permit = permit;
+            let _guards = (blur_guard, active_guard);
+            let result = task.await;
+            let fallback = root.clone();
+            let fallback_lease = lease.clone();
+            let delivered = host.update(cx, |_, window, cx| {
+                let _ = root.update(cx, |root, cx| {
+                    if !root
+                        .app_editor
+                        .sheet_lease
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &lease))
+                    {
+                        return;
+                    }
+                    root.app_editor.sheet_lease = None;
+                    if root.restart_status.as_deref() == Some(add_action::APP_EDIT_READ_STATUS) {
+                        root.restart_status = None;
+                    }
+                    if root.launcher_search_error.as_deref()
+                        == Some(add_action::APP_EDIT_READ_STATUS)
+                    {
+                        root.launcher_search_error = None;
+                    }
+                    let valid = lease.load(Ordering::Acquire)
+                        && root.action_sheet_serial == serial
+                        && root.action_sheet.is_none()
+                        && root.search_catalog.canonical_revision == canonical_revision
+                        && root.search_catalog.canonical_saved.as_ref() == canonical.as_ref()
+                        && root.root_visibility.active.load(Ordering::Acquire)
+                        && root.root_visibility.visible.load(Ordering::Acquire)
+                        && root.root_window.is_some_and(|host| {
+                            host.window_id() == window.window_handle().window_id()
+                        })
+                        && root.native_window == native
+                        && root
+                            .root_visibility
+                            .request_revision
+                            .load(Ordering::Acquire)
+                            == sheet.revision
+                        && !root.restart_admission.is_fenced()
+                        && window.is_window_active()
+                        && !window.has_active_dialog(cx)
+                        && sheet.return_focus.is_focused(window)
+                        && root.external_owner_is_current(Some(&sheet.return_focus), window, cx)
+                        && sheet_native_current(&root.root_visibility, sheet.revision, native)
+                        && root.query.read(cx).value().as_ref() == sheet.query
+                        && snapshot_matches(
+                            &root.launcher_results,
+                            sheet.generation,
+                            sheet.row,
+                            &sheet.query,
+                            &sheet.result,
+                            sheet.revision,
+                            root.root_visibility
+                                .request_revision
+                                .load(Ordering::Acquire),
+                        )
+                        && root.app_editor.accepts_external_drop();
+                    if !valid {
+                        cx.notify();
+                        return;
+                    }
+                    match result {
+                        Ok(snapshot) if snapshot.rows.as_slice() == canonical.as_ref() => {
+                            clear_sheet_edit_error(&mut root.launcher_search_error);
+                            root.install_sheet_app_edit(
+                                snapshot,
+                                index,
+                                action,
+                                target,
+                                sheet.return_focus,
+                                window,
+                                cx,
+                            )
+                        }
+                        Ok(_) => root.launcher_search_error = Some(APP_EDIT_CONFLICT.into()),
+                        Err(error) => {
+                            root.launcher_search_error =
+                                Some(format!("{APP_EDIT_READ_ERROR}{error:#}"))
+                        }
+                    }
+                    cx.notify();
+                });
+            });
+            if delivered.is_err() {
+                let _ = fallback.update(cx, |root, cx| {
+                    if root
+                        .app_editor
+                        .sheet_lease
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &fallback_lease))
+                    {
+                        root.app_editor.sheet_lease = None;
+                        if root.restart_status.as_deref() == Some(add_action::APP_EDIT_READ_STATUS)
+                        {
+                            root.restart_status = None;
+                        }
+                        if root.launcher_search_error.as_deref()
+                            == Some(add_action::APP_EDIT_READ_STATUS)
+                        {
+                            root.launcher_search_error = None;
+                        }
+                        cx.notify();
+                    }
+                });
+            }
+        })
+        .detach();
+    }
 }
 
 #[cfg(test)]
@@ -565,7 +786,34 @@ mod tests {
         Action, LauncherResultOrigin, LauncherSearchResult, LauncherSearchResults,
         ResolvedQueryResultsLayout,
     };
-    use super::{primary_allowed, sheet_key_owned, snapshot_matches};
+    use super::{APP_EDIT_CONFLICT, clear_sheet_edit_error, primary_allowed, saved_row_receipt, sheet_key_owned, snapshot_matches};
+
+    #[test]
+    fn edit_retry_clears_only_its_own_diagnostic() {
+        let mut owned = Some(APP_EDIT_CONFLICT.to_owned());
+        clear_sheet_edit_error(&mut owned);
+        assert_eq!(owned, None);
+        let mut unrelated = Some("Other Search error".to_owned());
+        clear_sheet_edit_error(&mut unrelated);
+        assert_eq!(unrelated.as_deref(), Some("Other Search error"));
+    }
+
+    #[test]
+    fn saved_edit_receipt_requires_unique_canonical_ordinal() {
+        let hidden = Action { label: "hidden".into(), desc: "fixture".into(), action: "unsupported:command".into(), args: None };
+        let selected = Action { label: "App".into(), desc: "fixture".into(), action: "C:\\App.exe".into(), args: None };
+        let canonical = vec![hidden, selected.clone()];
+        let mut results = LauncherSearchResults::default();
+        results.replace_test_actions("app".into(), vec![selected.clone(), selected.clone()], ResolvedQueryResultsLayout::new(false, 1), 1);
+        let first = saved_row_receipt(&results, 0, &canonical, 9).unwrap();
+        assert_eq!((first.0, first.1), (9, 1));
+        assert_eq!(first.2, multi_launcher::actions::custom_action_row_target(&canonical, 1).unwrap());
+        let duplicate = vec![canonical[0].clone(), selected.clone(), selected.clone()];
+        assert!(saved_row_receipt(&results, 0, &duplicate, 9).is_none());
+        assert!(saved_row_receipt(&results, 1, &duplicate, 9).is_none());
+        results.actions[0].origin = LauncherResultOrigin::Provider("foreign".into());
+        assert!(saved_row_receipt(&results, 0, &canonical, 9).is_none());
+    }
 
     #[test]
     fn todo_toggle_is_not_an_action_sheet_primary() {
