@@ -1,4 +1,6 @@
 //! Retained existing-note editor and checked canonical open/save.
+#[path = "note_editor_find.rs"]
+mod find;
 use super::*;
 use gpui_kit::EntityInputHandler;
 use gpui_kit::component::text::{MarkdownExtensions, TextView, TextViewState};
@@ -149,6 +151,7 @@ pub(super) struct NoteEditor {
     mount: utility_mount::MountReceipt,
     focus: FocusHandle,
     body: Entity<TextareaState>,
+    find: find::FindOwner,
     preview: Entity<TextViewState>,
     _subscription: Subscription,
     notes_wake: Arc<HashWakeSignal>,
@@ -231,6 +234,7 @@ impl NoteEditor {
         let preview = cx.new(|cx| TextViewState::markdown(preview_source(&note.content), cx));
         let subscription = cx.subscribe(&body, |view: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
+                view.find.model.content_changed();
                 let content = view.body.read(cx).value().to_string();
                 view.preview.update(cx, |preview, cx| {
                     preview.set_text(preview_source(&content), cx)
@@ -238,6 +242,7 @@ impl NoteEditor {
                 cx.notify();
             }
         });
+        let find = find::FindOwner::new(window, cx);
         let baseline = note.content.clone();
         let mode = settings.effective_default_view_mode();
         Self {
@@ -251,6 +256,7 @@ impl NoteEditor {
             mount,
             focus: cx.focus_handle(),
             body,
+            find,
             preview,
             _subscription: subscription,
             notes_wake,
@@ -315,6 +321,9 @@ impl NoteEditor {
             if self.decision.is_some() && !self.pending {
                 self.set_decision(None);
                 cx.notify();
+            } else if self.find.model.is_open() && !self.pending && !self.switch_pending {
+                if self.find_composing(window, cx) { return false; }
+                self.close_find(window, cx);
             } else {
                 self.request_close(window, cx);
             }
@@ -344,6 +353,7 @@ impl NoteEditor {
     }
     fn install(&mut self, destination: Destination, window: &mut Window, cx: &mut Context<Self>) {
         self.presentation_epoch = self.presentation_epoch.wrapping_add(1).max(1);
+        self.reset_find(window, cx);
         let Destination { note, identity, .. } = destination;
         self.baseline = note.content.clone();
         self.note = note;
@@ -683,6 +693,12 @@ impl Render for NoteEditor {
             .w_full()
             .p_3()
             .child(Label::new(format!("Note: {}", self.note.title)))
+            .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Search, window, cx| {
+                if view.open_find(window, cx) { cx.stop_propagation(); }
+            }))
+            .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
+                if view.find_enter(event, window, cx) { window.prevent_default(); cx.stop_propagation(); }
+            }))
             .capture_action(
                 cx.listener(|view, _: &gpui_kit::base::input::Escape, window, cx| {
                     if view.focus.contains_focused(window, cx) {
@@ -694,10 +710,9 @@ impl Render for NoteEditor {
                                 was
                             })
                             .unwrap_or(true);
-                        if !latched {
-                            view.handle_escape(window, cx, false);
+                        if latched || view.handle_escape(window, cx, false) {
+                            cx.stop_propagation();
                         }
-                        cx.stop_propagation();
                     }
                 }),
             );
@@ -715,7 +730,10 @@ impl Render for NoteEditor {
                     .label(label)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         if view.current(window, cx) && !view.pending && view.decision.is_none() {
-                            if view.mode != mode { view.presentation_epoch = view.presentation_epoch.wrapping_add(1).max(1); }
+                            if view.mode != mode {
+                                view.presentation_epoch = view.presentation_epoch.wrapping_add(1).max(1);
+                                if mode == NoteViewMode::Preview { view.suspend_find(cx); }
+                            }
                             view.mode = mode;
                             view.focus_content(window, cx);
                             cx.notify();
@@ -739,8 +757,16 @@ impl Render for NoteEditor {
                         }
                     })));
             }
+            let receipt = self.mount.clone();
+            let epoch = self.presentation_epoch;
+            tools = tools.child(Button::new(SharedString::from(format!("note-open-find-{epoch}")))
+                .label("Find").disabled(self.pending || self.switch_pending || self.decision.is_some())
+                .on_click(cx.listener(move |view, _, window, cx| {
+                    if receipt.is_current() && receipt.matches(&view.mount) && view.presentation_epoch == epoch { view.open_find(window, cx); }
+                })));
             panel = panel.child(tools);
         }
+        if let Some(find) = self.find_panel(cx) { panel = panel.child(find); }
         let mut content = div().flex().gap_2().w_full();
         if matches!(self.mode, NoteViewMode::Edit | NoteViewMode::Split) {
             content = content.child(

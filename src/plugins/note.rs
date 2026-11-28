@@ -1,3 +1,5 @@
+pub mod find;
+
 use crate::actions::Action;
 use crate::common::entity_ref::{EntityKind, EntityRef};
 use crate::common::query::parse_query_filters;

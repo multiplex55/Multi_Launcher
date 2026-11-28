@@ -13741,6 +13741,7 @@ pub(crate) fn run_foundation_window(
         );
         cx.bind_keys(gpui_key_bindings());
         cx.bind_keys([
+            KeyBinding::new("ctrl-f", gpui_kit::base::input::Search, Some("NoteEditorPane")),
             KeyBinding::new("ctrl-f", gpui_kit::base::input::Search, Some("CalculationPad")),
             KeyBinding::new("ctrl-h", gpui_kit::base::input::Replace, Some("CalculationPad")),
             KeyBinding::new("escape", gpui_kit::base::input::Escape, Some("CalculationPad")),

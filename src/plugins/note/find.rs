@@ -5,9 +5,9 @@ use std::ops::Range;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NoteFindMatch {
-    pub(crate) byte_range: Range<usize>,
-    pub(crate) char_range: Range<usize>,
+pub struct NoteFindMatch {
+    pub byte_range: Range<usize>,
+    pub char_range: Range<usize>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -22,7 +22,7 @@ struct SelectedMatchIdentity {
 /// This is intentionally an in-memory transaction. The owning NotePanel still
 /// installs the returned source and owns dirty state and persistence.
 #[derive(Clone, Debug)]
-pub(crate) struct PreparedNoteReplacement {
+pub struct PreparedNoteReplacement {
     owner_token: Arc<()>,
     note_generation: u64,
     query_revision: u64,
@@ -36,7 +36,7 @@ pub(crate) struct PreparedNoteReplacement {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum StaleNoteReplacement {
+pub enum StaleNoteReplacement {
     DifferentOwner,
     NoteGeneration,
     QueryRevision,
@@ -46,13 +46,13 @@ pub(crate) enum StaleNoteReplacement {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct NoteReplacementOutcome {
-    pub(crate) content: String,
-    pub(crate) changed: bool,
+pub struct NoteReplacementOutcome {
+    pub content: String,
+    pub changed: bool,
     /// Character offset immediately after the replacement text.
-    pub(crate) caret_char: usize,
+    pub caret_char: usize,
     /// The next match after the inserted text, if present.
-    pub(crate) next_match: Option<NoteFindMatch>,
+    pub next_match: Option<NoteFindMatch>,
     owner_token: Arc<()>,
     note_generation: u64,
     query_revision: u64,
@@ -63,7 +63,7 @@ pub(crate) struct NoteReplacementOutcome {
     committed: bool,
 }
 
-pub(crate) struct NoteFindState {
+pub struct NoteFindState {
     owner_token: Arc<()>,
     note_generation: u64,
     open: bool,
@@ -108,37 +108,37 @@ impl Default for NoteFindState {
 }
 
 impl NoteFindState {
-    pub(crate) fn is_open(&self) -> bool {
+    pub fn is_open(&self) -> bool {
         self.open
     }
 
-    pub(crate) fn content_revision(&self) -> u64 {
+    pub fn content_revision(&self) -> u64 {
         self.content_revision
     }
 
-    pub(crate) fn query_revision(&self) -> u64 {
+    pub fn query_revision(&self) -> u64 {
         self.query_revision
     }
 
-    pub(crate) fn navigation_revision(&self) -> u64 {
+    pub fn navigation_revision(&self) -> u64 {
         self.navigation_revision
     }
 
-    pub(crate) fn open(&mut self) {
+    pub fn open(&mut self) {
         self.open = true;
     }
 
-    pub(crate) fn close(&mut self) {
+    pub fn close(&mut self) {
         self.open = false;
     }
 
-    pub(crate) fn query(&self) -> &str {
+    pub fn query(&self) -> &str {
         &self.query
     }
 
     /// Returns whether the query changed. Literal regex compilation happens
     /// only at this boundary, never while the panel is merely rendering.
-    pub(crate) fn set_query(&mut self, query: impl Into<String>) -> bool {
+    pub fn set_query(&mut self, query: impl Into<String>) -> bool {
         let query = query.into();
         if self.query == query {
             return false;
@@ -164,7 +164,7 @@ impl NoteFindState {
 
     /// Call after any mutation of this panel's source, including external
     /// replacement with text that happens to have the same length.
-    pub(crate) fn content_changed(&mut self) {
+    pub fn content_changed(&mut self) {
         self.content_revision = self.content_revision.wrapping_add(1);
         self.invalidate_index();
     }
@@ -176,7 +176,7 @@ impl NoteFindState {
         self.invalidate_index();
     }
 
-    pub(crate) fn reset_for_new_note(&mut self) {
+    pub fn reset_for_new_note(&mut self) {
         self.note_generation = self.note_generation.wrapping_add(1);
         self.query.clear();
         self.compiled_query = None;
@@ -196,22 +196,22 @@ impl NoteFindState {
         }
     }
 
-    pub(crate) fn results(&mut self, content: &str) -> &[NoteFindMatch] {
+    pub fn results(&mut self, content: &str) -> &[NoteFindMatch] {
         self.ensure_indexed(content);
         &self.matches
     }
 
-    pub(crate) fn current_index(&mut self, content: &str) -> Option<usize> {
+    pub fn current_index(&mut self, content: &str) -> Option<usize> {
         self.ensure_indexed(content);
         self.current_index
     }
 
-    pub(crate) fn current_match(&mut self, content: &str) -> Option<&NoteFindMatch> {
+    pub fn current_match(&mut self, content: &str) -> Option<&NoteFindMatch> {
         self.ensure_indexed(content);
         self.current_index.and_then(|index| self.matches.get(index))
     }
 
-    pub(crate) fn next(&mut self, content: &str) -> Option<&NoteFindMatch> {
+    pub fn next(&mut self, content: &str) -> Option<&NoteFindMatch> {
         self.restore_global_index_for_navigation(content, SearchDirection::Next);
         self.ensure_indexed(content);
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
@@ -225,7 +225,7 @@ impl NoteFindState {
         self.matches.get(next)
     }
 
-    pub(crate) fn previous(&mut self, content: &str) -> Option<&NoteFindMatch> {
+    pub fn previous(&mut self, content: &str) -> Option<&NoteFindMatch> {
         self.restore_global_index_for_navigation(content, SearchDirection::Previous);
         self.ensure_indexed(content);
         self.navigation_revision = self.navigation_revision.wrapping_add(1);
@@ -241,7 +241,7 @@ impl NoteFindState {
         self.matches.get(previous)
     }
 
-    pub(crate) fn prepare_replace_current(
+    pub fn prepare_replace_current(
         &mut self,
         content: &str,
         replacement: &str,
@@ -267,7 +267,7 @@ impl NoteFindState {
         })
     }
 
-    pub(crate) fn prepare_replace_all(
+    pub fn prepare_replace_all(
         &mut self,
         content: &str,
         replacement: &str,
@@ -295,7 +295,7 @@ impl NoteFindState {
         })
     }
 
-    pub(crate) fn apply_prepared_replacement(
+    pub fn apply_prepared_replacement(
         &mut self,
         current_content: &str,
         prepared: PreparedNoteReplacement,
@@ -345,7 +345,7 @@ impl NoteFindState {
     /// Complete the pure replacement after the NotePanel has installed
     /// `outcome.content` through its normal mutation path. A changed source
     /// must have crossed `content_changed()` exactly once before this call.
-    pub(crate) fn commit_replacement_navigation(
+    pub fn commit_replacement_navigation(
         &mut self,
         current_content: &str,
         outcome: &mut NoteReplacementOutcome,

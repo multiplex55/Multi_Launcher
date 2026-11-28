@@ -2290,3 +2290,15 @@ The locked `fast-dev` library checks passed in 25.60s and 24.17s. Integrated lib
 P0.16 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the isolated `ML_TMP_DIR` profile folders, both Paste Sequence shortcuts disabled, and the registered text editor. Verify empty starting contents, exact Unicode and numbered filenames after collisions, editing, subsequent list and Open, and the stock query and History outcomes. Confirm the seeded witness files are intact.
 
 Continue P0.09 checked Note Editor Find and Replace in Edit and Split.
+
+### P0.09 Note Editor Find and Replace
+
+The retained Note Editor exposes Find and Replace in Edit and Split. Find offers Ctrl+F, wrapped Previous and Next, the current match count and Close Find. Committed query changes reveal the exact original source range while Find owns focus. Edit and Split share the retained Find state. Escape closes the Find bar before the pane and preserves an active dirty decision's precedence.
+
+Both frontends use the stock literal Note Find model. GPUI Replace Current edits the exact selected UTF-8 range. Replace All installs one atomic source edit. The model checks the current document, query and selection and settles the next match or caret after the body Change. Composition and pending transitions block the action. The existing Change path refreshes Split preview and tracks dirty content for Save.
+
+The locked `fast-dev` library check passed in 1m 16s. Integrated library and launcher checks passed in 39.65s and 11.97s. Independent review checked the stock model relocation, query selection, composition gates, UTF-8 and CRLF handling and Kit Change ordering. The final grouped link took 18m 36s. Nextest run `237b7443-0f32-4b5b-8590-f08304173a21` passed all 17 selected cases in 5.739s with 9620 skipped. This includes two egui panel cases, the 13 stock model cases and two GPUI model and adapter cases.
+
+P0.09 remains Stage 2. Paired 1516 × 937 Windows replay remains open with the same owned Unicode CRLF note and both Paste Sequence shortcuts disabled. Check Ctrl+F, offscreen selection, forward and reverse wrap, Find focus, Escape, Split preview, one-step Undo and Redo, and Save or Discard. Preview-side match highlighting, Render-only Find and the remaining G12 behavior stay open.
+
+Continue P0.14 checked Enabled controls for History, Temporary Files, and Timers and Alarms.

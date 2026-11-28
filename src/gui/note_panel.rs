@@ -10,7 +10,7 @@ use crate::file_search::actions::{
 use crate::gui::LauncherApp;
 use crate::gui::markdown_export::{ensure_extension, export_note_html, parse_note_image_target};
 use crate::gui::markdown_preview::{MermaidCardsCache, draw_mermaid_card_contents};
-use crate::gui::note_find::{NoteFindMatch, NoteFindState};
+use crate::plugins::note::find::{NoteFindMatch, NoteFindState};
 use crate::gui::note_find_preview::{
     NoteFindPreviewBlock, NoteFindPreviewIndex, inline_note_visible_ranges,
 };

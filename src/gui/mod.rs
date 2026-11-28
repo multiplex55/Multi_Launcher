@@ -88,7 +88,6 @@ mod mouse_gestures_dialog;
 mod mouse_settings_dialog;
 mod multi_manager_actions;
 mod note_clipboard;
-mod note_find;
 mod note_find_preview;
 mod note_form_dialog;
 mod note_graph_dialog;
