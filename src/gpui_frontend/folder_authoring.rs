@@ -40,7 +40,7 @@ fn refresh_folder_query(query: &str, folder_rows: bool, force: bool) -> bool {
 #[derive(Clone)]
 struct Receipt { serial: u64, native: NativeWindow, revision: u64, focus: Option<FocusHandle>, search: Option<SearchReceipt> }
 #[derive(Clone)]
-struct SearchReceipt { generation: u64, row: usize, query: String, action: Action, source: ActivationSource, settings: external_launch::Settings, secondary: bool }
+struct SearchReceipt { generation: u64, row: usize, query: String, action: Action, source: ActivationSource, settings: external_launch::Settings, secondary: bool, omni: Option<Arc<omni_search::Projection>> }
 struct Prepared { entry: Option<FolderEntry>, completion: Option<external_launch::WorkerResult> }
 
 #[derive(Clone)]
@@ -75,7 +75,7 @@ impl RootWindow {
     }
     fn folder_receipt_current(&self, receipt: &Receipt, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.folder_presentation_current(receipt, window, cx)
-            && receipt.search.as_ref().is_none_or(|search| self.search_catalog.providers.folder_row_is_current(&search.query, &search.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()))
+            && receipt.search.as_ref().is_none_or(|search| match &search.omni { Some(projection) => self.search_catalog.providers.omni.child_is_current(&search.query, &search.action, multi_launcher::plugins::omni_search::OmniSource::Folder, projection, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()), None => self.search_catalog.providers.folder_row_is_current(&search.query, &search.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) })
     }
     fn folder_presentation_current(&self, receipt: &Receipt, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.folder_authoring.pending && self.folder_authoring.serial == receipt.serial
@@ -85,7 +85,7 @@ impl RootWindow {
             && json_utility::native_host_current(&self.root_visibility, receipt.revision, Some(receipt.native), false)
             && receipt.search.as_ref().is_none_or(|search| self.query.read(cx).value().as_str() == search.query
                 && self.launcher_results.resolve_result(search.generation, search.row, &search.query)
-                    .is_some_and(|result| result.action == search.action && matches!(result.origin, LauncherResultOrigin::Provider(ref name) if name == "folders")))
+                    .is_some_and(|result| result.action == search.action && match &search.omni { Some(_) => matches!(result.origin, LauncherResultOrigin::Omni(multi_launcher::plugins::omni_search::OmniSource::Folder)), None => matches!(result.origin, LauncherResultOrigin::Provider(ref name) if name == "folders") }))
     }
 
     pub(super) fn start_folder_command(&mut self, generation: u64, row: usize, query: &str, action: Action, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
@@ -94,21 +94,22 @@ impl RootWindow {
             Ok(Command::Storage(StorageCommand::FolderRemove(_))) => Some((None, Some(Review::Remove))),
             _ => None,
         };
-        if let Some((path, review)) = kind { self.begin_folder_operation(generation, row, query, action, path, review, source, false, window, cx); }
+        if let Some((path, review)) = kind { self.begin_folder_operation(generation, row, query, action, path, review, source, false, None, window, cx); }
     }
-    pub(super) fn start_folder_sheet(&mut self, generation: u64, row: usize, query: &str, action: Action, remove: bool, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
-        self.begin_folder_operation(generation, row, query, action, None, Some(if remove { Review::Remove } else { Review::Alias }), source, true, window, cx);
+    pub(super) fn start_folder_sheet(&mut self, generation: u64, row: usize, query: &str, action: Action, remove: bool, source: ActivationSource, omni: Option<Arc<omni_search::Projection>>, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_folder_operation(generation, row, query, action, None, Some(if remove { Review::Remove } else { Review::Alias }), source, true, omni, window, cx);
     }
     fn begin_folder_operation(&mut self, generation: u64, row: usize, query: &str, action: Action,
-        add: Option<String>, review: Option<Review>, source: ActivationSource, secondary: bool, window: &mut Window, cx: &mut Context<Self>) {
+        add: Option<String>, review: Option<Review>, source: ActivationSource, secondary: bool, omni: Option<Arc<omni_search::Projection>>, window: &mut Window, cx: &mut Context<Self>) {
         if self.folder_authoring.busy() || self.bookmark_authoring.busy() || self.external_drop.busy() || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
             || !window.is_window_active() || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
         let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
         self.external_drop.revoke();
         let Some(permit) = self.restart_admission.admit() else { return; };
         let Some(serial) = self.folder_authoring.begin() else { return; };
+        if omni.is_some() && (!secondary || !matches!(review, Some(Review::Alias))) { self.finish_folder_authoring(serial); return; }
         let receipt = Receipt { serial, native, revision: self.root_visibility.request_revision.load(Ordering::Acquire), focus: window.focused(cx),
-            search: Some(SearchReceipt { generation, row, query: query.to_owned(), action, source, settings: self.external_launch_preferences.clone(), secondary }) };
+            search: Some(SearchReceipt { generation, row, query: query.to_owned(), action, source, settings: self.external_launch_preferences.clone(), secondary, omni }) };
         if !self.folder_receipt_current(&receipt, window, cx) { self.finish_folder_authoring(serial); return; }
         let lease = Arc::new(AtomicBool::new(true)); self.folder_authoring.lease = Some(lease.clone());
         let Some(search) = receipt.search.as_ref() else { self.finish_folder_authoring(serial); return; };
@@ -246,46 +247,168 @@ impl RootWindow {
                             }))))
         });
     }
-    fn commit_folder_review(&mut self, receipt: Receipt, entry: FolderEntry, review: Review, alias: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(permit) = self.restart_admission.admit() else { return; };
-        if !self.folder_authoring.claim_review(receipt.serial) { return; }
+    fn commit_folder_review(
+        &mut self,
+        receipt: Receipt,
+        entry: FolderEntry,
+        review: Review,
+        alias: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(permit) = self.restart_admission.admit() else {
+            return;
+        };
+        if !self.folder_authoring.claim_review(receipt.serial) {
+            return;
+        }
         window.close_dialog(cx);
-        let lease = Arc::new(AtomicBool::new(true)); self.folder_authoring.lease = Some(lease.clone());
-        let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone(); let native = receipt.native; let revision = receipt.revision;
-        let worker_completion = receipt.search.as_ref().map(CompletionData::from); let secondary = receipt.search.as_ref().is_none_or(|search| search.secondary);
-        let task = cx.background_executor().spawn(async move {
-            let mutation = match review { Review::Alias => CheckedFolderMutation::SetAlias(alias), Review::Remove => CheckedFolderMutation::Remove };
-            folders::checked_folder_update(folders::FOLDERS_FILE, &entry, mutation, || lease.load(Ordering::Acquire)
-                && !admission.is_fenced() && current_foreground_identity() == Some(native.identity)
-                && json_utility::native_host_current(&visibility, revision, Some(native), false))?;
-            Ok::<_, anyhow::Error>(if matches!(review, Review::Remove) && !secondary {
-                worker_completion.map(|completion_data| completion(&completion_data, StorageCommand::FolderRemove(entry.path)))
-            } else { None })
-        });
-        let root = cx.entity().downgrade(); let host = window.window_handle(); let serial = receipt.serial;
-        cx.spawn(async move |_, cx| {
-            let result = task.await;
-            let updated = host.update(cx, |_, window, app| { let _ = root.update(app, |root, cx| {
-                let current = root.folder_presentation_current(&receipt, window, cx)
-                    && (if receipt.search.is_none() { root.drop_focus_current(receipt.focus.as_ref(), window, cx) }
-                       else { root.external_owner_is_current(receipt.focus.as_ref(), window, cx) })
-                    && !window.has_active_dialog(cx);
-                if root.finish_folder_authoring(serial) {
-                    match result {
-                        Ok(Some(completion)) => root.finish_folder_completion(&receipt, completion, current, window, cx),
-                        Ok(None) => root.folder_updated(current, cx),
-                        Err(error) if current => root.launcher_search_error = Some(format!("Folder operation failed: {error:#}")),
-                        Err(_) => {}
+        let lease = Arc::new(AtomicBool::new(true));
+        self.folder_authoring.lease = Some(lease.clone());
+        if receipt
+            .search
+            .as_ref()
+            .is_some_and(|search| search.omni.is_some())
+        {
+            let Some(focus) = receipt.focus.clone() else {
+                self.finish_folder_authoring(receipt.serial);
+                return;
+            };
+            let revoked = lease.clone();
+            let guard = cx.on_blur(&focus, window, move |_, _, _| {
+                revoked.store(false, Ordering::Release)
+            });
+            let root = cx.entity().downgrade();
+            window.defer(cx, move |window, cx| {
+                let _ = root.update(cx, |root, cx| {
+                    if !lease.load(Ordering::Acquire)
+                        || !focus.is_focused(window)
+                        || window.has_active_dialog(cx)
+                        || !root.folder_receipt_current(&receipt, window, cx)
+                        || !root.external_owner_is_current(Some(&focus), window, cx)
+                    {
+                        root.finish_folder_authoring(receipt.serial);
+                        cx.notify();
+                        return;
                     }
-                    cx.notify();
-                }
-                let _ = window;
-            }); });
-            if updated.is_err() { let _ = root.update(cx, |root, cx| {
-                if root.finish_folder_authoring(serial) { root.folder_updated(false, cx); cx.notify(); }
-            }); }
+                    root.launch_folder_review(
+                        receipt,
+                        entry,
+                        review,
+                        alias,
+                        permit,
+                        lease,
+                        Some(guard),
+                        window,
+                        cx,
+                    );
+                });
+            });
+        } else {
+            self.launch_folder_review(
+                receipt, entry, review, alias, permit, lease, None, window, cx,
+            );
+        }
+    }
+    fn launch_folder_review(
+        &mut self,
+        receipt: Receipt,
+        entry: FolderEntry,
+        review: Review,
+        alias: String,
+        permit: EffectPermit,
+        lease: Arc<AtomicBool>,
+        guard: Option<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let visibility = self.root_visibility.clone();
+        let admission = self.restart_admission.clone();
+        let native = receipt.native;
+        let revision = receipt.revision;
+        let worker_completion = receipt.search.as_ref().map(CompletionData::from);
+        let secondary = receipt
+            .search
+            .as_ref()
+            .is_none_or(|search| search.secondary);
+        let omni = receipt
+            .search
+            .as_ref()
+            .and_then(|search| search.omni.clone());
+        let feedback_lease = lease.clone();
+        let task = cx.background_executor().spawn(async move {
+            let mutation = match review {
+                Review::Alias => CheckedFolderMutation::SetAlias(alias),
+                Review::Remove => CheckedFolderMutation::Remove,
+            };
+            folders::checked_folder_update(folders::FOLDERS_FILE, &entry, mutation, || {
+                lease.load(Ordering::Acquire)
+                    && omni
+                        .as_ref()
+                        .is_none_or(|projection| projection.settings_current())
+                    && !admission.is_fenced()
+                    && current_foreground_identity() == Some(native.identity)
+                    && json_utility::native_host_current(&visibility, revision, Some(native), false)
+            })?;
+            Ok::<_, anyhow::Error>(if matches!(review, Review::Remove) && !secondary {
+                worker_completion.map(|completion_data| {
+                    completion(&completion_data, StorageCommand::FolderRemove(entry.path))
+                })
+            } else {
+                None
+            })
+        });
+        let root = cx.entity().downgrade();
+        let host = window.window_handle();
+        let serial = receipt.serial;
+        cx.spawn(async move |_, cx| {
+            let _guard = guard;
+            let result = task.await;
+            let updated = host.update(cx, |_, window, app| {
+                let _ = root.update(app, |root, cx| {
+                    let current = root.folder_presentation_current(&receipt, window, cx)
+                        && receipt
+                            .search
+                            .as_ref()
+                            .and_then(|search| search.omni.as_ref())
+                            .is_none_or(|projection| {
+                                feedback_lease.load(Ordering::Acquire)
+                                    && projection.settings_current()
+                            })
+                        && (if receipt.search.is_none() {
+                            root.drop_focus_current(receipt.focus.as_ref(), window, cx)
+                        } else {
+                            root.external_owner_is_current(receipt.focus.as_ref(), window, cx)
+                        })
+                        && !window.has_active_dialog(cx);
+                    if root.finish_folder_authoring(serial) {
+                        match result {
+                            Ok(Some(completion)) => root.finish_folder_completion(
+                                &receipt, completion, current, window, cx,
+                            ),
+                            Ok(None) => root.folder_updated(current, cx),
+                            Err(error) if current => {
+                                root.launcher_search_error =
+                                    Some(format!("Folder operation failed: {error:#}"))
+                            }
+                            Err(_) => {}
+                        }
+                        cx.notify();
+                    }
+                    let _ = window;
+                });
+            });
+            if updated.is_err() {
+                let _ = root.update(cx, |root, cx| {
+                    if root.finish_folder_authoring(serial) {
+                        root.folder_updated(false, cx);
+                        cx.notify();
+                    }
+                });
+            }
             drop(permit);
-        }).detach();
+        })
+        .detach();
     }
 }
 

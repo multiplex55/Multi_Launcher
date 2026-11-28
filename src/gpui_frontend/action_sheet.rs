@@ -10,6 +10,7 @@ pub(super) struct Sheet {
     query: String,
     result: LauncherSearchResult,
     saved_row: Option<(u64, usize, multi_launcher::actions::CustomActionRowTarget)>,
+    omni_child: Option<(multi_launcher::plugins::omni_search::OmniSource, Arc<omni_search::Projection>)>,
     revision: u64,
     return_focus: FocusHandle,
     owner: FocusHandle,
@@ -43,6 +44,16 @@ fn saved_row_receipt(
         index,
         multi_launcher::actions::custom_action_row_target(canonical, index)?,
     ))
+}
+
+fn alias_origin_matches(origin: &LauncherResultOrigin, source: multi_launcher::plugins::omni_search::OmniSource) -> bool {
+    use multi_launcher::plugins::omni_search::OmniSource;
+    match (origin, source) {
+        (LauncherResultOrigin::Provider(name), OmniSource::Folder) => name == "folders",
+        (LauncherResultOrigin::Provider(name), OmniSource::Bookmark) => name == "bookmarks",
+        (LauncherResultOrigin::Omni(OmniSource::Folder), OmniSource::Folder) | (LauncherResultOrigin::Omni(OmniSource::Bookmark), OmniSource::Bookmark) => true,
+        _ => false,
+    }
 }
 
 const APP_EDIT_CONFLICT: &str =
@@ -271,10 +282,16 @@ impl RootWindow {
         .is_some();
         let result = action;
         let action = &result.action;
-        let folder_provider = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders");
-        let bookmark_provider = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks");
-        if folder_provider && !self.search_catalog.providers.folder_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
-            || bookmark_provider && !self.search_catalog.providers.bookmark_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+        let omni_child = match &result.origin {
+            LauncherResultOrigin::Omni(source @ (multi_launcher::plugins::omni_search::OmniSource::Folder | multi_launcher::plugins::omni_search::OmniSource::Bookmark)) => self.search_catalog.providers.omni.projection(&query).filter(|projection| self.search_catalog.providers.omni.child_is_current(&query, action, source.clone(), projection, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())).map(|projection| (source.clone(), projection)),
+            _ => None,
+        };
+        let folder_direct = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders");
+        let bookmark_direct = matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks");
+        let folder_provider = alias_origin_matches(&result.origin, multi_launcher::plugins::omni_search::OmniSource::Folder) && (folder_direct || omni_child.is_some());
+        let bookmark_provider = alias_origin_matches(&result.origin, multi_launcher::plugins::omni_search::OmniSource::Bookmark) && (bookmark_direct || omni_child.is_some());
+        if folder_direct && !self.search_catalog.providers.folder_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+            || bookmark_direct && !self.search_catalog.providers.bookmark_row_is_current(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
             return;
         }
         // Provider rows resolve against their live owner, scoped to the exact selected target.
@@ -282,10 +299,10 @@ impl RootWindow {
         let targets = HashSet::from([action.action.as_str()]);
         let (live_folders, live_bookmarks) = self.search_catalog.providers.current_search_aliases(&targets);
         let empty = HashMap::new();
-        let folder_aliases = if folder_provider { live_folders.as_ref().unwrap_or(&empty) }
-            else if bookmark_provider { &empty } else { &self.search_catalog.folder_aliases_lc };
-        let bookmark_aliases = if bookmark_provider { live_bookmarks.as_ref().unwrap_or(&empty) }
-            else if folder_provider { &empty } else { &self.search_catalog.bookmark_aliases_lc };
+        let folder_aliases = if folder_direct { live_folders.as_ref().unwrap_or(&empty) }
+            else if bookmark_direct { &empty } else { &self.search_catalog.folder_aliases_lc };
+        let bookmark_aliases = if bookmark_direct { live_bookmarks.as_ref().unwrap_or(&empty) }
+            else if folder_direct { &empty } else { &self.search_catalog.bookmark_aliases_lc };
         let resolver = ActionTargetResolverContext::new(
             folder_aliases,
             bookmark_aliases,
@@ -302,6 +319,19 @@ impl RootWindow {
         context.custom_action_row = saved_row.as_ref().map(|(_, _, target)| target.clone());
         context.can_add_favorite = target.target.persistent_ref().is_some();
         let mut actions = UniversalActionRegistry.resolve(&target, &context);
+        if omni_child.is_some() {
+            let child_resolver = ActionTargetResolverContext::new(
+                if folder_provider { live_folders.as_ref().unwrap_or(&empty) } else { &empty },
+                if bookmark_provider { live_bookmarks.as_ref().unwrap_or(&empty) } else { &empty },
+                &[],
+            );
+            let child = ActionTargetResolver.resolve(action, &child_resolver);
+            for choice in UniversalActionRegistry.resolve(&child, &context) {
+                let alias = matches!(&choice.operation, UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path }) if folder_provider && *path == action.action)
+                    || matches!(&choice.operation, UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url }) if bookmark_provider && *url == action.action);
+                if alias && !actions.iter().any(|current| current.id == choice.id) { actions.push(choice); }
+            }
+        }
         actions.retain(|choice| match &choice.operation {
             UniversalActionOperation::InvokePrimary(candidate) => {
                 primary_allowed(&result, candidate, indexed_current, &self.search_catalog.verified_folders)
@@ -314,11 +344,11 @@ impl RootWindow {
                 super::tempfile_alias::admitted(&result, &query, path, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                     && self.tempfile_search.receipt(generation, &query, action).is_some(),
             UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url }) =>
-                matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks") && *url == action.action,
+                bookmark_provider && *url == action.action,
             UniversalActionOperation::Command { command: Command::Storage(StorageCommand::BookmarkRemove(url)), .. } =>
                 matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks") && *url == action.action,
             UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path }) =>
-                matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders") && *path == action.action,
+                folder_provider && *path == action.action,
             UniversalActionOperation::Command { command: Command::Storage(StorageCommand::FolderRemove(path)), .. } =>
                 matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders") && *path == action.action,
             _ => false,
@@ -356,6 +386,7 @@ impl RootWindow {
             query,
             result,
             saved_row,
+            omni_child,
             revision: self
                 .root_visibility
                 .request_revision
@@ -602,19 +633,19 @@ impl RootWindow {
                     }
                     UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url })
                         if url == sheet.result.action.action => {
-                        root.start_bookmark_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), false, source, window, cx);
+                        root.start_bookmark_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), false, source, sheet.omni_child.as_ref().and_then(|(kind, projection)| (*kind == multi_launcher::plugins::omni_search::OmniSource::Bookmark).then(|| projection.clone())), window, cx);
                     }
                     UniversalActionOperation::Command { command: Command::Storage(StorageCommand::BookmarkRemove(url)), .. }
                         if url == sheet.result.action.action => {
-                        root.start_bookmark_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, window, cx);
+                        root.start_bookmark_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, None, window, cx);
                     }
                     UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path })
                         if path == sheet.result.action.action => {
-                        root.start_folder_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), false, source, window, cx);
+                        root.start_folder_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), false, source, sheet.omni_child.as_ref().and_then(|(kind, projection)| (*kind == multi_launcher::plugins::omni_search::OmniSource::Folder).then(|| projection.clone())), window, cx);
                     }
                     UniversalActionOperation::Command { command: Command::Storage(StorageCommand::FolderRemove(path)), .. }
                         if path == sheet.result.action.action => {
-                        root.start_folder_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, window, cx);
+                        root.start_folder_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, None, window, cx);
                     }
                     _ => {}
                 }
@@ -786,7 +817,16 @@ mod tests {
         Action, LauncherResultOrigin, LauncherSearchResult, LauncherSearchResults,
         ResolvedQueryResultsLayout,
     };
-    use super::{APP_EDIT_CONFLICT, clear_sheet_edit_error, primary_allowed, saved_row_receipt, sheet_key_owned, snapshot_matches};
+    use super::{APP_EDIT_CONFLICT, alias_origin_matches, clear_sheet_edit_error, primary_allowed, saved_row_receipt, sheet_key_owned, snapshot_matches};
+
+    #[test]
+    fn alias_origins_reject_saved_and_wrong_omni_child() {
+        use multi_launcher::plugins::omni_search::OmniSource;
+        assert!(alias_origin_matches(&LauncherResultOrigin::Omni(OmniSource::Folder), OmniSource::Folder));
+        assert!(alias_origin_matches(&LauncherResultOrigin::Omni(OmniSource::Bookmark), OmniSource::Bookmark));
+        assert!(!alias_origin_matches(&LauncherResultOrigin::Omni(OmniSource::Folder), OmniSource::Bookmark));
+        assert!(!alias_origin_matches(&LauncherResultOrigin::Saved, OmniSource::Folder));
+    }
 
     #[test]
     fn edit_retry_clears_only_its_own_diagnostic() {

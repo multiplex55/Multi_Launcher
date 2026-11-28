@@ -46,7 +46,7 @@ fn refresh_bookmark_query(query: &str, bookmark_rows: bool, force: bool) -> bool
 }
 
 #[derive(Clone)]
-struct Receipt { serial: u64, generation: u64, row: usize, query: String, action: Action, native: NativeWindow, revision: u64, source: ActivationSource, focus: Option<FocusHandle>, settings: external_launch::Settings, secondary: bool }
+struct Receipt { serial: u64, generation: u64, row: usize, query: String, action: Action, native: NativeWindow, revision: u64, source: ActivationSource, focus: Option<FocusHandle>, settings: external_launch::Settings, secondary: bool, omni: Option<Arc<omni_search::Projection>> }
 struct Prepared { entry: Option<BookmarkEntry>, completion: Option<external_launch::WorkerResult> }
 
 #[derive(Clone)]
@@ -81,7 +81,7 @@ impl RootWindow {
     }
     fn bookmark_receipt_current(&self, receipt: &Receipt, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.bookmark_presentation_current(receipt, window, cx)
-            && self.search_catalog.providers.bookmark_row_is_current(&receipt.query, &receipt.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+            && match &receipt.omni { Some(projection) => self.search_catalog.providers.omni.child_is_current(&receipt.query, &receipt.action, multi_launcher::plugins::omni_search::OmniSource::Bookmark, projection, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()), None => self.search_catalog.providers.bookmark_row_is_current(&receipt.query, &receipt.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) }
     }
     fn bookmark_presentation_current(&self, receipt: &Receipt, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.bookmark_authoring.pending && self.bookmark_authoring.serial == receipt.serial
@@ -91,7 +91,7 @@ impl RootWindow {
             && json_utility::native_host_current(&self.root_visibility, receipt.revision, Some(receipt.native), false)
             && self.query.read(cx).value().as_str() == receipt.query
             && self.launcher_results.resolve_result(receipt.generation, receipt.row, &receipt.query)
-                .is_some_and(|result| result.action == receipt.action && matches!(result.origin, LauncherResultOrigin::Provider(ref name) if name == "bookmarks"))
+                .is_some_and(|result| result.action == receipt.action && match &receipt.omni { Some(_) => matches!(result.origin, LauncherResultOrigin::Omni(multi_launcher::plugins::omni_search::OmniSource::Bookmark)), None => matches!(result.origin, LauncherResultOrigin::Provider(ref name) if name == "bookmarks") })
     }
 
     pub(super) fn start_bookmark_command(&mut self, generation: u64, row: usize, query: &str, action: Action, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
@@ -101,21 +101,22 @@ impl RootWindow {
             Ok(Command::Storage(StorageCommand::BookmarkRemove(_))) => Some((None, Some(Review::Remove))),
             _ => None,
         };
-        if let Some((path, review)) = kind { self.begin_bookmark_operation(generation, row, query, action, path, review, source, false, window, cx); }
+        if let Some((path, review)) = kind { self.begin_bookmark_operation(generation, row, query, action, path, review, source, false, None, window, cx); }
     }
-    pub(super) fn start_bookmark_sheet(&mut self, generation: u64, row: usize, query: &str, action: Action, remove: bool, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
-        self.begin_bookmark_operation(generation, row, query, action, None, Some(if remove { Review::Remove } else { Review::Alias }), source, true, window, cx);
+    pub(super) fn start_bookmark_sheet(&mut self, generation: u64, row: usize, query: &str, action: Action, remove: bool, source: ActivationSource, omni: Option<Arc<omni_search::Projection>>, window: &mut Window, cx: &mut Context<Self>) {
+        self.begin_bookmark_operation(generation, row, query, action, None, Some(if remove { Review::Remove } else { Review::Alias }), source, true, omni, window, cx);
     }
     fn begin_bookmark_operation(&mut self, generation: u64, row: usize, query: &str, action: Action,
-        add: Option<String>, review: Option<Review>, source: ActivationSource, secondary: bool, window: &mut Window, cx: &mut Context<Self>) {
+        add: Option<String>, review: Option<Review>, source: ActivationSource, secondary: bool, omni: Option<Arc<omni_search::Projection>>, window: &mut Window, cx: &mut Context<Self>) {
         if self.bookmark_authoring.busy() || self.folder_authoring.busy() || self.external_drop.busy() || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
             || !window.is_window_active() || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
         let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
         self.external_drop.revoke();
         let Some(permit) = self.restart_admission.admit() else { return; };
         let Some(serial) = self.bookmark_authoring.begin() else { return; };
+        if omni.is_some() && (!secondary || !matches!(review, Some(Review::Alias))) { self.finish_bookmark_authoring(serial); return; }
         let receipt = Receipt { serial, generation, row, query: query.to_owned(), action, native,
-            revision: self.root_visibility.request_revision.load(Ordering::Acquire), source, focus: window.focused(cx), settings: self.external_launch_preferences.clone(), secondary };
+            revision: self.root_visibility.request_revision.load(Ordering::Acquire), source, focus: window.focused(cx), settings: self.external_launch_preferences.clone(), secondary, omni };
         if !self.bookmark_receipt_current(&receipt, window, cx) { self.finish_bookmark_authoring(serial); return; }
         if matches!(review, Some(Review::Add)) {
             self.show_bookmark_review(receipt, BookmarkEntry { url: String::new(), alias: None }, None, Review::Add, window, cx);
@@ -255,51 +256,192 @@ impl RootWindow {
                             }))))
         });
     }
-    fn commit_bookmark_review(&mut self, receipt: Receipt, entry: BookmarkEntry, review: Review, alias: String, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(permit) = self.restart_admission.admit() else { return; };
-        if !self.bookmark_authoring.claim_review(receipt.serial) { return; }
+    fn commit_bookmark_review(
+        &mut self,
+        receipt: Receipt,
+        entry: BookmarkEntry,
+        review: Review,
+        alias: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(permit) = self.restart_admission.admit() else {
+            return;
+        };
+        if !self.bookmark_authoring.claim_review(receipt.serial) {
+            return;
+        }
         window.close_dialog(cx);
-        let lease = Arc::new(AtomicBool::new(true)); self.bookmark_authoring.lease = Some(lease.clone());
-        let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone(); let native = receipt.native; let revision = receipt.revision;
-        let worker_completion = CompletionData::from(&receipt); let secondary = receipt.secondary;
-        let retry_entry = entry.clone(); let retry_alias = alias.clone();
+        let lease = Arc::new(AtomicBool::new(true));
+        self.bookmark_authoring.lease = Some(lease.clone());
+        if receipt.omni.is_some() {
+            let Some(focus) = receipt.focus.clone() else {
+                self.finish_bookmark_authoring(receipt.serial);
+                return;
+            };
+            let revoked = lease.clone();
+            let guard = cx.on_blur(&focus, window, move |_, _, _| {
+                revoked.store(false, Ordering::Release)
+            });
+            let root = cx.entity().downgrade();
+            window.defer(cx, move |window, cx| {
+                let _ = root.update(cx, |root, cx| {
+                    if !lease.load(Ordering::Acquire)
+                        || !focus.is_focused(window)
+                        || window.has_active_dialog(cx)
+                        || !root.bookmark_receipt_current(&receipt, window, cx)
+                        || !root.external_owner_is_current(Some(&focus), window, cx)
+                    {
+                        root.finish_bookmark_authoring(receipt.serial);
+                        cx.notify();
+                        return;
+                    }
+                    root.launch_bookmark_review(
+                        receipt,
+                        entry,
+                        review,
+                        alias,
+                        permit,
+                        lease,
+                        Some(guard),
+                        window,
+                        cx,
+                    );
+                });
+            });
+        } else {
+            self.launch_bookmark_review(
+                receipt, entry, review, alias, permit, lease, None, window, cx,
+            );
+        }
+    }
+    fn launch_bookmark_review(
+        &mut self,
+        receipt: Receipt,
+        entry: BookmarkEntry,
+        review: Review,
+        alias: String,
+        permit: EffectPermit,
+        lease: Arc<AtomicBool>,
+        guard: Option<Subscription>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let visibility = self.root_visibility.clone();
+        let admission = self.restart_admission.clone();
+        let native = receipt.native;
+        let revision = receipt.revision;
+        let worker_completion = CompletionData::from(&receipt);
+        let secondary = receipt.secondary;
+        let omni = receipt.omni.clone();
+        let feedback_lease = lease.clone();
+        let retry_entry = entry.clone();
+        let retry_alias = alias.clone();
         let task = cx.background_executor().spawn(async move {
-            let current = || lease.load(Ordering::Acquire) && !admission.is_fenced()
-                && current_foreground_identity() == Some(native.identity)
-                && json_utility::native_host_current(&visibility, revision, Some(native), false);
+            let current = || {
+                lease.load(Ordering::Acquire)
+                    && !admission.is_fenced()
+                    && omni
+                        .as_ref()
+                        .is_none_or(|projection| projection.settings_current())
+                    && current_foreground_identity() == Some(native.identity)
+                    && json_utility::native_host_current(&visibility, revision, Some(native), false)
+            };
             match review {
-                Review::Add => { bookmarks::checked_add_bookmark(bookmarks::BOOKMARKS_FILE, &entry.url, Some(&alias), current)?; }
-                Review::Alias => { bookmarks::checked_bookmark_update(bookmarks::BOOKMARKS_FILE, &entry, CheckedBookmarkMutation::SetAlias(alias), current)?; }
-                Review::Remove => { bookmarks::checked_bookmark_update(bookmarks::BOOKMARKS_FILE, &entry, CheckedBookmarkMutation::Remove, current)?; }
+                Review::Add => {
+                    bookmarks::checked_add_bookmark(
+                        bookmarks::BOOKMARKS_FILE,
+                        &entry.url,
+                        Some(&alias),
+                        current,
+                    )?;
+                }
+                Review::Alias => {
+                    bookmarks::checked_bookmark_update(
+                        bookmarks::BOOKMARKS_FILE,
+                        &entry,
+                        CheckedBookmarkMutation::SetAlias(alias),
+                        current,
+                    )?;
+                }
+                Review::Remove => {
+                    bookmarks::checked_bookmark_update(
+                        bookmarks::BOOKMARKS_FILE,
+                        &entry,
+                        CheckedBookmarkMutation::Remove,
+                        current,
+                    )?;
+                }
             }
             Ok::<_, anyhow::Error>(if matches!(review, Review::Remove) && !secondary {
-                Some(completion(&worker_completion, StorageCommand::BookmarkRemove(entry.url)))
-            } else { None })
+                Some(completion(
+                    &worker_completion,
+                    StorageCommand::BookmarkRemove(entry.url),
+                ))
+            } else {
+                None
+            })
         });
-        let root = cx.entity().downgrade(); let host = window.window_handle(); let serial = receipt.serial;
+        let root = cx.entity().downgrade();
+        let host = window.window_handle();
+        let serial = receipt.serial;
         cx.spawn(async move |_, cx| {
+            let _guard = guard;
             let result = task.await;
-            let updated = host.update(cx, |_, window, app| { let _ = root.update(app, |root, cx| {
-                let current = root.bookmark_presentation_current(&receipt, window, cx)
-                    && root.external_owner_is_current(receipt.focus.as_ref(), window, cx) && !window.has_active_dialog(cx);
-                if root.bookmark_authoring.serial != serial || !root.bookmark_authoring.pending { return; }
-                match result {
-                    Ok(Some(completion)) => { root.finish_bookmark_authoring(serial); root.finish_bookmark_completion(&receipt, completion, current, window, cx); },
-                    Ok(None) => { root.finish_bookmark_authoring(serial); root.bookmark_updated(current, cx); },
-                    Err(error) if current => {
-                        root.show_bookmark_review(receipt.clone(), retry_entry, Some(retry_alias), review, window, cx);
-                        root.bookmark_authoring.feedback = Some(format!("Bookmark operation failed: {error:#}"));
-                    },
-                    Err(_) => { root.finish_bookmark_authoring(serial); }
-                }
-                cx.notify();
-                let _ = window;
-            }); });
-            if updated.is_err() { let _ = root.update(cx, |root, cx| {
-                if root.finish_bookmark_authoring(serial) { root.bookmark_updated(false, cx); cx.notify(); }
-            }); }
+            let updated = host.update(cx, |_, window, app| {
+                let _ = root.update(app, |root, cx| {
+                    let current = root.bookmark_presentation_current(&receipt, window, cx)
+                        && receipt.omni.as_ref().is_none_or(|projection| {
+                            feedback_lease.load(Ordering::Acquire) && projection.settings_current()
+                        })
+                        && root.external_owner_is_current(receipt.focus.as_ref(), window, cx)
+                        && !window.has_active_dialog(cx);
+                    if root.bookmark_authoring.serial != serial || !root.bookmark_authoring.pending
+                    {
+                        return;
+                    }
+                    match result {
+                        Ok(Some(completion)) => {
+                            root.finish_bookmark_authoring(serial);
+                            root.finish_bookmark_completion(
+                                &receipt, completion, current, window, cx,
+                            );
+                        }
+                        Ok(None) => {
+                            root.finish_bookmark_authoring(serial);
+                            root.bookmark_updated(current, cx);
+                        }
+                        Err(error) if current => {
+                            root.show_bookmark_review(
+                                receipt.clone(),
+                                retry_entry,
+                                Some(retry_alias),
+                                review,
+                                window,
+                                cx,
+                            );
+                            root.bookmark_authoring.feedback =
+                                Some(format!("Bookmark operation failed: {error:#}"));
+                        }
+                        Err(_) => {
+                            root.finish_bookmark_authoring(serial);
+                        }
+                    }
+                    cx.notify();
+                    let _ = window;
+                });
+            });
+            if updated.is_err() {
+                let _ = root.update(cx, |root, cx| {
+                    if root.finish_bookmark_authoring(serial) {
+                        root.bookmark_updated(false, cx);
+                        cx.notify();
+                    }
+                });
+            }
             drop(permit);
-        }).detach();
+        })
+        .detach();
     }
 }
 

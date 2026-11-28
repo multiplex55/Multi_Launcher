@@ -25,6 +25,22 @@ pub(super) fn notes_enabled(
         && multi_launcher::settings::provider_search_capability_enabled(capabilities, "omni_search")
 }
 
+fn child_enabled(
+    source: &OmniSource,
+    settings: &OmniSearchSettings,
+    enabled: Option<&HashSet<String>>,
+    capabilities: Option<&HashMap<String, Vec<String>>>,
+) -> bool {
+    let included = match source {
+        OmniSource::Folder => settings.include_folders,
+        OmniSource::Bookmark => settings.include_bookmarks,
+        _ => false,
+    };
+    included
+        && enabled.is_none_or(|set| set.contains("omni_search"))
+        && multi_launcher::settings::provider_search_capability_enabled(capabilities, "omni_search")
+}
+
 fn action_hash(action: &Action) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     action.label.hash(&mut hasher);
@@ -42,6 +58,7 @@ pub(super) struct Projection {
     settings_revision: (Arc<AtomicU64>, u64),
 }
 impl Projection {
+    pub(super) fn settings_current(&self) -> bool { self.settings_revision.0.load(Ordering::Acquire) == self.settings_revision.1 }
     pub fn calendar_stamp(&self) -> Option<(Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, Arc<multi_launcher::plugins::calendar::CheckedCalendarSnapshot>)> {
         self.calendar.clone()
     }
@@ -195,6 +212,42 @@ impl Provider {
     }
     pub fn source_for(&self, raw_query: &str, action: &Action) -> Option<OmniSource> {
         self.projection(raw_query)?.source_for(action)
+    }
+
+    /// Check an Omni child against its original projection and the same watched child owner.
+    pub(super) fn child_is_current(
+        &self,
+        raw_query: &str,
+        action: &Action,
+        source: OmniSource,
+        issued: &Arc<Projection>,
+        enabled: Option<&HashSet<String>>,
+        caps: Option<&HashMap<String, Vec<String>>>,
+    ) -> bool {
+        let settings = self.settings();
+        if !child_enabled(&source, &settings, enabled, caps)
+            || !self
+                .projection(raw_query)
+                .is_some_and(|current| Arc::ptr_eq(&current, issued))
+            || issued.source_for(action) != Some(source.clone())
+        {
+            return false;
+        }
+        let effective = multi_launcher::common::query::split_action_filters(raw_query).0;
+        project_omni(
+            &effective,
+            &settings,
+            &OmniSources {
+                folders: self.folders.as_deref().map(|owner| owner as &dyn Plugin),
+                bookmarks: self.bookmarks.as_deref().map(|owner| owner as &dyn Plugin),
+                apps: None,
+                notes: None,
+                todos: None,
+                calendar: None,
+            },
+        )
+        .iter()
+        .any(|row| row.source == source && row.action == *action)
     }
 }
 
@@ -613,6 +666,94 @@ mod tests {
         collections::{HashMap, HashSet},
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn alias_children_follow_omni_gate_independent_of_direct_search() {
+        let settings = multi_launcher::plugins::omni_search::OmniSearchSettings::default();
+        let enabled = HashSet::from(["omni_search".to_owned()]);
+        let capabilities = HashMap::from([("folders".to_owned(), Vec::new()), ("bookmarks".to_owned(), Vec::new())]);
+        assert!(super::child_enabled(&OmniSource::Folder, &settings, Some(&enabled), Some(&capabilities)));
+        assert!(super::child_enabled(&OmniSource::Bookmark, &settings, Some(&enabled), Some(&capabilities)));
+        let mut no_folder = settings.clone(); no_folder.include_folders = false;
+        assert!(!super::child_enabled(&OmniSource::Folder, &no_folder, Some(&enabled), Some(&capabilities)));
+        assert!(!super::child_enabled(&OmniSource::Bookmark, &settings, Some(&HashSet::new()), None));
+        let no_omni_search = HashMap::from([("omni_search".to_owned(), Vec::new())]);
+        assert!(!super::child_enabled(&OmniSource::Folder, &settings, Some(&enabled), Some(&no_omni_search)));
+    }
+
+    #[test]
+    fn watched_folder_alias_requires_original_projection_and_live_omni_category() {
+        use multi_launcher::plugins::folders;
+        let dir = tempfile::tempdir().unwrap();
+        let folder_path = dir.path().join("folders.json");
+        let folder_store = folder_path.to_str().unwrap();
+        folders::save_folders(
+            folder_store,
+            &[folders::FolderEntry {
+                label: "shared folder".into(),
+                path: dir.path().join("shared").to_string_lossy().into_owned(),
+                alias: None,
+            }],
+        )
+        .unwrap();
+        let folder = Arc::new(folders::FoldersPlugin::new_for_path_with_wake(
+            folder_store,
+            Some(Arc::new(|| {})),
+        ));
+        let provider = Provider::new(
+            Some(folder),
+            None,
+            Arc::new(Mutex::new(None)),
+            Arc::new(super::super::search_providers::NoteSnapshots::default()),
+        );
+        let actions = provider.search("o shared");
+        let projection = provider.projection("o shared").unwrap();
+        let folder = actions
+            .iter()
+            .find(|action| projection.source_for(action) == Some(OmniSource::Folder))
+            .unwrap();
+        let enabled = HashSet::from(["omni_search".to_owned()]);
+        let caps = HashMap::from([
+            ("folders".to_owned(), Vec::new()),
+            ("bookmarks".to_owned(), Vec::new()),
+        ]);
+        assert!(provider.child_is_current(
+            "o shared",
+            folder,
+            OmniSource::Folder,
+            &projection,
+            Some(&enabled),
+            Some(&caps)
+        ));
+        assert!(!provider.child_is_current(
+            "o shared",
+            folder,
+            OmniSource::Bookmark,
+            &projection,
+            Some(&enabled),
+            Some(&caps)
+        ));
+        assert!(!provider.child_is_current(
+            "o other",
+            folder,
+            OmniSource::Folder,
+            &projection,
+            Some(&enabled),
+            Some(&caps)
+        ));
+        let mut settings = provider.settings();
+        settings.include_folders = false;
+        assert!(provider.apply_categories(settings));
+        assert!(!projection.settings_current());
+        assert!(!provider.child_is_current(
+            "o shared",
+            folder,
+            OmniSource::Folder,
+            &projection,
+            Some(&enabled),
+            Some(&caps)
+        ));
+    }
 
     #[test]
     fn calendar_omni_projects_stock_routes_without_direct_calendar_gate() {

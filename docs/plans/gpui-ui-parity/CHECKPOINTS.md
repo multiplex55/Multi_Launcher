@@ -2158,3 +2158,15 @@ The final locked `fast-dev` launcher check passed in 4.23s and the single launch
 P0.02 remains Stage 2. Paired 1516 × 937 Windows replay remains open. The isolated profiles contain a saved app behind an unprojected canonical row and an identical duplicate pair, with both Paste Sequence shortcuts disabled. Verify selecting the second app, prefilled path and Args, Browse Cancel, exact single-row Save and explicit egui readback. Direct duplicate rows and the indexed App Editor tail retain their existing paths.
 
 Continue P0.03/P0.04/P0.06 Set Alias on Omni Folder and Bookmark results through the existing checked Alias owners.
+
+### P0.03 P0.04 P0.06 Set Alias from Omni Search
+
+The stock Action Sheet **Set Alias** action uses the checked Folder and Bookmark forms for their exact Omni child results. Omni membership, Search capability and the matching category govern the action. Direct Folder and Bookmark Search can be disabled. The Action Sheet checks the exact typed source against its original projection and the watched child owner.
+
+Save uses the checked canonical record, exact path or raw URL and original Omni settings revision. After the dialog restores Search focus, a deferred worker keeps that focus authority until the final checked write. A matching success settles before refreshing the current Omni or direct Search results. Alias changes do not launch the result or record History or Usage.
+
+Locked `fast-dev` launcher checks passed in 5.69s and 35.38s. Independent review cleared exact receipt and final category authority, focus and settlement, and fixture isolation. The launcher-only link took 1m 24s. Nextest run `363d02fb-8734-4662-a90d-291b84ebdc11` passed six of six in 2.914s. It covered a real watched Folder owner, typed Folder and Bookmark admission, category retirement and unrelated-query isolation. Nextest run `d3254078-7fff-4c0f-bad8-972e044cda78` reused the library artifact to pass four unchanged stock store cases in 1.003s.
+
+P0.03, P0.04 and P0.06 remain Stage 2. Paired 1516 × 937 Windows replay remains open. The owned profiles enable Omni Folder and Bookmark with direct Search and both Paste Sequence shortcuts disabled. Verify prefills, Cancel, retained Search focus, exact saved Alias, unchanged siblings, Search refresh and egui readback for both child sources. Folder Repair retains the existing cross-store criteria.
+
+Continue P0.01/P0.02 checked History replay for saved apps.

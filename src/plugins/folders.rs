@@ -474,7 +474,8 @@ impl FoldersPlugin {
         Self::new_for_path_with_wake(FOLDERS_FILE, Some(wake))
     }
 
-    fn new_for_path_with_wake(path: &str, wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
+    /// Use the watched folder owner with an explicit store path.
+    pub fn new_for_path_with_wake(path: &str, wake: Option<Arc<dyn Fn() + Send + Sync>>) -> Self {
         let data = {
             let _transaction = folders_transaction_guard();
             let startup = match load_folders(path) {
