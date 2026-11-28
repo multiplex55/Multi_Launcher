@@ -17,7 +17,7 @@ impl Plugin for BatchRenamePlugin {
     }
 
     fn name(&self) -> &str {
-        "batch_rename"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

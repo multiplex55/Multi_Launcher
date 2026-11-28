@@ -32,7 +32,7 @@ impl Plugin for DiffPlugin {
         }
     }
     fn name(&self) -> &str {
-        "diff"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Compare two files or folders"

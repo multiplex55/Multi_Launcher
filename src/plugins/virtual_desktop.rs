@@ -687,7 +687,7 @@ impl Plugin for VirtualDesktopPlugin {
     }
 
     fn name(&self) -> &str {
-        "virtual_desktop"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Manage Windows virtual desktops (prefix: `vd`)"

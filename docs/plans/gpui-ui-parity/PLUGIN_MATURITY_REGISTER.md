@@ -1,6 +1,6 @@
 # Plugin Maturity Register
 
-The built-in inventory comes from [PluginManager::reload_from_dirs](../../../src/plugin.rs#L910). It has 91 identifiers on Windows and 89 on other platforms. Only built-in `file_operations` and `downloads_triage` are registration-gated to Windows. Runtime support and GPUI admission can be narrower. Dynamic libraries are tracked in the original parity matrix. [Installed GPUI provider list](../../../src/gpui_frontend/search_providers.rs#L211) · [GPUI dispatch](../../../src/gpui_frontend.rs)
+The built-in inventory comes from the [passive stock declaration](../../../src/plugin.rs#L128) shared with PluginManager registration. It has 91 identifiers on Windows and 89 on other platforms. Only built-in `file_operations` and `downloads_triage` are registration-gated to Windows. Runtime support and GPUI admission can be narrower. Dynamic libraries are tracked in the original parity matrix. [Installed GPUI provider list](../../../src/gpui_frontend/search_providers.rs#L211) · [GPUI dispatch](../../../src/gpui_frontend.rs)
 
 Each row describes the registered route as scoped here. Shared services, a registered identifier, an item in Help, an admitted Search row and functional execution are distinct. Stage 2 requires focused working-route evidence. Stage 3 requires essential native smoke for that workflow. Read the authoritative [User Priorities](USER_PRIORITIES.md), [Daily-Driver Readiness](DAILY_DRIVER_READINESS.md), [Goal Register](GOAL_REGISTER.md) and [original parity matrix](PARITY_MATRIX.md).
 
@@ -173,7 +173,7 @@ The [19 ordered P0 workflows](DAILY_DRIVER_READINESS.md#current-readiness) share
 
 Count built-in rows once by registration identifier. Report Stage 1–5 separately, real GPUI functionality, Search admission only, and unstarted routes. Report P0 workflow readiness separately using its 19-row register. For tier counts, use built-in rows plus separately identified non-plugin workflow rows, tallying those two denominators explicitly where overlapping workflows would otherwise be double counted. A target met means the listed interim stage passed with applicable evidence. Pending means no active implementation, and blocked requires a concrete dependency. Original GUI and acceptance counts stay in [Progress](PROGRESS.md) and the [parity matrix](PARITY_MATRIX.md).
 
-Windows snapshot after P1.02 Dashboard Editor. **91 built-ins**, with **54 Stage 1, 30 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **37** have real GPUI functionality within the stated route. **0** have Search admission alone. **54** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **16 at Stage 2** and **3 at Stage 3 or higher**.
+Windows snapshot after the P0.14 passive stock plugin ID catalog. **91 built-ins**, with **54 Stage 1, 30 Stage 2, 7 Stage 3, 0 Stage 4 and 0 Stage 5**. **37** have real GPUI functionality within the stated route. **0** have Search admission alone. **54** remain without a verified functional GPUI route. The separate P0 readiness denominator is **19 workflows**, with **16 at Stage 2** and **3 at Stage 3 or higher**.
 
 | Priority tier · built-ins only | Assigned | Current target met | Started below target | Pending | Blocked by an external dependency |
 | --- | --- | --- | --- | --- | --- |

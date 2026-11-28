@@ -22,7 +22,7 @@ impl Plugin for TextCasePlugin {
     }
 
     fn name(&self) -> &str {
-        "text_case"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Convert text cases (prefix: `case`)"

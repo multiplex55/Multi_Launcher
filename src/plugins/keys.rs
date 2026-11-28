@@ -36,7 +36,7 @@ impl Plugin for KeysPlugin {
     }
 
     fn name(&self) -> &str {
-        "keys"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -2068,3 +2068,13 @@ The locked `fast-dev` shared checks passed in 1m 20s and 1m 04s. The final locke
 Stage 2. Paired 1516 × 937 Windows replay remains open in owned Dashboard-on and Dashboard-off profiles with both Paste Sequence shortcuts disabled. Exercise Search and Settings entry, placed and swapped rows, the named Remove review and Cancel, Save and egui readback, conflict and discard, compact focus and dirty close. Widget Properties, Reset, drag and preview, presentation memory, pop-out, Jump and original G23 acceptance remain open.
 
 Continue the P0.14 passive stock plugin ID catalog. It is a source-side prerequisite for checked membership editing while essential P0 Windows replay is paused. Preserve all membership and live owner criteria.
+
+### P0.14 passive stock plugin ID catalog
+
+The shared plugin owner now exposes the ordered built-in IDs as a static slice. The stock manager and the passive catalog consume one declaration. Each stock plugin's name uses the same ID, including the existing Mouse Gestures constant. A passive read constructs no plugin and starts no service. The two Windows-only registrations remain gated. Actual registration keeps the SystemData and saved-alarm boundaries, applies plugin Settings, then loads dynamic directories and applies runtime membership. The public dynamic plugin interface remains compatible.
+
+Independent source review compared all 91 Windows IDs, their registration order, the factory calls and the two service boundaries with the previous checkpoint. Scoped locked `fast-dev` library and launcher checks passed in 2m 25s and 1m 15s. The library-only Nextest link took 6m 03s. Run `bf04395e-ff78-4188-bcc6-a9eaa9d05403` passed 4 of 4 in 0.950 s with 8979 skips. The tests cover passive order and uniqueness, the lifecycle boundaries, manager lifecycle isolation, Settings catalog revision and Search capability.
+
+This is a prerequisite for the checked membership editor. P0.14 remains Stage 2 with its original Windows replay open. Continue the first live membership controls for three stateless stock Search providers. Preserve explicit allowlists, review conversion from the default all-installed selection, and keep dynamic-directory and runtime-owner membership changes tracked.
+
+The preceding Dashboard Editor Cargo report measured 815 fresh and three dirty units. Its library test unit took 982.8 s, regular library 217.4 s and launcher test 33.5 s. The passive catalog evidence only needs the library test artifact. The existing profile and caches remain in use.

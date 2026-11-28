@@ -18,7 +18,7 @@ impl Plugin for TaskManagerPlugin {
     }
 
     fn name(&self) -> &str {
-        "task_manager"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

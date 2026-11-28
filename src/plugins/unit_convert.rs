@@ -86,7 +86,7 @@ impl Plugin for UnitConvertPlugin {
     }
 
     fn name(&self) -> &str {
-        "unit_convert"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -344,7 +344,7 @@ impl Plugin for LayoutPlugin {
     }
 
     fn name(&self) -> &str {
-        "layout"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -108,7 +108,7 @@ impl Plugin for SysInfoPlugin {
     }
 
     fn name(&self) -> &str {
-        "sysinfo"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

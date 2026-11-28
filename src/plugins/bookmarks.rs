@@ -588,7 +588,7 @@ impl Plugin for BookmarksPlugin {
     }
 
     fn name(&self) -> &str {
-        "bookmarks"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

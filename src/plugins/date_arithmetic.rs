@@ -72,7 +72,7 @@ impl Plugin for DateArithmeticPlugin {
     }
 
     fn name(&self) -> &str {
-        "date_arithmetic"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

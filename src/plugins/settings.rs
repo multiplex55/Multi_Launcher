@@ -53,7 +53,7 @@ impl Plugin for SettingsPlugin {
     }
 
     fn name(&self) -> &str {
-        "settings"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

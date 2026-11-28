@@ -106,6 +106,138 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
 
+/// Shared static identity for built-ins; this never constructs a plugin.
+pub(crate) trait BuiltinIdentity {
+    const ID: &'static str;
+}
+
+macro_rules! builtin_catalog {
+    ($( $(#[$attr:meta])* $kind:ident : $ty:ty => $id:expr ),* $(,)?) => {
+        $( $(#[$attr])* impl BuiltinIdentity for $ty {
+            const ID: &'static str = $id;
+        } )*
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum Builtin { $( $(#[$attr])* $kind, )* }
+        static BUILTIN_ORDER: &[Builtin] = &[ $( $(#[$attr])* Builtin::$kind, )* ];
+        static BUILTIN_IDS: &[&str] = &[ $( $(#[$attr])* <$ty as BuiltinIdentity>::ID, )* ];
+    };
+}
+
+builtin_catalog! {
+    WebSearchPlugin: WebSearchPlugin => "web_search",
+    CalculatorPlugin: CalculatorPlugin => "calculator",
+    UnitConvertPlugin: UnitConvertPlugin => "unit_convert",
+    BaseConvertPlugin: BaseConvertPlugin => "base_convert",
+    DropCalcPlugin: DropCalcPlugin => "dropcalc",
+    RunescapeSearchPlugin: RunescapeSearchPlugin => "runescape_search",
+    YoutubePlugin: YoutubePlugin => "youtube",
+    RedditPlugin: RedditPlugin => "reddit",
+    WikipediaPlugin: WikipediaPlugin => "wikipedia",
+    ClipboardPlugin: ClipboardPlugin => "clipboard",
+    ClipboardModifyPlugin: ClipboardModifyPlugin => "clipboard_modify",
+    BookmarksPlugin: BookmarksPlugin => "bookmarks",
+    FoldersPlugin: FoldersPlugin => "folders",
+    FileSearchPlugin: FileSearchPlugin => "file_search",
+    DiffPlugin: DiffPlugin => "diff",
+    OmniSearchPlugin: OmniSearchPlugin => "omni_search",
+    SystemPlugin: SystemPlugin => "system",
+    ProcessesPlugin: ProcessesPlugin => "processes",
+    SysInfoPlugin: SysInfoPlugin => "sysinfo",
+    NetworkPlugin: NetworkPlugin => "network",
+    ShellPlugin: ShellPlugin => "shell",
+    HistoryPlugin: HistoryPlugin => "history",
+    NotePlugin: NotePlugin => "notes",
+    TodoPlugin: TodoPlugin => "todo",
+    CalendarPlugin: CalendarPlugin => "calendar",
+    SnippetsPlugin: SnippetsPlugin => "snippets",
+    PasteSequencePlugin: PasteSequencePlugin => "paste_sequence",
+    MacrosPlugin: MacrosPlugin => "macros",
+    MkMacroPlugin: MkMacroPlugin => "mkmacro",
+    KeysPlugin: KeysPlugin => "keys",
+    MouseGesturesPlugin: MouseGesturesPlugin => crate::plugins::mouse_gestures::PLUGIN_NAME,
+    MultiManagerPlugin: MultiManagerPlugin => "MultiManager",
+    FavPlugin: FavPlugin => "favorites",
+    MissingPlugin: MissingPlugin => "missing",
+    RecyclePlugin: RecyclePlugin => "recycle",
+    TempfilePlugin: TempfilePlugin => "tempfile",
+    MediaPlugin: MediaPlugin => "media",
+    AsciiArtPlugin: AsciiArtPlugin => "asciiart",
+    EmojiPlugin: EmojiPlugin => "emoji",
+    TextCasePlugin: TextCasePlugin => "text_case",
+    ScreenshotPlugin: ScreenshotPlugin => "screenshot",
+    PinboardPlugin: PinboardPlugin => "pinboard",
+    ScreenDrawPlugin: ScreenDrawPlugin => "screen_draw",
+    RecordingPlugin: RecordingPlugin => "recording",
+    CropPlugin: CropPlugin => "crop",
+    DataPlugin: DataPlugin => "data",
+    TimestampPlugin: TimestampPlugin => "timestamp",
+    DateArithmeticPlugin: DateArithmeticPlugin => "date_arithmetic",
+    DiagramStudioPlugin: DiagramStudioPlugin => "diagram_studio",
+    MarkdownStudioPlugin: MarkdownStudioPlugin => "markdown_studio",
+    IpPlugin: IpPlugin => "ip",
+    RandomPlugin: RandomPlugin => "random",
+    RadialPlugin: RadialPlugin => "radial",
+    LoremPlugin: LoremPlugin => "lorem",
+    ConvertPanelPlugin: ConvertPanelPlugin => "convert_panel",
+    JsonUtilityPlugin: JsonUtilityPlugin => "json_utility",
+    XmlToolkitPlugin: XmlToolkitPlugin => "xml_toolkit",
+    ZipExtractorPlugin: ZipExtractorPlugin => "zip_extractor",
+    ImageComparePlugin: ImageComparePlugin => "image_compare",
+    DuplicateFinderPlugin: DuplicateFinderPlugin => "duplicate_finder",
+    FolderSizePlugin: FolderSizePlugin => "folder_size",
+    ExplorerTabsPlugin: crate::plugins::explorer_tabs::ExplorerTabsPlugin => "explorer_tabs",
+    FileLockPlugin: FileLockPlugin => "file_lock",
+    ActivityPlugin: ActivityPlugin => "activity",
+    #[cfg(windows)]
+    FileOperationsPlugin: FileOperationsPlugin => "file_operations",
+    #[cfg(windows)]
+    DownloadsTriagePlugin: DownloadsTriagePlugin => "downloads_triage",
+    NotificationInboxPlugin: NotificationInboxPlugin => "notification_inbox",
+    TableUtilityPlugin: TableUtilityPlugin => "table_utility",
+    CsvPlugin: CsvPlugin => "csv",
+    BatchRenamePlugin: BatchRenamePlugin => "batch_rename",
+    SearchReplacePlugin: SearchReplacePlugin => "search_replace",
+    HotFolderPlugin: HotFolderPlugin => "hotfolder",
+    HashGeneratorPlugin: HashGeneratorPlugin => "hash_generator",
+    RegexTesterPlugin: RegexTesterPlugin => "regex_tester",
+    QrPlugin: QrPlugin => "qr",
+    ColorPickerPlugin: ColorPickerPlugin => "color_picker",
+    MousePlugin: MousePlugin => "mouse",
+    OcrPlugin: OcrPlugin => "ocr",
+    VolumePlugin: VolumePlugin => "volume",
+    BrightnessPlugin: BrightnessPlugin => "brightness",
+    TaskManagerPlugin: TaskManagerPlugin => "task_manager",
+    WindowsPlugin: WindowsPlugin => "windows",
+    VirtualDesktopPlugin: VirtualDesktopPlugin => "virtual_desktop",
+    BrowserTabsPlugin: BrowserTabsPlugin => "browser_tabs",
+    SettingsPlugin: SettingsPlugin => "settings",
+    HelpPlugin: HelpPlugin => "help",
+    LayoutPlugin: LayoutPlugin => "layout",
+    LinkPlugin: LinkPlugin => "link",
+    TimerPlugin: TimerPlugin => "timer",
+    StopwatchPlugin: StopwatchPlugin => "stopwatch",
+    WeatherPlugin: WeatherPlugin => "weather",
+}
+
+/// Ordered built-in identifiers, without constructing plugins or starting runtimes.
+pub fn builtin_plugin_ids() -> &'static [&'static str] {
+    BUILTIN_IDS
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BuiltinBoundary {
+    None,
+    SystemData,
+    SavedAlarms,
+}
+fn builtin_boundary(plugin: Builtin) -> BuiltinBoundary {
+    match plugin {
+        Builtin::SystemPlugin => BuiltinBoundary::SystemData,
+        Builtin::StopwatchPlugin => BuiltinBoundary::SavedAlarms,
+        _ => BuiltinBoundary::None,
+    }
+}
+
 pub const CAP_GRID_RESULTS_COMPATIBLE: &str = "grid_results_compatible";
 pub const CAP_FORCE_LIST_RESULTS: &str = "force_list_results";
 
@@ -907,149 +1039,282 @@ impl PluginManager {
         self.clear_plugins();
         // Drop previously loaded dynamic libraries to avoid accumulating
         // duplicate handles when reloading plugins.
-        self.register_with_settings(WebSearchPlugin, plugin_settings);
-        self.register_with_settings(CalculatorPlugin::default(), plugin_settings);
-        self.register_with_settings(UnitConvertPlugin, plugin_settings);
-        self.register_with_settings(BaseConvertPlugin, plugin_settings);
-        self.register_with_settings(DropCalcPlugin, plugin_settings);
-        self.register_with_settings(RunescapeSearchPlugin, plugin_settings);
-        self.register_with_settings(YoutubePlugin, plugin_settings);
-        self.register_with_settings(RedditPlugin, plugin_settings);
-        self.register_with_settings(WikipediaPlugin, plugin_settings);
-        self.register_with_settings(ClipboardPlugin::new(clipboard_limit), plugin_settings);
-        let clipboard_modifier_catalog = Arc::clone(&self.services.clipboard_modifier_catalog);
-        self.register_with_settings(
-            ClipboardModifyPlugin::new(clipboard_modifier_catalog),
-            plugin_settings,
-        );
-        self.register_with_settings(BookmarksPlugin::default(), plugin_settings);
-        self.register_with_settings(FoldersPlugin::default(), plugin_settings);
-        self.register_with_settings(FileSearchPlugin::default(), plugin_settings);
-        self.register_with_settings(DiffPlugin::default(), plugin_settings);
-        self.register_with_settings(OmniSearchPlugin::new(actions.clone()), plugin_settings);
-        self.register_with_settings(SystemPlugin, plugin_settings);
-        if self.services.system_data_runtime.is_none() {
-            self.services.system_data_runtime = Some(SystemDataRuntime::start(Arc::clone(
-                &self.services.search_updates,
-            )));
+        let mut system_data: Option<crate::plugins::system_data::SystemDataCache> = None;
+        for &builtin in BUILTIN_ORDER {
+            match builtin {
+                Builtin::WebSearchPlugin => {
+                    self.register_with_settings(WebSearchPlugin, plugin_settings)
+                }
+                Builtin::CalculatorPlugin => {
+                    self.register_with_settings(CalculatorPlugin::default(), plugin_settings)
+                }
+                Builtin::UnitConvertPlugin => {
+                    self.register_with_settings(UnitConvertPlugin, plugin_settings)
+                }
+                Builtin::BaseConvertPlugin => {
+                    self.register_with_settings(BaseConvertPlugin, plugin_settings)
+                }
+                Builtin::DropCalcPlugin => self.register_with_settings(DropCalcPlugin, plugin_settings),
+                Builtin::RunescapeSearchPlugin => {
+                    self.register_with_settings(RunescapeSearchPlugin, plugin_settings)
+                }
+                Builtin::YoutubePlugin => self.register_with_settings(YoutubePlugin, plugin_settings),
+                Builtin::RedditPlugin => self.register_with_settings(RedditPlugin, plugin_settings),
+                Builtin::WikipediaPlugin => {
+                    self.register_with_settings(WikipediaPlugin, plugin_settings)
+                }
+                Builtin::ClipboardPlugin => {
+                    self.register_with_settings(ClipboardPlugin::new(clipboard_limit), plugin_settings)
+                }
+                Builtin::ClipboardModifyPlugin => self.register_with_settings(
+                    ClipboardModifyPlugin::new(Arc::clone(&self.services.clipboard_modifier_catalog)),
+                    plugin_settings,
+                ),
+                Builtin::BookmarksPlugin => {
+                    self.register_with_settings(BookmarksPlugin::default(), plugin_settings)
+                }
+                Builtin::FoldersPlugin => {
+                    self.register_with_settings(FoldersPlugin::default(), plugin_settings)
+                }
+                Builtin::FileSearchPlugin => {
+                    self.register_with_settings(FileSearchPlugin::default(), plugin_settings)
+                }
+                Builtin::DiffPlugin => {
+                    self.register_with_settings(DiffPlugin::default(), plugin_settings)
+                }
+                Builtin::OmniSearchPlugin => {
+                    self.register_with_settings(OmniSearchPlugin::new(actions.clone()), plugin_settings)
+                }
+                Builtin::SystemPlugin => self.register_with_settings(SystemPlugin, plugin_settings),
+                Builtin::ProcessesPlugin => self.register_with_settings(
+                    ProcessesPlugin::new(
+                        system_data
+                            .as_ref()
+                            .expect("system data runtime initialized")
+                            .clone(),
+                    ),
+                    plugin_settings,
+                ),
+                Builtin::SysInfoPlugin => self.register_with_settings(
+                    SysInfoPlugin::new(
+                        system_data
+                            .as_ref()
+                            .expect("system data runtime initialized")
+                            .clone(),
+                    ),
+                    plugin_settings,
+                ),
+                Builtin::NetworkPlugin => {
+                    self.register_with_settings(NetworkPlugin::new(net_unit), plugin_settings)
+                }
+                Builtin::ShellPlugin => self.register_with_settings(ShellPlugin, plugin_settings),
+                Builtin::HistoryPlugin => self.register_with_settings(HistoryPlugin, plugin_settings),
+                Builtin::NotePlugin => {
+                    self.register_with_settings(NotePlugin::default(), plugin_settings)
+                }
+                Builtin::TodoPlugin => {
+                    self.register_with_settings(TodoPlugin::default(), plugin_settings)
+                }
+                Builtin::CalendarPlugin => self.register_with_settings(CalendarPlugin, plugin_settings),
+                Builtin::SnippetsPlugin => {
+                    self.register_with_settings(SnippetsPlugin::default(), plugin_settings)
+                }
+                Builtin::PasteSequencePlugin => {
+                    self.register_with_settings(PasteSequencePlugin::default(), plugin_settings)
+                }
+                Builtin::MacrosPlugin => {
+                    self.register_with_settings(MacrosPlugin::default(), plugin_settings)
+                }
+                Builtin::MkMacroPlugin => self.register_with_settings(
+                    MkMacroPlugin::new(Arc::clone(&self.services.mkmacro_store)),
+                    plugin_settings,
+                ),
+                Builtin::KeysPlugin => self.register_with_settings(KeysPlugin, plugin_settings),
+                Builtin::MouseGesturesPlugin => {
+                    self.register_with_settings(MouseGesturesPlugin::default(), plugin_settings)
+                }
+                Builtin::MultiManagerPlugin => {
+                    self.register_with_settings(MultiManagerPlugin, plugin_settings)
+                }
+                Builtin::FavPlugin => {
+                    self.register_with_settings(FavPlugin::default(), plugin_settings)
+                }
+                Builtin::MissingPlugin => self.register_with_settings(
+                    MissingPlugin::new(
+                        Arc::clone(&self.services.search_updates),
+                        self.missing_scan_inputs.clone(),
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                    ),
+                    plugin_settings,
+                ),
+                Builtin::RecyclePlugin => self.register_with_settings(RecyclePlugin, plugin_settings),
+                Builtin::TempfilePlugin => self.register_with_settings(TempfilePlugin, plugin_settings),
+                Builtin::MediaPlugin => self.register_with_settings(MediaPlugin, plugin_settings),
+                Builtin::AsciiArtPlugin => {
+                    self.register_with_settings(AsciiArtPlugin::default(), plugin_settings)
+                }
+                Builtin::EmojiPlugin => {
+                    self.register_with_settings(EmojiPlugin::default(), plugin_settings)
+                }
+                Builtin::TextCasePlugin => self.register_with_settings(TextCasePlugin, plugin_settings),
+                Builtin::ScreenshotPlugin => {
+                    self.register_with_settings(ScreenshotPlugin, plugin_settings)
+                }
+                Builtin::PinboardPlugin => self.register_with_settings(PinboardPlugin, plugin_settings),
+                Builtin::ScreenDrawPlugin => {
+                    self.register_with_settings(ScreenDrawPlugin, plugin_settings)
+                }
+                Builtin::RecordingPlugin => {
+                    self.register_with_settings(RecordingPlugin, plugin_settings)
+                }
+                Builtin::CropPlugin => self.register_with_settings(CropPlugin, plugin_settings),
+                Builtin::DataPlugin => self.register_with_settings(DataPlugin, plugin_settings),
+                Builtin::TimestampPlugin => {
+                    self.register_with_settings(TimestampPlugin, plugin_settings)
+                }
+                Builtin::DateArithmeticPlugin => {
+                    self.register_with_settings(DateArithmeticPlugin, plugin_settings)
+                }
+                Builtin::DiagramStudioPlugin => {
+                    self.register_with_settings(DiagramStudioPlugin, plugin_settings)
+                }
+                Builtin::MarkdownStudioPlugin => {
+                    self.register_with_settings(MarkdownStudioPlugin, plugin_settings)
+                }
+                Builtin::IpPlugin => self.register_with_settings(
+                    IpPlugin::with_updates(Arc::clone(&self.services.search_updates)),
+                    plugin_settings,
+                ),
+                Builtin::RandomPlugin => {
+                    self.register_with_settings(RandomPlugin::default(), plugin_settings)
+                }
+                Builtin::RadialPlugin => self.register_with_settings(RadialPlugin, plugin_settings),
+                Builtin::LoremPlugin => self.register_with_settings(LoremPlugin, plugin_settings),
+                Builtin::ConvertPanelPlugin => {
+                    self.register_with_settings(ConvertPanelPlugin, plugin_settings)
+                }
+                Builtin::JsonUtilityPlugin => {
+                    self.register_with_settings(JsonUtilityPlugin, plugin_settings)
+                }
+                Builtin::XmlToolkitPlugin => {
+                    self.register_with_settings(XmlToolkitPlugin, plugin_settings)
+                }
+                Builtin::ZipExtractorPlugin => {
+                    self.register_with_settings(ZipExtractorPlugin, plugin_settings)
+                }
+                Builtin::ImageComparePlugin => {
+                    self.register_with_settings(ImageComparePlugin, plugin_settings)
+                }
+                Builtin::DuplicateFinderPlugin => {
+                    self.register_with_settings(DuplicateFinderPlugin, plugin_settings)
+                }
+                Builtin::FolderSizePlugin => {
+                    self.register_with_settings(FolderSizePlugin, plugin_settings)
+                }
+                Builtin::ExplorerTabsPlugin => self.register_with_settings(
+                    crate::plugins::explorer_tabs::ExplorerTabsPlugin::new(Arc::clone(
+                        &self.services.explorer_tabs_root,
+                    )),
+                    plugin_settings,
+                ),
+                Builtin::FileLockPlugin => self.register_with_settings(FileLockPlugin, plugin_settings),
+                Builtin::ActivityPlugin => self.register_with_settings(ActivityPlugin, plugin_settings),
+                #[cfg(windows)]
+                Builtin::FileOperationsPlugin => {
+                    self.register_with_settings(FileOperationsPlugin, plugin_settings)
+                }
+                #[cfg(windows)]
+                Builtin::DownloadsTriagePlugin => {
+                    self.register_with_settings(DownloadsTriagePlugin, plugin_settings)
+                }
+                Builtin::NotificationInboxPlugin => {
+                    self.register_with_settings(NotificationInboxPlugin, plugin_settings)
+                }
+                Builtin::TableUtilityPlugin => {
+                    self.register_with_settings(TableUtilityPlugin, plugin_settings)
+                }
+                Builtin::CsvPlugin => self.register_with_settings(CsvPlugin, plugin_settings),
+                Builtin::BatchRenamePlugin => {
+                    self.register_with_settings(BatchRenamePlugin, plugin_settings)
+                }
+                Builtin::SearchReplacePlugin => {
+                    self.register_with_settings(SearchReplacePlugin, plugin_settings)
+                }
+                Builtin::HotFolderPlugin => {
+                    self.register_with_settings(HotFolderPlugin, plugin_settings)
+                }
+                Builtin::HashGeneratorPlugin => {
+                    self.register_with_settings(HashGeneratorPlugin, plugin_settings)
+                }
+                Builtin::RegexTesterPlugin => {
+                    self.register_with_settings(RegexTesterPlugin, plugin_settings)
+                }
+                Builtin::QrPlugin => self.register_with_settings(QrPlugin, plugin_settings),
+                Builtin::ColorPickerPlugin => {
+                    self.register_with_settings(ColorPickerPlugin::default(), plugin_settings)
+                }
+                Builtin::MousePlugin => self.register_with_settings(MousePlugin, plugin_settings),
+                Builtin::OcrPlugin => self.register_with_settings(OcrPlugin, plugin_settings),
+                Builtin::VolumePlugin => self.register_with_settings(
+                    VolumePlugin::new(system_data.take().expect("system data runtime initialized")),
+                    plugin_settings,
+                ),
+                Builtin::BrightnessPlugin => {
+                    self.register_with_settings(BrightnessPlugin, plugin_settings)
+                }
+                Builtin::TaskManagerPlugin => {
+                    self.register_with_settings(TaskManagerPlugin, plugin_settings)
+                }
+                Builtin::WindowsPlugin => self.register_with_settings(
+                    WindowsPlugin::new(Arc::clone(&self.services.window_catalog)),
+                    plugin_settings,
+                ),
+                Builtin::VirtualDesktopPlugin => self.register_with_settings(
+                    VirtualDesktopPlugin::new(
+                        Arc::clone(&self.services.workspace_catalog),
+                        Arc::clone(&self.services.window_catalog),
+                        actions.clone(),
+                    ),
+                    plugin_settings,
+                ),
+                Builtin::BrowserTabsPlugin => self.register_with_settings(
+                    BrowserTabsPlugin::with_updates(Arc::clone(&self.services.search_updates)),
+                    plugin_settings,
+                ),
+                Builtin::SettingsPlugin => self.register_with_settings(SettingsPlugin, plugin_settings),
+                Builtin::HelpPlugin => self.register_with_settings(HelpPlugin, plugin_settings),
+                Builtin::LayoutPlugin => self.register_with_settings(LayoutPlugin, plugin_settings),
+                Builtin::LinkPlugin => self.register_with_settings(LinkPlugin, plugin_settings),
+                Builtin::TimerPlugin => self.register_with_settings(TimerPlugin, plugin_settings),
+                Builtin::StopwatchPlugin => {
+                    self.register_with_settings(StopwatchPlugin::default(), plugin_settings)
+                }
+                Builtin::WeatherPlugin => self.register_with_settings(WeatherPlugin, plugin_settings),
+            }
+            match builtin_boundary(builtin) {
+                BuiltinBoundary::SystemData => {
+                    if self.services.system_data_runtime.is_none() {
+                        self.services.system_data_runtime = Some(SystemDataRuntime::start(Arc::clone(
+                            &self.services.search_updates,
+                        )));
+                    }
+                    system_data = Some(
+                        self.services
+                            .system_data_runtime
+                            .as_ref()
+                            .expect("system data runtime initialized")
+                            .cache(),
+                    );
+                }
+                BuiltinBoundary::SavedAlarms => {
+                    if reset_alarm {
+                        crate::plugins::timer::reset_alarms_loaded();
+                    }
+                    crate::plugins::timer::load_saved_alarms();
+                }
+                BuiltinBoundary::None => {}
+            }
         }
-        let system_data = self
-            .services
-            .system_data_runtime
-            .as_ref()
-            .expect("system data runtime initialized")
-            .cache();
-        self.register_with_settings(ProcessesPlugin::new(system_data.clone()), plugin_settings);
-        self.register_with_settings(SysInfoPlugin::new(system_data.clone()), plugin_settings);
-        self.register_with_settings(NetworkPlugin::new(net_unit), plugin_settings);
-        self.register_with_settings(ShellPlugin, plugin_settings);
-        self.register_with_settings(HistoryPlugin, plugin_settings);
-        self.register_with_settings(NotePlugin::default(), plugin_settings);
-        self.register_with_settings(TodoPlugin::default(), plugin_settings);
-        self.register_with_settings(CalendarPlugin, plugin_settings);
-        self.register_with_settings(SnippetsPlugin::default(), plugin_settings);
-        self.register_with_settings(PasteSequencePlugin::default(), plugin_settings);
-        self.register_with_settings(MacrosPlugin::default(), plugin_settings);
-        self.register_with_settings(
-            MkMacroPlugin::new(Arc::clone(&self.services.mkmacro_store)),
-            plugin_settings,
-        );
-        self.register_with_settings(KeysPlugin, plugin_settings);
-        self.register_with_settings(MouseGesturesPlugin::default(), plugin_settings);
-        self.register_with_settings(MultiManagerPlugin, plugin_settings);
-        self.register_with_settings(FavPlugin::default(), plugin_settings);
-        self.register_with_settings(
-            MissingPlugin::new(
-                Arc::clone(&self.services.search_updates),
-                self.missing_scan_inputs.clone(),
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
-            ),
-            plugin_settings,
-        );
-        self.register_with_settings(RecyclePlugin, plugin_settings);
-        self.register_with_settings(TempfilePlugin, plugin_settings);
-        self.register_with_settings(MediaPlugin, plugin_settings);
-        self.register_with_settings(AsciiArtPlugin::default(), plugin_settings);
-        self.register_with_settings(EmojiPlugin::default(), plugin_settings);
-        self.register_with_settings(TextCasePlugin, plugin_settings);
-        self.register_with_settings(ScreenshotPlugin, plugin_settings);
-        self.register_with_settings(PinboardPlugin, plugin_settings);
-        self.register_with_settings(ScreenDrawPlugin, plugin_settings);
-        self.register_with_settings(RecordingPlugin, plugin_settings);
-        self.register_with_settings(CropPlugin, plugin_settings);
-        self.register_with_settings(DataPlugin, plugin_settings);
-        self.register_with_settings(TimestampPlugin, plugin_settings);
-        self.register_with_settings(DateArithmeticPlugin, plugin_settings);
-        self.register_with_settings(DiagramStudioPlugin, plugin_settings);
-        self.register_with_settings(MarkdownStudioPlugin, plugin_settings);
-        self.register_with_settings(
-            IpPlugin::with_updates(Arc::clone(&self.services.search_updates)),
-            plugin_settings,
-        );
-        self.register_with_settings(RandomPlugin::default(), plugin_settings);
-        self.register_with_settings(RadialPlugin, plugin_settings);
-        self.register_with_settings(LoremPlugin, plugin_settings);
-        self.register_with_settings(ConvertPanelPlugin, plugin_settings);
-        self.register_with_settings(JsonUtilityPlugin, plugin_settings);
-        self.register_with_settings(XmlToolkitPlugin, plugin_settings);
-        self.register_with_settings(ZipExtractorPlugin, plugin_settings);
-        self.register_with_settings(ImageComparePlugin, plugin_settings);
-        self.register_with_settings(DuplicateFinderPlugin, plugin_settings);
-        self.register_with_settings(FolderSizePlugin, plugin_settings);
-        self.register_with_settings(
-            crate::plugins::explorer_tabs::ExplorerTabsPlugin::new(Arc::clone(
-                &self.services.explorer_tabs_root
-            )),
-            plugin_settings
-        );
-        self.register_with_settings(FileLockPlugin, plugin_settings);
-        self.register_with_settings(ActivityPlugin, plugin_settings);
-        #[cfg(windows)]
-        self.register_with_settings(FileOperationsPlugin, plugin_settings);
-        #[cfg(windows)]
-        self.register_with_settings(DownloadsTriagePlugin, plugin_settings);
-        self.register_with_settings(NotificationInboxPlugin, plugin_settings);
-        self.register_with_settings(TableUtilityPlugin, plugin_settings);
-        self.register_with_settings(CsvPlugin, plugin_settings);
-        self.register_with_settings(BatchRenamePlugin, plugin_settings);
-        self.register_with_settings(SearchReplacePlugin, plugin_settings);
-        self.register_with_settings(HotFolderPlugin, plugin_settings);
-        self.register_with_settings(HashGeneratorPlugin, plugin_settings);
-        self.register_with_settings(RegexTesterPlugin, plugin_settings);
-        self.register_with_settings(QrPlugin, plugin_settings);
-        self.register_with_settings(ColorPickerPlugin::default(), plugin_settings);
-        self.register_with_settings(MousePlugin, plugin_settings);
-        self.register_with_settings(OcrPlugin, plugin_settings);
-        self.register_with_settings(VolumePlugin::new(system_data), plugin_settings);
-        self.register_with_settings(BrightnessPlugin, plugin_settings);
-        self.register_with_settings(TaskManagerPlugin, plugin_settings);
-        self.register_with_settings(
-            WindowsPlugin::new(Arc::clone(&self.services.window_catalog)),
-            plugin_settings,
-        );
-        self.register_with_settings(
-            VirtualDesktopPlugin::new(
-                Arc::clone(&self.services.workspace_catalog),
-                Arc::clone(&self.services.window_catalog),
-                actions.clone(),
-            ),
-            plugin_settings,
-        );
-        self.register_with_settings(
-            BrowserTabsPlugin::with_updates(Arc::clone(&self.services.search_updates)),
-            plugin_settings,
-        );
-        self.register_with_settings(SettingsPlugin, plugin_settings);
-        self.register_with_settings(HelpPlugin, plugin_settings);
-        self.register_with_settings(LayoutPlugin, plugin_settings);
-        self.register_with_settings(LinkPlugin, plugin_settings);
-        self.register_with_settings(TimerPlugin, plugin_settings);
-        self.register_with_settings(StopwatchPlugin::default(), plugin_settings);
-        if reset_alarm {
-            crate::plugins::timer::reset_alarms_loaded();
-        }
-        crate::plugins::timer::load_saved_alarms();
-        self.register_with_settings(WeatherPlugin, plugin_settings);
         for dir in dirs {
             tracing::debug!("loading plugins from {dir}");
             let _ = self.load_dir(dir, plugin_settings);
@@ -1520,6 +1785,123 @@ fn plugin_matches_search(
 mod tests {
     use super::*;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn passive_builtin_catalog_preserves_order_uniqueness_and_lifecycle_boundaries() {
+        let expected = vec![
+            "web_search",
+            "calculator",
+            "unit_convert",
+            "base_convert",
+            "dropcalc",
+            "runescape_search",
+            "youtube",
+            "reddit",
+            "wikipedia",
+            "clipboard",
+            "clipboard_modify",
+            "bookmarks",
+            "folders",
+            "file_search",
+            "diff",
+            "omni_search",
+            "system",
+            "processes",
+            "sysinfo",
+            "network",
+            "shell",
+            "history",
+            "notes",
+            "todo",
+            "calendar",
+            "snippets",
+            "paste_sequence",
+            "macros",
+            "mkmacro",
+            "keys",
+            "mouse_gestures",
+            "MultiManager",
+            "favorites",
+            "missing",
+            "recycle",
+            "tempfile",
+            "media",
+            "asciiart",
+            "emoji",
+            "text_case",
+            "screenshot",
+            "pinboard",
+            "screen_draw",
+            "recording",
+            "crop",
+            "data",
+            "timestamp",
+            "date_arithmetic",
+            "diagram_studio",
+            "markdown_studio",
+            "ip",
+            "random",
+            "radial",
+            "lorem",
+            "convert_panel",
+            "json_utility",
+            "xml_toolkit",
+            "zip_extractor",
+            "image_compare",
+            "duplicate_finder",
+            "folder_size",
+            "explorer_tabs",
+            "file_lock",
+            "activity",
+            #[cfg(windows)]
+            "file_operations",
+            #[cfg(windows)]
+            "downloads_triage",
+            "notification_inbox",
+            "table_utility",
+            "csv",
+            "batch_rename",
+            "search_replace",
+            "hotfolder",
+            "hash_generator",
+            "regex_tester",
+            "qr",
+            "color_picker",
+            "mouse",
+            "ocr",
+            "volume",
+            "brightness",
+            "task_manager",
+            "windows",
+            "virtual_desktop",
+            "browser_tabs",
+            "settings",
+            "help",
+            "layout",
+            "link",
+            "timer",
+            "stopwatch",
+            "weather",
+        ];
+        let ids = builtin_plugin_ids();
+        assert_eq!(ids, expected.as_slice());
+        assert_eq!(ids.len(), if cfg!(windows) { 91 } else { 89 });
+        assert_eq!(ids.iter().copied().collect::<HashSet<_>>().len(), ids.len());
+        let mut sequence = Vec::new();
+        for (&builtin, &id) in BUILTIN_ORDER.iter().zip(ids) {
+            sequence.push(id);
+            match builtin_boundary(builtin) {
+                BuiltinBoundary::SystemData => sequence.push("<system-data>"),
+                BuiltinBoundary::SavedAlarms => sequence.push("<saved-alarms>"),
+                BuiltinBoundary::None => {}
+            }
+        }
+        let system = sequence.iter().position(|id| *id == "system").unwrap();
+        assert_eq!(&sequence[system..system + 3], &["system", "<system-data>", "processes"]);
+        let stopwatch = sequence.iter().position(|id| *id == "stopwatch").unwrap();
+        assert_eq!(&sequence[stopwatch..stopwatch + 3], &["stopwatch", "<saved-alarms>", "weather"]);
+    }
+
 
     struct TerminalEscapeEchoPlugin {
         policy: PluginQueryPolicy,

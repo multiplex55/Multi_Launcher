@@ -18,7 +18,7 @@ impl Plugin for FolderSizePlugin {
     }
 
     fn name(&self) -> &str {
-        "folder_size"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

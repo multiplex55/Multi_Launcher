@@ -18,7 +18,7 @@ impl Plugin for RegexTesterPlugin {
     }
 
     fn name(&self) -> &str {
-        "regex_tester"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

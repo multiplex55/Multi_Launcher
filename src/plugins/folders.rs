@@ -656,7 +656,7 @@ impl Plugin for FoldersPlugin {
     }
 
     fn name(&self) -> &str {
-        "folders"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

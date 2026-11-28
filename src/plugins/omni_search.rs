@@ -91,7 +91,7 @@ impl Plugin for OmniSearchPlugin {
     }
 
     fn name(&self) -> &str {
-        "omni_search"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

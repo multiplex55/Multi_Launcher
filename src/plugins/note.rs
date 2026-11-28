@@ -3216,7 +3216,7 @@ impl Plugin for NotePlugin {
     }
 
     fn name(&self) -> &str {
-        "notes"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -23,7 +23,7 @@ impl Plugin for WebSearchPlugin {
     }
 
     fn name(&self) -> &str {
-        "web_search"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {
@@ -134,7 +134,7 @@ impl Plugin for CalculatorPlugin {
     }
 
     fn name(&self) -> &str {
-        "calculator"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

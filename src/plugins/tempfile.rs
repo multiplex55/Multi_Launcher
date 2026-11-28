@@ -349,7 +349,7 @@ impl Plugin for TempfilePlugin {
     }
 
     fn name(&self) -> &str {
-        "tempfile"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

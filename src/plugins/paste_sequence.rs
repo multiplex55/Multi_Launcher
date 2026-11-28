@@ -65,7 +65,7 @@ impl Plugin for PasteSequencePlugin {
     }
 
     fn name(&self) -> &str {
-        "paste_sequence"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -181,7 +181,7 @@ impl Plugin for WindowsPlugin {
     }
 
     fn name(&self) -> &str {
-        "windows"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Switch or close windows (prefix: `win`)"

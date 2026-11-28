@@ -24,7 +24,7 @@ impl Plugin for WeatherPlugin {
     }
 
     fn name(&self) -> &str {
-        "weather"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

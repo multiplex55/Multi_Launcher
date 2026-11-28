@@ -1148,7 +1148,7 @@ impl Plugin for TodoPlugin {
     }
 
     fn name(&self) -> &str {
-        "todo"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

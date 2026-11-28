@@ -22,7 +22,7 @@ impl Plugin for OcrPlugin {
         }
     }
     fn name(&self) -> &str {
-        "ocr"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Local English screen-region OCR (prefix: `ocr`)"

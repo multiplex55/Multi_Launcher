@@ -18,7 +18,7 @@ impl Plugin for XmlToolkitPlugin {
     }
 
     fn name(&self) -> &str {
-        "xml_toolkit"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

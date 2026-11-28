@@ -48,7 +48,7 @@ impl Plugin for AsciiArtPlugin {
     }
 
     fn name(&self) -> &str {
-        "asciiart"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -406,7 +406,7 @@ impl Plugin for MacrosPlugin {
     }
 
     fn name(&self) -> &str {
-        "macros"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -200,7 +200,7 @@ impl Plugin for ScreenshotPlugin {
     }
 
     fn name(&self) -> &str {
-        "screenshot"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -17,7 +17,7 @@ impl Plugin for DuplicateFinderPlugin {
     }
 
     fn name(&self) -> &str {
-        "duplicate_finder"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

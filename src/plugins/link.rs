@@ -70,7 +70,7 @@ impl Plugin for LinkPlugin {
     }
 
     fn name(&self) -> &str {
-        "link"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

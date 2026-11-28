@@ -31,7 +31,7 @@ impl Plugin for RecordingPlugin {
     }
 
     fn name(&self) -> &str {
-        "recording"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

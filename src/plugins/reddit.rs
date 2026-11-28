@@ -22,7 +22,7 @@ impl Plugin for RedditPlugin {
     }
 
     fn name(&self) -> &str {
-        "reddit"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

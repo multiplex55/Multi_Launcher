@@ -21,7 +21,7 @@ impl Plugin for ConvertPanelPlugin {
     }
 
     fn name(&self) -> &str {
-        "convert_panel"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

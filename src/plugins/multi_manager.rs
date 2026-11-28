@@ -15,7 +15,7 @@ impl Plugin for MultiManagerPlugin {
     }
 
     fn name(&self) -> &str {
-        "MultiManager"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

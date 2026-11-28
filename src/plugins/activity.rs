@@ -17,7 +17,7 @@ impl Plugin for ActivityPlugin {
     }
 
     fn name(&self) -> &str {
-        "activity"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -87,7 +87,7 @@ impl Plugin for RadialPlugin {
     }
 
     fn name(&self) -> &str {
-        "radial"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

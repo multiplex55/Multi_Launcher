@@ -48,7 +48,7 @@ impl Plugin for LoremPlugin {
     }
 
     fn name(&self) -> &str {
-        "lorem"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

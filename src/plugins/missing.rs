@@ -264,7 +264,7 @@ impl Plugin for MissingPlugin {
     }
 
     fn name(&self) -> &str {
-        "missing"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

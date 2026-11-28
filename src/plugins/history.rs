@@ -53,7 +53,7 @@ impl Plugin for HistoryPlugin {
     }
 
     fn name(&self) -> &str {
-        "history"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -34,7 +34,7 @@ impl Plugin for RunescapeSearchPlugin {
     }
 
     fn name(&self) -> &str {
-        "runescape_search"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

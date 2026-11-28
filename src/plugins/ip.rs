@@ -317,7 +317,7 @@ impl Plugin for IpPlugin {
     }
 
     fn name(&self) -> &str {
-        "ip"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -345,7 +345,7 @@ impl Plugin for ClipboardPlugin {
     }
 
     fn name(&self) -> &str {
-        "clipboard"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -18,7 +18,7 @@ impl Plugin for HashGeneratorPlugin {
     }
 
     fn name(&self) -> &str {
-        "hash_generator"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

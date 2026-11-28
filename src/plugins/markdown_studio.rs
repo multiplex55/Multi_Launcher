@@ -18,7 +18,7 @@ impl Plugin for MarkdownStudioPlugin {
     }
 
     fn name(&self) -> &str {
-        "markdown_studio"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Open Markdown Studio"

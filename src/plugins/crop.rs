@@ -38,7 +38,7 @@ impl Plugin for CropPlugin {
     }
 
     fn name(&self) -> &str {
-        "crop"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

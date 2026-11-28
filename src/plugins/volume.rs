@@ -103,7 +103,7 @@ impl Plugin for VolumePlugin {
     }
 
     fn name(&self) -> &str {
-        "volume"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

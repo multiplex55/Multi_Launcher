@@ -24,7 +24,7 @@ impl Plugin for QrPlugin {
     }
 
     fn name(&self) -> &str {
-        "qr"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

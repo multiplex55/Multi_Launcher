@@ -48,7 +48,7 @@ impl Plugin for ColorPickerPlugin {
     }
 
     fn name(&self) -> &str {
-        "color_picker"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

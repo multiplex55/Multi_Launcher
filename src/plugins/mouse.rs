@@ -146,7 +146,7 @@ impl Plugin for MousePlugin {
     }
 
     fn name(&self) -> &str {
-        "mouse"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-const PLUGIN_NAME: &str = "mouse_gestures";
+pub(crate) const PLUGIN_NAME: &str = "mouse_gestures";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MouseGestureSettings {

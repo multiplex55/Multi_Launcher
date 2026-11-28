@@ -47,7 +47,7 @@ impl Plugin for DropCalcPlugin {
     }
 
     fn name(&self) -> &str {
-        "dropcalc"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

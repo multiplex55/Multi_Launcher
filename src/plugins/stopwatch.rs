@@ -383,7 +383,7 @@ impl Plugin for StopwatchPlugin {
     }
 
     fn name(&self) -> &str {
-        "stopwatch"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

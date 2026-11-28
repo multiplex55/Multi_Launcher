@@ -18,7 +18,7 @@ impl Plugin for FileLockPlugin {
     }
 
     fn name(&self) -> &str {
-        "file_lock"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -109,7 +109,7 @@ impl Plugin for ProcessesPlugin {
     }
 
     fn name(&self) -> &str {
-        "processes"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

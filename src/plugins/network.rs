@@ -179,7 +179,7 @@ impl Plugin for NetworkPlugin {
     }
 
     fn name(&self) -> &str {
-        "network"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

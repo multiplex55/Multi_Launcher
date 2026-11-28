@@ -128,7 +128,7 @@ impl Plugin for BaseConvertPlugin {
     }
 
     fn name(&self) -> &str {
-        "base_convert"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

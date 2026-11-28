@@ -16,7 +16,7 @@ impl Plugin for HotFolderPlugin {
     }
 
     fn name(&self) -> &str {
-        "hotfolder"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

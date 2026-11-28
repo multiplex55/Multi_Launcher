@@ -19,7 +19,7 @@ impl Plugin for FileOperationsPlugin {
         }]
     }
     fn name(&self) -> &str {
-        "file_operations"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Review and manage file transfers (prefix: `fileops`)"

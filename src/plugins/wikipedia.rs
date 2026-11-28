@@ -26,7 +26,7 @@ impl Plugin for WikipediaPlugin {
     }
 
     fn name(&self) -> &str {
-        "wikipedia"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

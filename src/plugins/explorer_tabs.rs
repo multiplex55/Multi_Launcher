@@ -46,7 +46,7 @@ impl ExplorerTabsPlugin {
 }
 impl Plugin for ExplorerTabsPlugin {
     fn name(&self) -> &str {
-        "explorer_tabs"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Open saved ordered folders, including duplicates, in a new Explorer window; review verified and uncertain results (query: `explorertabs`)"

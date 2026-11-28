@@ -18,7 +18,7 @@ impl Plugin for DiagramStudioPlugin {
     }
 
     fn name(&self) -> &str {
-        "diagram_studio"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

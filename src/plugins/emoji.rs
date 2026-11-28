@@ -158,7 +158,7 @@ impl Plugin for EmojiPlugin {
     }
 
     fn name(&self) -> &str {
-        "emoji"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

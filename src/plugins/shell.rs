@@ -254,7 +254,7 @@ impl Plugin for ShellPlugin {
     }
 
     fn name(&self) -> &str {
-        "shell"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

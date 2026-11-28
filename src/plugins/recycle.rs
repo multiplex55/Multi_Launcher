@@ -17,7 +17,7 @@ impl Plugin for RecyclePlugin {
     }
 
     fn name(&self) -> &str {
-        "recycle"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

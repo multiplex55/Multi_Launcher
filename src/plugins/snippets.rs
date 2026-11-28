@@ -1091,7 +1091,7 @@ impl Plugin for SnippetsPlugin {
     }
 
     fn name(&self) -> &str {
-        "snippets"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

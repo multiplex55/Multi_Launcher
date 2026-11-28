@@ -17,7 +17,7 @@ impl Plugin for TableUtilityPlugin {
     }
 
     fn name(&self) -> &str {
-        "table_utility"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

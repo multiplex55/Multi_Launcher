@@ -59,7 +59,7 @@ impl Plugin for ScreenDrawPlugin {
     }
 
     fn name(&self) -> &str {
-        "screen_draw"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

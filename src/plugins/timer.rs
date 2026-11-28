@@ -1569,7 +1569,7 @@ impl Plugin for TimerPlugin {
     }
 
     fn name(&self) -> &str {
-        "timer"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

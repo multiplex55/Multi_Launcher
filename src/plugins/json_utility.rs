@@ -55,7 +55,7 @@ impl Plugin for JsonUtilityPlugin {
     }
 
     fn name(&self) -> &str {
-        "json_utility"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

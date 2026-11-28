@@ -1370,7 +1370,7 @@ impl Plugin for CalendarPlugin {
     }
 
     fn name(&self) -> &str {
-        "calendar"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

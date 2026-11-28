@@ -23,7 +23,7 @@ impl Plugin for YoutubePlugin {
     }
 
     fn name(&self) -> &str {
-        "youtube"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

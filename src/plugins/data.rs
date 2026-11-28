@@ -48,7 +48,7 @@ impl Plugin for DataPlugin {
     }
 
     fn name(&self) -> &str {
-        "data"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

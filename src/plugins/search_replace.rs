@@ -17,7 +17,7 @@ impl Plugin for SearchReplacePlugin {
     }
 
     fn name(&self) -> &str {
-        "search_replace"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

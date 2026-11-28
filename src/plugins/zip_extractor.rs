@@ -17,7 +17,7 @@ impl Plugin for ZipExtractorPlugin {
     }
 
     fn name(&self) -> &str {
-        "zip_extractor"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

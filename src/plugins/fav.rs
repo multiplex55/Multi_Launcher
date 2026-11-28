@@ -890,7 +890,7 @@ impl Plugin for FavPlugin {
     }
 
     fn name(&self) -> &str {
-        "favorites"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

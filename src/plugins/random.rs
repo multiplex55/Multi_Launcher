@@ -115,7 +115,7 @@ impl Plugin for RandomPlugin {
     }
 
     fn name(&self) -> &str {
-        "random"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

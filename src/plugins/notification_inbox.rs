@@ -21,7 +21,7 @@ impl Plugin for NotificationInboxPlugin {
     }
 
     fn name(&self) -> &str {
-        "notification_inbox"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

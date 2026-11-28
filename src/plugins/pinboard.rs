@@ -42,7 +42,7 @@ impl Plugin for PinboardPlugin {
     }
 
     fn name(&self) -> &str {
-        "pinboard"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

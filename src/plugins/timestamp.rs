@@ -119,7 +119,7 @@ impl Plugin for TimestampPlugin {
     }
 
     fn name(&self) -> &str {
-        "timestamp"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

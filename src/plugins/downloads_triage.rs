@@ -19,7 +19,7 @@ impl Plugin for DownloadsTriagePlugin {
         }]
     }
     fn name(&self) -> &str {
-        "downloads_triage"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Review and organize downloaded files (prefix: `downloads`)"

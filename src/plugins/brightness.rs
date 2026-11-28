@@ -60,7 +60,7 @@ impl Plugin for BrightnessPlugin {
     }
 
     fn name(&self) -> &str {
-        "brightness"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -20,7 +20,7 @@ impl Plugin for HelpPlugin {
     }
 
     fn name(&self) -> &str {
-        "help"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

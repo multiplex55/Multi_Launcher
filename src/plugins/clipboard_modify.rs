@@ -92,7 +92,7 @@ impl Plugin for ClipboardModifyPlugin {
     }
 
     fn name(&self) -> &str {
-        "clipboard_modify"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

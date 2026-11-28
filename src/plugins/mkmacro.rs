@@ -101,7 +101,7 @@ impl Plugin for MkMacroPlugin {
         }
     }
     fn name(&self) -> &str {
-        "mkmacro"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
     fn description(&self) -> &str {
         "Mouse and keyboard automation macros"

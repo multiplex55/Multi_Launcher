@@ -45,7 +45,7 @@ impl Plugin for FileSearchPlugin {
     }
 
     fn name(&self) -> &str {
-        "file_search"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

@@ -24,7 +24,7 @@ impl Plugin for MediaPlugin {
     }
 
     fn name(&self) -> &str {
-        "media"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

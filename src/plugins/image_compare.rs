@@ -17,7 +17,7 @@ impl Plugin for ImageComparePlugin {
     }
 
     fn name(&self) -> &str {
-        "image_compare"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

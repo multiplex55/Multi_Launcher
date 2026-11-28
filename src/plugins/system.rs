@@ -25,7 +25,7 @@ impl Plugin for SystemPlugin {
     }
 
     fn name(&self) -> &str {
-        "system"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

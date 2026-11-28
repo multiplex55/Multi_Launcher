@@ -17,7 +17,7 @@ impl Plugin for CsvPlugin {
     }
 
     fn name(&self) -> &str {
-        "csv"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {

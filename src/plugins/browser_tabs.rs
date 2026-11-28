@@ -841,7 +841,7 @@ impl Plugin for BrowserTabsPlugin {
     }
 
     fn name(&self) -> &str {
-        "browser_tabs"
+        <Self as crate::plugin::BuiltinIdentity>::ID
     }
 
     fn description(&self) -> &str {
