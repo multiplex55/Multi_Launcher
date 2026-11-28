@@ -55,6 +55,16 @@ impl CommandBus {
         };
         super::handlers::checked_timer_start_outcome(&invocation, raw_query, preserve_command, preferences, result)
     }
+    /// Complete an atomically committed checked History clear without repeating its effect.
+    pub fn complete_checked_history_clear(&self, action: &Action, source: ActivationSource,
+        preferences: LauncherRunPreferences, result: anyhow::Result<()>) -> Result<CommandOutcome, CommandError> {
+        if crate::plugins::history::clear_action("hi clear").as_ref() != Some(action)
+            || super::parse_action(action).ok() != Some(Command::Storage(super::StorageCommand::HistoryClear)) {
+            return Err(CommandError::new("launcher", "Invalid checked History clear"));
+        }
+        let invocation = CommandInvocation { command: Command::Storage(super::StorageCommand::HistoryClear), original_action: action.clone(), query_override: None, source };
+        handle_checked_headless_effect(preferences, &invocation, result)
+    }
     /// Complete the exact checked stock temp directory open without repeating its effect.
     pub fn complete_checked_tempfile_open(&self, action: &Action, source: ActivationSource,
         preferences: LauncherRunPreferences, result: anyhow::Result<()>) -> Result<CommandOutcome, CommandError> {
@@ -335,6 +345,19 @@ impl CommandBus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_history_clear_requires_exact_row_and_committed_success() {
+        use super::{CommandBus, LauncherRunPreferences};
+        use crate::commands::{ActivationSource, HistoryPolicy, VisibilityPolicy};
+        let action = crate::plugins::history::clear_action("hi clear").unwrap();
+        let prefs = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: true };
+        let outcome = CommandBus.complete_checked_history_clear(&action, ActivationSource::Enter, prefs, Ok(())).unwrap();
+        assert_eq!(outcome.history, HistoryPolicy::Record); assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
+        assert!(CommandBus.complete_checked_history_clear(&action, ActivationSource::Enter, prefs, Err(anyhow::anyhow!("stale"))).is_err());
+        let mut forged = action.clone(); forged.label.push('!');
+        assert!(CommandBus.complete_checked_history_clear(&forged, ActivationSource::Enter, prefs, Ok(())).is_err());
+    }
+
     #[test]
     fn checked_tempfile_open_requires_exact_stock_row_and_success() {
         use super::{CommandBus, LauncherRunPreferences};

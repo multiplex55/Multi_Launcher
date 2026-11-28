@@ -564,6 +564,7 @@ pub(super) enum DiagnosticKind {
 pub(super) enum RunCommand {
     GestureExternal { command: ExternalCommand, guard: super::gesture_query::Request, visibility: super::RootVisibility, admission: Arc<RestartAdmission>, gate: Arc<EffectGate> },
     TimerCreate { session: Arc<multi_launcher::plugins::timer_session::TimerSession>, command: multi_launcher::commands::TimerCommand, guard: OmniGuard, lane: Arc<super::timer_view::TypedTimerLane> },
+    HistoryClear { snapshot: Arc<std::collections::VecDeque<HistoryEntry>>, guard: OmniGuard },
     HistoryReplay { receipt: Arc<super::history_search::Receipt>, epoch: Arc<AtomicU64>, guard: OmniGuard },
     External { command: ExternalCommand, association: Option<AssociationKind> },
     Omni { command: ExternalCommand, target: OmniTarget, guard: OmniGuard },
@@ -815,6 +816,8 @@ impl ExternalLaunch {
         if self.preview_lease.as_ref().is_some_and(|current| Arc::ptr_eq(current, lease)) { self.preview_lease = None; }
     }
 
+    pub(super) fn operation_pending(&self) -> bool { self.pending.is_some() || self.auxiliary_effect.is_some() }
+
     pub(super) fn auxiliary_effect_pending(&self) -> bool { self.auxiliary_effect.is_some() }
 
     pub(super) fn begin_auxiliary_effect(&mut self, lease: Arc<std::sync::atomic::AtomicBool>, clipboard: bool) -> bool {
@@ -851,13 +854,13 @@ impl ExternalLaunch {
             clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
-            omni_lease: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_lease: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::HistoryClear { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
             omni_category_effect: match &request.command { RunCommand::Omni { target, .. } => !matches!(target, OmniTarget::Tempfile(_)), RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } => true, _ => false },
-            omni_gate: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
-            query_retire_lease: matches!(&request.command, RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. }),
+            omni_gate: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::HistoryClear { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
+            query_retire_lease: matches!(&request.command, RunCommand::TimerCreate { .. } | RunCommand::HistoryClear { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. }),
             shell_handoff: matches!(&request.command, RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. })
                 || matches!(&request.command, RunCommand::HistoryReplay { receipt, .. } if receipt.kind != super::history_search::SavedKind::Executable),
-            history_effect: matches!(&request.command, RunCommand::HistoryReplay { .. }),
+            history_effect: matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::HistoryClear { .. }),
         });
         Some(ticket)
     }
@@ -1093,6 +1096,12 @@ fn execute_request(
                     refocus: true,
                 }, effect,
             )
+        }
+        RunCommand::HistoryClear { snapshot, guard } => {
+            let audit = HistoryEntry { query: request.query.clone(), query_lc: String::new(), action: request.action.clone(), source: Some(request.source.label().to_owned()), timestamp: 0 };
+            let effect = multi_launcher::history::checked_clear_with_audit(snapshot, audit, request.settings.history_limit, || guard.current(), || guard.effect_current());
+            CommandBus.complete_checked_history_clear(&request.action, request.source,
+                multi_launcher::commands::LauncherRunPreferences { clear_query_after_run: request.settings.clear_query_after_run, hide_after_run: request.settings.hide_after_run, refocus: true }, effect)
         }
         RunCommand::HistoryReplay { receipt, epoch, guard } => {
             let current = || guard.current()
@@ -1354,7 +1363,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::GestureExternal { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::GestureExternal { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryReplay { .. } | RunCommand::HistoryClear { .. } | RunCommand::Omni { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1853,6 +1862,10 @@ impl RootWindow {
         self.start_run(action, RunCommand::Omni { command, target, guard }, query, source, None, window, cx);
     }
 
+    pub(super) fn start_checked_history_clear(&mut self, action: Action, snapshot: Arc<std::collections::VecDeque<HistoryEntry>>, guard: OmniGuard, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_run(action, RunCommand::HistoryClear { snapshot, guard }, query, source, None, window, cx);
+    }
+
     pub(super) fn start_tempfile_open(&mut self, action: Action, guard: OmniGuard, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
         self.start_run(action, RunCommand::TempfileOpen { guard }, query, source, None, window, cx);
     }
@@ -1924,11 +1937,11 @@ impl RootWindow {
                 lease.store(false, Ordering::Release);
             }
         }
-        if let RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
+        if let RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::HistoryClear { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
             if let Some(focus) = window.focused(cx) {
                 let lease = guard.lease.clone();
                 let effect_gate = guard.effect_gate.clone();
-                let strict_focus = matches!(&request.command, RunCommand::CalendarJump { .. } | RunCommand::TimerCreate { .. });
+                let strict_focus = matches!(&request.command, RunCommand::CalendarJump { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryClear { .. });
                 let shell_focus = matches!(&request.command, RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. })
                     || matches!(&request.command, RunCommand::HistoryReplay { receipt, .. } if receipt.kind != super::history_search::SavedKind::Executable);
                 let native = guard.native;
@@ -1948,7 +1961,7 @@ impl RootWindow {
         } else {
             self.query_history.reset();
         }
-        if matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. }) {
+        if matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryClear { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. }) {
             let root = cx.entity().downgrade();
             window.defer(cx, move |window, app| {
                 let _ = root.update(app, |root, cx| {
@@ -1957,6 +1970,8 @@ impl RootWindow {
                         .is_some_and(|pending| {
                             let revision = root.root_visibility.request_revision.load(Ordering::Acquire);
                             let guard_current = match &request.command {
+                                RunCommand::HistoryClear { guard, .. } => guard.current()
+                                    && super::history_clear::current_provider(&request.query, &request.action, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()),
                                 RunCommand::HistoryReplay { receipt, epoch, guard } => guard.current()
                                     && epoch.load(Ordering::Acquire) == receipt.canonical_revision,
                                 RunCommand::TempfileOpen { guard } => guard.current()
@@ -2000,7 +2015,7 @@ impl RootWindow {
         window_handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let checked_delivery = matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. } | RunCommand::GestureExternal { .. });
+        let checked_delivery = matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryClear { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. } | RunCommand::GestureExternal { .. });
         let task = cx.background_executor().spawn(async move {
             let result = run(&request);
             if let RunCommand::TimerCreate { lane, .. } = &request.command { lane.release(); }
@@ -2137,6 +2152,7 @@ impl RootWindow {
                     && guard.receipt_current()
                     || guard.current() && window.is_window_active()
             },
+            RunCommand::HistoryClear { guard, .. } => guard.current() && window.is_window_active(),
             RunCommand::HistoryReplay { receipt, epoch, guard } => guard.receipt_current()
                 && epoch.load(Ordering::Acquire) == receipt.canonical_revision,
             RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => guard.receipt_current(),
@@ -2153,6 +2169,13 @@ impl RootWindow {
         ) && window.window_handle().window_id() == root.window_id()
             && local_focus_owned && switch_current;
         if !current {
+            if matches!(&receipt.request.command, RunCommand::HistoryClear { .. }) && receipt.result.outcome.is_ok()
+                && visible && !self.restart_admission.is_fenced() {
+                let query = self.query.read(cx).value().to_string();
+                if multi_launcher::common::strip_prefix_ci(&multi_launcher::common::query::split_action_filters(&query).0, "hi").is_some() {
+                    self.refresh_launcher_results_with_viewport(query, false, cx);
+                }
+            }
             if matches!(&receipt.request.command, RunCommand::HistoryReplay { .. })
                 && receipt.result.outcome.is_ok() && receipt.result.history_error.is_none()
                 && receipt.stamp.generation == self.launcher_results.generation
@@ -2365,6 +2388,12 @@ impl RootWindow {
                 );
             }
         }
+        if matches!(&receipt.request.command, RunCommand::HistoryClear { .. }) && receipt.result.outcome.is_ok() && changed_query.is_none() {
+            let query = self.query.read(cx).value().to_string();
+            if multi_launcher::common::strip_prefix_ci(&multi_launcher::common::query::split_action_filters(&query).0, "hi").is_some() {
+                self.refresh_launcher_results_with_viewport(query, false, cx);
+            }
+        }
         if matches!(&receipt.request.command, RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. })
             && receipt.result.outcome.as_ref().is_ok_and(|outcome| outcome.search)
             && changed_query.is_none() {
@@ -2465,7 +2494,16 @@ fn bookkeep(
     let query = match &request.command { RunCommand::ClipboardExecute { canonical, .. } => canonical.clone(), RunCommand::SnippetRun { history_query, .. } => history_query.clone(), _ => request.query.clone() };
     let mut action = request.action.clone();
     if let Some(label) = &request.history_label { action.label = label.clone(); }
+    if matches!(&request.command, RunCommand::HistoryClear { .. }) {
+        return bookkeep_precommitted(outcome, &action, usage);
+    }
     bookkeep_action(outcome, action, query, request.source, request.settings.history_limit, history, usage)
+}
+
+fn bookkeep_precommitted(outcome: Result<CommandOutcome, CommandError>, action: &Action,
+    usage: impl FnOnce(&str) -> Result<u32, String>) -> WorkerResult {
+    let usage_result = outcome.as_ref().is_ok_and(|outcome| outcome.history == HistoryPolicy::Record).then(|| usage(&action.action));
+    WorkerResult { outcome, history_error: None, usage_result }
 }
 
 fn bookkeep_action(
@@ -2733,6 +2771,24 @@ mod tests {
         assert!(owner.clipboard_effect_pending());
         owner.finish_auxiliary_effect(&first);
         assert!(!owner.clipboard_effect_pending());
+    }
+
+    #[test]
+    fn precommitted_history_clear_records_usage_without_reappending() {
+        let action = multi_launcher::plugins::history::clear_action("hi clear").unwrap();
+        let preferences = multi_launcher::commands::LauncherRunPreferences { clear_query_after_run: true, hide_after_run: false, refocus: true };
+        let outcome = CommandBus.complete_checked_history_clear(&action, ActivationSource::Enter, preferences, Ok(()));
+        let guard = OmniGuard {
+            catalog: Arc::new(AtomicBool::new(true)), lease: Arc::new(AtomicBool::new(true)), effect_gate: Arc::new(EffectGate::default()),
+            visibility: super::super::RootVisibility::new(), revision: 0,
+            native: super::super::NativeWindow { identity: super::super::ForegroundIdentity { hwnd: 1, process_id: 2, thread_id: 3 } },
+            admission: Arc::new(super::super::RestartAdmission::default()),
+        };
+        let request = Request { action: action.clone(), history_label: None, command: RunCommand::HistoryClear { snapshot: Arc::new(Default::default()), guard },
+            query: "hi clear".into(), source: ActivationSource::Enter,
+            settings: Settings { preserve_command: false, clear_query_after_run: true, hide_after_run: false, history_limit: 10, enable_toasts: true, show_error_toasts: true, show_inline_errors: true, toast_duration: 1.0, clipboard_modify_hide_after_apply: true } };
+        let result = bookkeep(outcome, &request, |_, _| panic!("History was already committed"), |key| { assert_eq!(key, "history:clear"); Ok(1) });
+        assert!(result.outcome.is_ok()); assert!(result.history_error.is_none()); assert!(matches!(result.usage_result, Some(Ok(1))));
     }
 
     #[test]

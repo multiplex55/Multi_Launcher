@@ -2406,3 +2406,15 @@ The locked `fast-dev` library check passed in 57.26s and the integrated library 
 P0.16 remains Stage 2. Paired 1516 × 937 Windows replay remains open with both Paste Sequence shortcuts disabled. Use the existing and missing owned Unicode storage paths. Verify exact Explorer address, ordinary selected-file Open, foreground and configured visibility, success accounting and preserved witness bytes. Bulk Clear and remaining management retain their own gates.
 
 Continue P0.01 checked Launcher History Clear.
+
+### P0.01 checked launcher History Clear
+
+GPUI Search admits the stock `hi clear` result and completion from the exact installed History provider. The route checks the full action, original Search result generation, current membership and Search capability. The canonical startup confirmation preference enables the default Cancel-first review or selects the direct checked path. Escape and Cancel leave History untouched. A superseded review explains how to reopen it and disables Clear.
+
+The shared canonical transaction captures the full reviewed History and compares it again before atomic replacement. The final pre-replace guard checks current focus and the source through sharing retries. Successful replacement includes the stock audit entry with exact raw query, action and activation source. A zero History limit leaves the list empty. GPUI records normal Usage without a second History append. Pins and other Usage entries retain their existing ownership. A current History query refreshes from the committed state.
+
+The locked `fast-dev` library check passed in 26.32s and the integrated library and launcher checks passed in 39.28s and 4.28s. Independent review checked the exact provider route, superseded confirmation, strict focus fencing and audit bookkeeping. The grouped link took 6m 10s. Nextest run `31529892-b79b-472e-adb4-51c837ef2fb6` passed all ten selected cases in 3.514s across two binaries with 9659 skipped.
+
+Paired 1516 × 937 Windows replay remains open. Use the owned confirmation and opt-out profiles with both Paste Sequence shortcuts disabled. Verify Cancel, Escape, held Enter, stale authority, exact audit and Usage, and unchanged pin bytes and unrelated entries. No live History was cleared in this checkpoint.
+
+Continue P0.14 live Preserve command after run.

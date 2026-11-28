@@ -193,6 +193,7 @@ impl Plugin for Provider {
         }]
     }
     fn search(&self, query: &str) -> Vec<Action> {
+        if let Some(action) = multi_launcher::plugins::history::clear_action(query) { return vec![action]; }
         if multi_launcher::common::strip_prefix_ci(query, "hi").is_none() {
             return Vec::new();
         }

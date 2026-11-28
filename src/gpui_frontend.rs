@@ -11,6 +11,7 @@ mod add_action;
 mod appearance;
 mod external_launch;
 mod history_search;
+mod history_clear;
 mod multi_manager_auto;
 mod file_search;
 mod folder_size;
@@ -632,7 +633,7 @@ impl LauncherSearchCatalog {
                         &action, self.canonical_saved.clone(), self.canonical_revision, &self.verified_folders,
                     ))
                 }).flatten();
-                if provider == "history" && history.is_none() { return None; }
+                if provider == "history" && history.is_none() && !history_clear::current_provider(raw_query, &action, None, None) { return None; }
                 if provider == "omni_search" && omni_source.is_none() { return None; }
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
@@ -2473,6 +2474,8 @@ struct RootWindow {
     file_search_popup_intent: Arc<AtomicBool>,
     external_launch: external_launch::ExternalLaunch,
     external_launch_preferences: ExternalLaunchPreferences,
+    require_confirm_destructive: bool,
+    history_clear: history_clear::Owner,
     action_sheet: Option<action_sheet::Sheet>,
     action_sheet_serial: u64,
     context_favorite_popup: Option<ContextFavoritePopup>,
@@ -7467,7 +7470,7 @@ impl RootWindow {
             .filter(|(provider, action)| {
                 if self.plugin_membership_pending.is_some_and(|plugin| plugin.id() == provider) { return false; }
                 if provider == "history" {
-                    history_projection.as_ref().and_then(|projection| projection.receipt(
+                    history_clear::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) || history_projection.as_ref().and_then(|projection| projection.receipt(
                         action, self.search_catalog.canonical_saved.clone(), self.search_catalog.canonical_revision, &self.search_catalog.verified_folders,
                     )).is_some()
                 } else if provider == "windows" {
@@ -8325,6 +8328,11 @@ impl RootWindow {
                 revision: self.root_visibility.request_revision.load(Ordering::Acquire), native, admission: self.restart_admission.clone(),
             };
             self.start_history_replay(result.action, receipt.clone(), self.search_catalog.canonical_epoch.clone(), guard, query, source, window, cx);
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "history")
+            && history_clear::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+            self.start_history_clear(generation, index, query, result.action, source, window, cx);
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::CalendarJump { .. }) {
@@ -13583,6 +13591,7 @@ pub(crate) fn run_foundation_window(
     dashboard_settings: multi_launcher::settings::DashboardSettings,
     app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     external_launch_preferences: ExternalLaunchPreferences,
+    require_confirm_destructive: bool,
     coordinate_tool_preferences: CoordinateToolPreferences,
     theme_settings: multi_launcher::settings::ThemeSettings,
     settings_path: String,
@@ -13943,6 +13952,8 @@ pub(crate) fn run_foundation_window(
                 file_search_popup_intent: Arc::new(AtomicBool::new(false)),
                 external_launch: external_launch::ExternalLaunch::default(),
                 external_launch_preferences: external_launch_preferences_for_root.clone(),
+                require_confirm_destructive,
+                history_clear: history_clear::Owner::default(),
                 action_sheet: None,
                 action_sheet_serial: 0,
                 context_favorite_popup: None,

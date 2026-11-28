@@ -4860,6 +4860,7 @@ fn main() -> anyhow::Result<()> {
                     .and_then(|value| serde_json::from_value::<multi_launcher::settings::ClipboardModifyPluginSettings>(value.clone()).ok())
                     .unwrap_or_default().hide_launcher_after_apply,
             },
+            settings.require_confirm_destructive,
             settings.coordinate_tool.clone(),
             settings.theme.clone(),
             "settings.json".to_owned(),

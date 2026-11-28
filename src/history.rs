@@ -151,6 +151,49 @@ pub fn checked_history_snapshot_matches(
     Ok(final_read == *expected && final_read.get(index) == Some(entry))
 }
 
+/// Capture the entire canonical History sequence for a checked clear.
+pub fn checked_clear_snapshot(path: impl AsRef<Path>, current: impl Fn() -> bool) -> anyhow::Result<VecDeque<HistoryEntry>> {
+    let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_path_read(path)?;
+    let _transaction = history_transaction_guard();
+    anyhow::ensure!(current(), "History clear was superseded");
+    let snapshot = load_history_from_path(path)?;
+    anyhow::ensure!(current(), "History clear was superseded");
+    Ok(snapshot)
+}
+
+/// Atomically replace exactly the reviewed history with the stock success audit entry.
+/// The effect claim runs immediately before replacement and is retained across atomic retries.
+pub fn checked_clear_with_audit(expected: &VecDeque<HistoryEntry>, audit: HistoryEntry, limit: usize,
+    current: impl Fn() -> bool, claim: impl Fn() -> bool) -> anyhow::Result<()> {
+    checked_clear_at(Path::new(HISTORY_FILE), expected, audit, limit, current, claim, true)
+}
+
+fn checked_clear_at(path: &Path, expected: &VecDeque<HistoryEntry>,
+    mut audit: HistoryEntry, limit: usize, current: impl Fn() -> bool, claim: impl Fn() -> bool, publish: bool) -> anyhow::Result<()> {
+    let _permit = crate::common::repair_watch::require_path_read(path)?;
+    let _transaction = history_transaction_guard();
+    anyhow::ensure!(current() && load_history_from_path(path)? == *expected, "History changed or clear was superseded");
+    audit.query_lc = audit.query.to_lowercase();
+    if audit.timestamp == 0 { audit.timestamp = chrono::Utc::now().timestamp(); }
+    let mut replacement = VecDeque::new();
+    if limit != 0 { replacement.push_front(audit); }
+    let bytes = serde_json::to_vec_pretty(&replacement)?;
+    let claimed = std::cell::Cell::new(false);
+    crate::common::atomic_file::save_atomic_if(path, &bytes, || {
+        if !current() || !load_history_from_path(path).is_ok_and(|actual| actual == *expected) { return false; }
+        if !claimed.get() {
+            if !claim() { return false; }
+            claimed.set(true);
+        }
+        current() && load_history_from_path(path).is_ok_and(|actual| actual == *expected) && current()
+    })?;
+    if publish {
+        if let Ok(mut history) = HISTORY.write() { *history = replacement; }
+    }
+    Ok(())
+}
+
 /// Load a persisted history fixture through the same parser used by startup.
 /// This remains test-only so measurement helpers do not widen the runtime API.
 #[cfg(test)]
@@ -415,6 +458,43 @@ mod tests {
     use tempfile::tempdir;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[test]
+    fn checked_clear_atomically_commits_audit_and_refuses_drift() {
+        let dir = tempdir().unwrap(); let path = dir.path().join("history.json");
+        let audit = HistoryEntry { query: "HI clear".into(), query_lc: String::new(), action: crate::plugins::history::clear_action("hi clear").unwrap(), source: Some("Enter".into()), timestamp: 0 };
+        std::fs::write(&path, serde_json::to_vec(&[audit.clone()]).unwrap()).unwrap();
+        let expected = checked_clear_snapshot(&path, || true).unwrap();
+        let mut newer = audit.clone(); newer.query = "newer".into();
+        std::fs::write(&path, serde_json::to_vec(&[newer.clone(), audit.clone()]).unwrap()).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(checked_clear_at(&path, &expected, audit.clone(), 10, || true, || true, false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        std::fs::write(&path, serde_json::to_vec(&[audit.clone()]).unwrap()).unwrap();
+        let expected = checked_clear_snapshot(&path, || true).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(checked_clear_at(&path, &expected, audit.clone(), 10, || true, || false, false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let mut injected = newer.clone(); injected.query = "racing prepend".into();
+        let injected_bytes = serde_json::to_vec(&[injected, audit.clone()]).unwrap();
+        assert!(checked_clear_at(&path, &expected, audit.clone(), 10, || true, || {
+            std::fs::write(&path, &injected_bytes).unwrap(); true
+        }, false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), injected_bytes);
+        std::fs::write(&path, &before).unwrap();
+        checked_clear_at(&path, &expected, audit.clone(), 10, || true, || true, false).unwrap();
+        let result = load_history_from_path(&path).unwrap();
+        assert_eq!(result.len(), 1); assert_eq!(result[0].query, audit.query);
+        assert_eq!(result[0].query_lc, "hi clear"); assert_ne!(result[0].timestamp, 0);
+        assert_eq!(result[0].action, audit.action); assert_eq!(result[0].source, audit.source);
+        checked_clear_at(&path, &result, audit, 0, || true, || true, false).unwrap();
+        assert!(load_history_from_path(&path).unwrap().is_empty());
+        std::fs::write(&path, b"[broken").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(checked_clear_snapshot(&path, || true).is_err());
+        assert!(checked_clear_at(&path, &VecDeque::new(), newer, 10, || true, || true, false).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
 
     #[test]
     fn checked_history_snapshot_rejects_prepend_and_last_authority_change() {

@@ -17,6 +17,11 @@ pub fn is_history_clear(query: &str) -> bool {
     crate::common::strip_prefix_ci(query.trim(), "hi clear").is_some_and(str::is_empty)
 }
 
+/// Exact stock clear row for a matching History query.
+pub fn clear_action(query: &str) -> Option<Action> {
+    is_history_clear(query).then(|| Action { label: "Clear history".into(), desc: "History".into(), action: "history:clear".into(), args: None })
+}
+
 /// Project stock newest-first results; the ten-row cap precedes frontend filtering.
 pub fn project_history_rows<'a>(
     query: &str,
@@ -61,14 +66,7 @@ impl Default for HistoryPluginSettings {
 impl Plugin for HistoryPlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         if crate::common::strip_prefix_ci(query, "hi").is_none() { return Vec::new(); }
-        if is_history_clear(query) {
-            return vec![Action {
-                label: "Clear history".into(),
-                desc: "History".into(),
-                action: "history:clear".into(),
-                args: None,
-            }];
-        }
+        if let Some(action) = clear_action(query) { return vec![action]; }
         with_history(|h| project_history_rows(query, h).into_iter().map(|row| row.action).collect())
         .unwrap_or_default()
     }
