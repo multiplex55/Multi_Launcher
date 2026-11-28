@@ -114,7 +114,7 @@ impl RootWindow {
         self.external_drop.revoke();
         let Some(permit) = self.restart_admission.admit() else { return; };
         let Some(serial) = self.bookmark_authoring.begin() else { return; };
-        if omni.is_some() && (!secondary || !matches!(review, Some(Review::Alias))) { self.finish_bookmark_authoring(serial); return; }
+        if omni.is_some() && (!secondary || !matches!(review, Some(Review::Alias | Review::Remove))) { self.finish_bookmark_authoring(serial); return; }
         let receipt = Receipt { serial, generation, row, query: query.to_owned(), action, native,
             revision: self.root_visibility.request_revision.load(Ordering::Acquire), source, focus: window.focused(cx), settings: self.external_launch_preferences.clone(), secondary, omni };
         if !self.bookmark_receipt_current(&receipt, window, cx) { self.finish_bookmark_authoring(serial); return; }

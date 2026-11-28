@@ -2358,3 +2358,13 @@ The edit and Apply bind the current mount, workspace revision, exact workspace a
 Locked `fast-dev` launcher checks passed in 6.52s and 5.20s. Independent review checked the exact Details entry, stale receipts, optional and legacy values, no-op settlement and shared render receipts. The final grouped launcher link took 19.72s after correcting test-only imports. Nextest run `277a3180-c82a-4670-b26a-63c601164186` passed all nine selected cases in 3.803s with 606 skipped.
 
 P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned Alpha and Beta profiles with both Paste Sequence shortcuts disabled. Author distinct Home and Target rectangles on the exact Alpha row, exercise Swap and Cancel, Apply and Save, reopen and read back in egui, Reconnect and verify both exact placements. Confirm Beta and binding data remain intact. Other capture, runtime and cross-desktop controls retain their own gates.
+
+### P0.03 P0.04 P0.06 checked Remove from Omni Search
+
+The Omni Action Sheet exposes Remove Folder and Remove Bookmark for the exact corresponding result. The stock typed choice must match the origin kind and literal target. Dismissal restores the originating Search focus and rechecks the same Omni projection before opening the existing Cancel-first review. Omni's membership, Search capability and category control admission independently of direct provider Search.
+
+Confirmation claims the exact watched record once and checks current native and canonical authority before committing. Folder removal changes the saved catalog entry, leaving the actual directory and files intact. Bookmark removal compares the stored URL literally so an HTTPS sibling survives removal of its HTTP counterpart. The checked stores keep their canonical serialization, which may rewrite legacy string entries as current Bookmark objects. Success refreshes the same query without recording launch History or Usage.
+
+The locked `fast-dev` launcher check passed in 5.10s. Independent review checked normal Sheet admission, original projection, current-category and confirmation authority and canonical mutation. The grouped link took 16.89s. Nextest run `b5f75915-00b8-4599-b006-d248d3257483` passed 13 focused cases across two binaries in 5.807s with 9642 skipped.
+
+P0.03, P0.04 and P0.06 remain Stage 2. Paired 1516 × 937 native replay remains open with both Paste Sequence shortcuts disabled. Use the owned normal and Omni-only profiles. Verify Cancel, held Enter, stale refusal, exact one-record removal, surviving URL and folder contents, and egui readback. Folder Repair retains its separate scope.

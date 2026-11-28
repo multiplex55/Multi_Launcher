@@ -56,6 +56,16 @@ fn alias_origin_matches(origin: &LauncherResultOrigin, source: multi_launcher::p
     }
 }
 
+fn child_authoring_choice(operation: &UniversalActionOperation, action: &Action, folder: bool, bookmark: bool) -> bool {
+    match operation {
+        UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path })
+        | UniversalActionOperation::Command { command: Command::Storage(StorageCommand::FolderRemove(path)), .. } => folder && *path == action.action,
+        UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url })
+        | UniversalActionOperation::Command { command: Command::Storage(StorageCommand::BookmarkRemove(url)), .. } => bookmark && *url == action.action,
+        _ => false,
+    }
+}
+
 const APP_EDIT_CONFLICT: &str =
     "App catalog changed; open App Editor and refresh before trying again.";
 const APP_EDIT_READ_ERROR: &str = "Could not read app catalog: ";
@@ -327,9 +337,8 @@ impl RootWindow {
             );
             let child = ActionTargetResolver.resolve(action, &child_resolver);
             for choice in UniversalActionRegistry.resolve(&child, &context) {
-                let alias = matches!(&choice.operation, UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path }) if folder_provider && *path == action.action)
-                    || matches!(&choice.operation, UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url }) if bookmark_provider && *url == action.action);
-                if alias && !actions.iter().any(|current| current.id == choice.id) { actions.push(choice); }
+                if child_authoring_choice(&choice.operation, action, folder_provider, bookmark_provider)
+                    && !actions.iter().any(|current| current.id == choice.id) { actions.push(choice); }
             }
         }
         actions.retain(|choice| match &choice.operation {
@@ -346,11 +355,11 @@ impl RootWindow {
             UniversalActionOperation::UiIntent(UniversalUiIntent::OpenBookmarkAlias { url }) =>
                 bookmark_provider && *url == action.action,
             UniversalActionOperation::Command { command: Command::Storage(StorageCommand::BookmarkRemove(url)), .. } =>
-                matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "bookmarks") && *url == action.action,
+                bookmark_provider && *url == action.action,
             UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path }) =>
                 folder_provider && *path == action.action,
             UniversalActionOperation::Command { command: Command::Storage(StorageCommand::FolderRemove(path)), .. } =>
-                matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "folders") && *path == action.action,
+                folder_provider && *path == action.action,
             _ => false,
         });
         let choices = ActionSheetChoices::new(actions, &self.search_catalog.matcher);
@@ -637,7 +646,7 @@ impl RootWindow {
                     }
                     UniversalActionOperation::Command { command: Command::Storage(StorageCommand::BookmarkRemove(url)), .. }
                         if url == sheet.result.action.action => {
-                        root.start_bookmark_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, None, window, cx);
+                        root.start_bookmark_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, sheet.omni_child.as_ref().and_then(|(kind, projection)| (*kind == multi_launcher::plugins::omni_search::OmniSource::Bookmark).then(|| projection.clone())), window, cx);
                     }
                     UniversalActionOperation::UiIntent(UniversalUiIntent::OpenFolderAlias { path })
                         if path == sheet.result.action.action => {
@@ -645,7 +654,7 @@ impl RootWindow {
                     }
                     UniversalActionOperation::Command { command: Command::Storage(StorageCommand::FolderRemove(path)), .. }
                         if path == sheet.result.action.action => {
-                        root.start_folder_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, None, window, cx);
+                        root.start_folder_sheet(sheet.generation, sheet.row, &sheet.query, sheet.result.action.clone(), true, source, sheet.omni_child.as_ref().and_then(|(kind, projection)| (*kind == multi_launcher::plugins::omni_search::OmniSource::Folder).then(|| projection.clone())), window, cx);
                     }
                     _ => {}
                 }
@@ -818,6 +827,28 @@ mod tests {
         ResolvedQueryResultsLayout,
     };
     use super::{APP_EDIT_CONFLICT, alias_origin_matches, clear_sheet_edit_error, primary_allowed, saved_row_receipt, sheet_key_owned, snapshot_matches};
+
+    #[test]
+    fn omni_remove_choices_require_exact_kind_and_literal_target() {
+        use std::collections::HashMap;
+        use multi_launcher::commands::{Command, StorageCommand};
+        use multi_launcher::universal_actions::{ActionResolutionContext, ActionSurface, ActionTargetResolver, ActionTargetResolverContext, UniversalActionOperation, UniversalActionRegistry};
+        for (literal, folder) in [(r"C:\fixture", true), ("https://example.test/Path", false)] {
+            let action = Action { label: "Fixture".into(), desc: "fixture".into(), action: literal.into(), args: None };
+            let mut folders = HashMap::new(); let mut bookmarks = HashMap::new();
+            if folder { folders.insert(literal.to_string(), None); } else { bookmarks.insert(literal.to_string(), None); }
+            let resolver = ActionTargetResolverContext::new(&folders, &bookmarks, &[]);
+            let resolved = ActionTargetResolver.resolve(&action, &resolver);
+            let context = ActionResolutionContext::new(ActionSurface::ActionSheet, "o fixture");
+            let choices = UniversalActionRegistry.resolve(&resolved, &context);
+            let choice = choices.iter().find(|choice| matches!(&choice.operation,
+                UniversalActionOperation::Command { command: Command::Storage(StorageCommand::FolderRemove(_) | StorageCommand::BookmarkRemove(_)), .. })).unwrap();
+            assert!(super::child_authoring_choice(&choice.operation, &action, folder, !folder));
+            assert!(!super::child_authoring_choice(&choice.operation, &action, !folder, folder));
+            let mut changed = action.clone(); changed.action.push('x');
+            assert!(!super::child_authoring_choice(&choice.operation, &changed, folder, !folder));
+        }
+    }
 
     #[test]
     fn alias_origins_reject_saved_and_wrong_omni_child() {

@@ -107,7 +107,7 @@ impl RootWindow {
         self.external_drop.revoke();
         let Some(permit) = self.restart_admission.admit() else { return; };
         let Some(serial) = self.folder_authoring.begin() else { return; };
-        if omni.is_some() && (!secondary || !matches!(review, Some(Review::Alias))) { self.finish_folder_authoring(serial); return; }
+        if omni.is_some() && (!secondary || !matches!(review, Some(Review::Alias | Review::Remove))) { self.finish_folder_authoring(serial); return; }
         let receipt = Receipt { serial, native, revision: self.root_visibility.request_revision.load(Ordering::Acquire), focus: window.focused(cx),
             search: Some(SearchReceipt { generation, row, query: query.to_owned(), action, source, settings: self.external_launch_preferences.clone(), secondary, omni }) };
         if !self.folder_receipt_current(&receipt, window, cx) { self.finish_folder_authoring(serial); return; }
