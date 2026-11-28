@@ -8387,7 +8387,7 @@ impl RootWindow {
             if multi_manager::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
                 if result.action.action == "mm:settings" {
                     self.open_multi_manager_paths(window, cx);
-                } else if result.action.action == "mm:restore-bindings" {
+                } else if multi_manager::workspace_operation(&result.action).is_some() {
                     self.restore_multi_manager(query, result.action.clone(), generation, index, window, cx);
                 } else {
                     self.open_multi_manager(window, cx);

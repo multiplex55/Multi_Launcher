@@ -226,6 +226,99 @@ pub trait ReconnectBackend {
     fn enumerate(&self) -> Result<Vec<(EnumeratedWindow, WindowSwitchIdentity)>>;
 }
 
+/// A catalog reconnect owns its original workspace source and row ordinals.
+pub struct ReconnectCatalogPlan {
+    source: CheckedWorkspaceSnapshot,
+    rows: Vec<ReconnectedCatalogRow>,
+    pub skipped: usize,
+    pub summary: ReconnectSummary,
+    pub outcome: ReconnectCatalogOutcome,
+}
+
+pub struct ReconnectedCatalogRow {
+    pub index: usize,
+    pub workspace: MmWorkspace,
+    pub identities: HashMap<usize, WindowSwitchIdentity>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconnectCatalogOutcome { Complete, Partial, NoMatch }
+
+impl ReconnectCatalogPlan {
+    pub fn rows(&self) -> &[ReconnectedCatalogRow] { &self.rows }
+    /// Compare the retained committed receipt without reading the filesystem.
+    pub fn matches_snapshot(&self, snapshot: &CheckedWorkspaceSnapshot) -> bool {
+        self.source.path() == snapshot.path() && self.source.source() == snapshot.source() && self.source.workspaces() == snapshot.workspaces()
+    }
+    pub fn source_is_current(&self) -> bool {
+        let Ok(_permit) = crate::common::repair_watch::require_path_read(self.source.path()) else { return false; };
+        store::checked_workspace_source_is_current(&self.source)
+    }
+}
+
+/// Match all eligible committed rows against one fresh window enumeration.
+/// Saved HWNDs are never admitted as live identity, and no state is persisted.
+pub fn reconnect_catalog_checked(
+    source: &CheckedWorkspaceSnapshot,
+    current: impl Fn() -> bool,
+    backend: &impl ReconnectBackend,
+) -> Result<ReconnectCatalogPlan> {
+    let _permit = crate::common::repair_watch::require_path_read(source.path())?;
+    let source_current = || current() && store::checked_workspace_source_is_current(source);
+    anyhow::ensure!(source_current(), "Reconnect source changed or request superseded");
+    let original = source.workspaces();
+    let mut id_counts = HashMap::new();
+    for row in original { *id_counts.entry(row.id.as_str()).or_insert(0usize) += 1; }
+    let mut indices = Vec::new();
+    let mut shadow = Vec::new();
+    for (index, row) in original.iter().enumerate() {
+        if row.disabled || !row.valid || row.id.trim().is_empty()
+            || id_counts.get(row.id.as_str()) != Some(&1) { continue; }
+        let mut row = row.clone();
+        for window in &mut row.windows { window.hwnd = 0; window.binding_verified = false; }
+        indices.push(index);
+        shadow.push(row);
+    }
+    let skipped = original.len() - indices.len();
+    let snapshot = reconnect::collect_reconnect_snapshot(&shadow);
+    let observations = if snapshot.windows.iter().any(|window| !window.fingerprint.disabled) {
+        backend.enumerate().context("Could not enumerate windows")?
+    } else { Vec::new() };
+    anyhow::ensure!(source_current(), "Reconnect source changed or request superseded");
+    let mut captured = HashMap::new();
+    let mut windows = Vec::new();
+    for (window, identity) in observations {
+        if identity.native.hwnd != window.hwnd { continue; }
+        anyhow::ensure!(!captured.contains_key(&window.hwnd), "Window enumeration contained duplicate handles");
+        captured.insert(window.hwnd, identity);
+        windows.push(window);
+    }
+    let (_, patches) = reconnect::build_reconnect_patches(&snapshot, ReconnectDeps {
+        is_window: &|_| false, query_identity: &|_| None,
+        enumerate_top_level_windows: &|| windows.clone(),
+    });
+    anyhow::ensure!(source_current(), "Reconnect source changed or request superseded");
+    let mut rows = Vec::with_capacity(shadow.len());
+    let summary = reconnect::apply_reconnect_patches(&mut shadow, &patches);
+    let mut assigned = HashSet::new();
+    for (index, row) in indices.into_iter().zip(shadow.iter_mut()) {
+        let mut identities = HashMap::new();
+        for (window_index, window) in row.windows.iter().enumerate() {
+            if window.disabled || !window.binding_verified || window.hwnd == 0 { continue; }
+            let Some(identity) = captured.get(&window.hwnd) else { continue; };
+            anyhow::ensure!(assigned.insert(identity.native.hwnd), "Reconnect produced duplicate window handles");
+            identities.insert(window_index, identity.clone());
+        }
+        rows.push(ReconnectedCatalogRow { index, workspace: row.clone(), identities });
+    }
+    anyhow::ensure!(source_current(), "Reconnect source changed or request superseded");
+    let unresolved = summary.missing + summary.ambiguous + summary.metadata_mismatch + summary.stale_results_discarded;
+    let outcome = if summary.reconnected + summary.already_valid == 0 { ReconnectCatalogOutcome::NoMatch }
+        else if unresolved != 0 || skipped != 0 { ReconnectCatalogOutcome::Partial }
+        else { ReconnectCatalogOutcome::Complete };
+    Ok(ReconnectCatalogPlan { source: source.clone(), rows, skipped, summary, outcome })
+}
+
 pub struct NativeReconnect;
 
 #[cfg(any(test, windows))]
@@ -457,11 +550,21 @@ pub fn place_checked(
     current: Arc<dyn Fn() -> bool + Send + Sync>,
     backend: &mut impl PlacementBackend,
 ) -> PlacementReport {
+    place_targets(&overlay.workspace, &overlay.identities, issuer, destination, current, backend)
+}
+
+pub fn place_catalog_checked(plan: Arc<ReconnectCatalogPlan>, index: usize, issuer: WindowNativeIdentity, destination: Destination, current: Arc<dyn Fn() -> bool + Send + Sync>, backend: &mut impl PlacementBackend) -> PlacementReport {
+    let Some(row) = plan.rows.iter().find(|row| row.index == index) else { return PlacementReport { error: Some("Reconnected workspace is unavailable".into()), ..Default::default() }; };
+    let source = plan.clone();
+    let checked: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || current() && source.source_is_current() && current());
+    place_targets(&row.workspace, &row.identities, issuer, destination, checked, backend)
+}
+
+fn place_targets(workspace: &MmWorkspace, identities: &HashMap<usize, WindowSwitchIdentity>, issuer: WindowNativeIdentity, destination: Destination, current: Arc<dyn Fn() -> bool + Send + Sync>, backend: &mut impl PlacementBackend) -> PlacementReport {
     let mut report = PlacementReport::default();
     let mut previous = None::<WindowSwitchIdentity>;
     let required = if destination == Destination::Target {
-        overlay
-            .workspace
+        workspace
             .virtual_desktop
             .as_ref()
             .map(|binding| &binding.id)
@@ -471,7 +574,7 @@ pub fn place_checked(
     match backend.workspace_on_current_desktop(required, current.clone()) {
         Ok(true) => {}
         Ok(false) => {
-            report.skipped = overlay.identities.len();
+            report.skipped = identities.len();
             return report;
         }
         Err(error) => {
@@ -480,8 +583,7 @@ pub fn place_checked(
         }
     }
     let mut seen = HashSet::new();
-    if overlay
-        .identities
+    if identities
         .values()
         .any(|target| !seen.insert(target.native.hwnd))
     {
@@ -489,11 +591,11 @@ pub fn place_checked(
         return report;
     }
     seen.clear();
-    for (index, window) in overlay.workspace.windows.iter().enumerate() {
+    for (index, window) in workspace.windows.iter().enumerate() {
         if window.disabled {
             continue;
         }
-        let Some(target) = overlay.identities.get(&index) else {
+        let Some(target) = identities.get(&index) else {
             report.skipped += 1;
             continue;
         };
@@ -502,8 +604,8 @@ pub fn place_checked(
             break;
         }
         let rect = match destination {
-            Destination::Home => window.home_rect.or(overlay.workspace.home_rect),
-            Destination::Target => window.target_rect.or(overlay.workspace.target_rect),
+            Destination::Home => window.home_rect.or(workspace.home_rect),
+            Destination::Target => window.target_rect.or(workspace.target_rect),
         };
         let Some(rect) = rect.filter(|rect| rect.w > 0 && rect.h > 0) else {
             report.skipped += 1;
@@ -1063,6 +1165,78 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn catalog_reconnect_enumerates_once_and_never_assigns_one_window_twice() {
+        struct Backend { calls: std::cell::Cell<usize> }
+        impl ReconnectBackend for Backend {
+            fn enumerate(&self) -> Result<Vec<(EnumeratedWindow, WindowSwitchIdentity)>> {
+                self.calls.set(self.calls.get() + 1);
+                Ok(vec![(candidate(10), identity(10, 22))])
+            }
+        }
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("workspaces.json");
+        let first = workspace(); let mut second = workspace(); second.id = "two".into();
+        let mut disabled = workspace(); disabled.id = "disabled".into(); disabled.disabled = true;
+        std::fs::write(&path, serde_json::to_vec(&[first, second, disabled]).unwrap()).unwrap();
+        let source = store::load_checked_workspaces(&path, || true).unwrap();
+        let backend = Backend { calls: std::cell::Cell::new(0) };
+        let plan = reconnect_catalog_checked(&source, || true, &backend).unwrap();
+        assert_eq!(backend.calls.get(), 1);
+        assert_eq!(plan.rows().iter().map(|row| row.index).collect::<Vec<_>>(), vec![0, 1]);
+        assert_eq!(plan.skipped, 1);
+        assert_eq!(plan.summary.reconnected, 1);
+        assert_eq!(plan.summary.missing, 1);
+        assert_eq!(plan.outcome, ReconnectCatalogOutcome::Partial);
+        assert_eq!(plan.rows().iter().map(|row| row.identities.len()).sum::<usize>(), 1);
+        assert!(plan.matches_snapshot(&source));
+        assert!(plan.source_is_current());
+    }
+
+    #[test]
+    fn catalog_reconnect_refuses_failed_enumeration_and_late_source_change() {
+        struct Backend { path: PathBuf, mutate: bool, fail: bool }
+        impl ReconnectBackend for Backend {
+            fn enumerate(&self) -> Result<Vec<(EnumeratedWindow, WindowSwitchIdentity)>> {
+                if self.mutate { std::fs::write(&self.path, b"[]")?; }
+                if self.fail { anyhow::bail!("failed"); }
+                Ok(Vec::new())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("workspaces.json");
+        let original = serde_json::to_vec(&[workspace()]).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let source = store::load_checked_workspaces(&path, || true).unwrap();
+        assert!(reconnect_catalog_checked(&source, || true, &Backend { path: path.clone(), mutate: false, fail: true }).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let plan = reconnect_catalog_checked(&source, || true, &Backend { path: path.clone(), mutate: false, fail: false }).unwrap();
+        assert_eq!(plan.outcome, ReconnectCatalogOutcome::NoMatch);
+        assert!(reconnect_catalog_checked(&source, || true, &Backend { path: path.clone(), mutate: true, fail: false }).is_err());
+        assert!(!plan.source_is_current());
+    }
+
+    #[test]
+    fn catalog_legacy_row_has_source_ordinal_and_never_trusts_saved_handle() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("legacy.json");
+        let bytes = br#"[{"name":"Legacy","windows":[{"title":"Editor","hwnd":999,"binding_verified":true}]}]"#;
+        std::fs::write(&path, bytes).unwrap();
+        let source = store::load_checked_workspaces(&path, || true).unwrap();
+        let plan = reconnect_catalog_checked(&source, || true, &FakeReconnect { fail: false, rows: vec![] }).unwrap();
+        assert_eq!(plan.rows()[0].index, 0);
+        assert!(plan.rows()[0].identities.is_empty());
+        assert_eq!(plan.rows()[0].workspace.windows[0].hwnd, 0);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn catalog_final_authority_cannot_replace_source_after_last_check() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("workspaces.json");
+        std::fs::write(&path, serde_json::to_vec(&[workspace()]).unwrap()).unwrap();
+        let source = store::load_checked_workspaces(&path, || true).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let result = reconnect_catalog_checked(&source, || { calls.set(calls.get() + 1); if calls.get() == 4 { std::fs::write(&path, b"[]").unwrap(); } true }, &FakeReconnect { fail: false, rows: vec![] });
+        assert!(result.is_err());
     }
 
     struct FakePlacement {

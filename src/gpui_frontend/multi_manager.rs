@@ -19,12 +19,14 @@ struct PlacementOverlay {
 #[derive(Clone)]
 enum OverlaySource {
     Reconnect(checked::ReconnectedWorkspace),
+    Catalog(Arc<checked::ReconnectCatalogPlan>),
     Restore(Arc<checked::RestorePlan>),
 }
 impl PlacementOverlay {
     fn bound_count(&self) -> usize {
         match &self.source {
             OverlaySource::Reconnect(value) => value.identities.len(),
+            OverlaySource::Catalog(plan) => plan.rows().iter().find(|row| row.index == self.index).map_or(0, |row| row.identities.len()),
             OverlaySource::Restore(plan) => plan
                 .rows()
                 .iter()
@@ -82,6 +84,7 @@ fn overlay_has_live_identity(
                     .identities
                     .values()
                     .any(|item| item.native == identity && is_live(item.native)),
+                OverlaySource::Catalog(plan) => plan.rows().iter().find(|row| row.index == overlay.index).is_some_and(|row| row.identities.values().any(|item| item.native == identity && is_live(identity))),
                 OverlaySource::Restore(plan) => plan
                     .rows()
                     .iter()
@@ -115,6 +118,7 @@ pub(super) fn current_provider(
                 multi_launcher::commands::MultiManagerCommand::Open
                     | multi_launcher::commands::MultiManagerCommand::RestoreBindings
                     | multi_launcher::commands::MultiManagerCommand::Settings
+                    | multi_launcher::commands::MultiManagerCommand::Reconnect
             ))
         )
         && super::search_providers::search_routed(
@@ -150,7 +154,20 @@ fn discard_draft(rows: &mut Vec<MmWorkspace>, snapshot: Option<&CheckedWorkspace
     *rows = snapshot.map_or_else(Vec::new, |snapshot| snapshot.workspaces().to_vec());
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceOperationKind { RestoreBindings, CatalogReconnect }
+
+pub(super) fn workspace_operation(action: &Action) -> Option<WorkspaceOperationKind> {
+    if action.args.is_some() { return None; }
+    match parse_action(action).ok()? {
+        Command::MultiManager(multi_launcher::commands::MultiManagerCommand::RestoreBindings) => Some(WorkspaceOperationKind::RestoreBindings),
+        Command::MultiManager(multi_launcher::commands::MultiManagerCommand::Reconnect) => Some(WorkspaceOperationKind::CatalogReconnect),
+        _ => None,
+    }
+}
+
 struct RestoreIntent {
+    kind: WorkspaceOperationKind,
     query: String,
     action: Action,
     generation: u64,
@@ -159,7 +176,7 @@ struct RestoreIntent {
     native: NativeWindow,
     mount: utility_mount::MountReceipt,
     lease: Arc<AtomicBool>,
-    permit: EffectPermit,
+    permit: Option<EffectPermit>,
     validated: bool,
 }
 
@@ -528,6 +545,7 @@ impl MultiManagerView {
                 OverlaySource::Reconnect(ref reconnect) => {
                     checked::place_checked(reconnect, issuer, destination, current, &mut backend)
                 }
+                OverlaySource::Catalog(plan) => checked::place_catalog_checked(plan, overlay.index, issuer, destination, current, &mut backend),
                 OverlaySource::Restore(plan) => checked::place_restored_checked(
                     plan,
                     overlay.index,
@@ -879,6 +897,7 @@ impl MultiManagerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(kind) = workspace_operation(&action) else { return; };
         if self.restore_intent.is_some()
             || self.rename.is_some()
             || self.review.is_some()
@@ -903,6 +922,7 @@ impl MultiManagerView {
             }
         }));
         let intent = RestoreIntent {
+            kind,
             query,
             action,
             generation,
@@ -911,7 +931,7 @@ impl MultiManagerView {
             native,
             mount: self.mount.clone(),
             lease,
-            permit,
+            permit: Some(permit),
             validated: false,
         };
         self.restore_lease = Some(intent.lease.clone());
@@ -964,6 +984,10 @@ impl MultiManagerView {
             cx.notify();
             return;
         };
+        if intent.kind == WorkspaceOperationKind::CatalogReconnect {
+            self.start_catalog(Some(intent), window, cx);
+            return;
+        }
         self.pending = true;
         self.attempt = self.attempt.wrapping_add(1);
         let attempt = self.attempt;
@@ -1066,6 +1090,65 @@ impl MultiManagerView {
         .detach();
         cx.notify();
     }
+    fn start_catalog(&mut self, mut intent: Option<RestoreIntent>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending || self.dirty() || self.rename.is_some() || self.review.is_some() || self.capture_slot.is_some() || !self.current(window, cx) { return; }
+        let Some(snapshot) = self.snapshot.clone() else { self.message = Some("Load workspaces before reconnecting.".into()); cx.notify(); return; };
+        let Some(native) = self.native else { return; };
+        let (permit, lease, receipt, visibility_revision) = if let Some(origin) = intent.as_mut() {
+            let Some(permit) = origin.permit.take() else { return; };
+            (permit, origin.lease.clone(), origin.mount.clone(), origin.visibility_revision)
+        } else {
+            let Some(permit) = self.admission.admit() else { return; };
+            self.focus.focus(window, cx);
+            let lease = Arc::new(AtomicBool::new(true));
+            let blur = lease.clone();
+            self.focus_guard = Some(cx.on_focus_out(&self.focus, window, move |_, _, _, _| blur.store(false, Ordering::Release)));
+            let active = lease.clone();
+            self.activation_guard = Some(cx.observe_window_activation(window, move |_, window, _| { if !window.is_window_active() { active.store(false, Ordering::Release); } }));
+            (permit, lease, self.mount.clone(), self.visibility.request_revision.load(Ordering::Acquire))
+        };
+        self.operation_lease = Some(lease.clone()); self.pending = true;
+        self.attempt = self.attempt.wrapping_add(1); let attempt = self.attempt; let revision = self.revision;
+        let worker_mount = receipt.clone(); let worker_lease = lease.clone(); let visibility = self.visibility.clone(); let admission = self.admission.clone(); let host = self.host;
+        let focus = self.focus.clone(); let weak = cx.entity().downgrade();
+        window.defer(cx, move |window, app| { let _ = weak.update(app, |view, cx| {
+        if !attempt_current(&receipt, &view.mount, attempt, view.attempt) { return; }
+        let same_source = view.snapshot.as_ref().is_some_and(|current| current.path() == snapshot.path() && current.source() == snapshot.source() && current.workspaces() == snapshot.workspaces());
+        let allowed = attempt_current(&receipt, &view.mount, attempt, view.attempt) && view.pending && !view.dirty() && view.revision == revision && same_source
+            && lease.load(Ordering::Acquire) && view.current(window, cx) && view.visibility.request_revision.load(Ordering::Acquire) == visibility_revision
+            && (intent.is_some() || focus.is_focused(window)) && intent.as_ref().is_none_or(|origin| view.restore_origin_current(origin, window, cx));
+        if !allowed { view.pending = false; view.operation_lease = None; view.restore_lease = None; view.focus_guard = None; view.activation_guard = None; view.message = Some("Reconnect was superseded; try again.".into()); view.settle_wait(cx); cx.notify(); return; }
+        let task = cx.background_executor().spawn(async move {
+            checked::reconnect_catalog_checked(&snapshot, || worker_mount.is_current() && worker_lease.load(Ordering::Acquire) && !admission.is_fenced() && current_foreground_identity() == Some(native.identity) && json_utility::native_host_current(&visibility, visibility_revision, Some(native), false), &checked::NativeReconnect)
+        });
+        cx.spawn(async move |weak, cx| {
+            let _permit = permit; let result = task.await;
+            let delivered = host.update(cx, |_, window, cx| { let _ = weak.update(cx, |view, cx| {
+                if !attempt_current(&receipt, &view.mount, attempt, view.attempt) { return; }
+                view.pending = false; view.operation_lease = None; view.restore_lease = None; view.focus_guard = None; view.activation_guard = None;
+                let current = view.revision == revision && !view.dirty() && lease.load(Ordering::Acquire) && view.current(window, cx)
+                    && view.visibility.request_revision.load(Ordering::Acquire) == visibility_revision
+                    && intent.as_ref().is_none_or(|origin| view.restore_origin_current(origin, window, cx));
+                if current { match result {
+                    Ok(plan) if view.snapshot.as_ref().is_some_and(|snapshot| plan.matches_snapshot(snapshot)) => {
+                        let plan = Arc::new(plan);
+                        let rows = plan.rows().iter().filter_map(|row| view.rows.get(row.index).cloned().map(|expected| PlacementOverlay {
+                            index: row.index, revision, expected, source: OverlaySource::Catalog(plan.clone()),
+                        })).collect::<Vec<_>>();
+                        replace_restore_entries(&mut view.overlays, rows, |old| matches!(&old.source, OverlaySource::Reconnect(_) | OverlaySource::Catalog(_)));
+                        let state = match plan.outcome { checked::ReconnectCatalogOutcome::Complete => "Reconnect complete", checked::ReconnectCatalogOutcome::Partial => "Reconnect partially complete", checked::ReconnectCatalogOutcome::NoMatch => "No windows matched" };
+                        view.message = Some(format!("{state}: {} matched, {} missing, {} ambiguous, {} metadata mismatch, {} workspaces skipped.", plan.summary.reconnected + plan.summary.already_valid, plan.summary.missing, plan.summary.ambiguous, plan.summary.metadata_mismatch, plan.skipped));
+                    }
+                    Ok(_) => view.message = Some("Workspaces changed; reload before reconnecting.".into()),
+                    Err(error) => view.message = Some(format!("Could not reconnect: {error:#}")),
+                } }
+                view.settle_wait(cx); cx.notify();
+            }); });
+            if delivered.is_err() { let _ = weak.update(cx, |view, cx| { if attempt_current(&receipt, &view.mount, attempt, view.attempt) { view.pending = false; view.operation_lease = None; view.restore_lease = None; view.focus_guard = None; view.activation_guard = None; view.message = Some("Reconnect finished after the launcher became unavailable.".into()); view.settle_wait(cx); cx.notify(); } }); }
+        }).detach(); cx.notify();
+        }); }); cx.notify();
+    }
+
     fn reload(&mut self, cx: &mut Context<Self>) {
         if self.pending || !self.open {
             return;
@@ -1724,6 +1807,19 @@ impl Render for MultiManagerView {
                         }),
                 )
                 .child(
+                    Button::new("mm-reconnect-windows")
+                        .label("Reconnect Windows")
+                        .disabled(self.pending || self.dirty() || self.snapshot.is_none())
+                        .on_click({
+                            let mount = mount.clone();
+                            cx.listener(move |view, _, window, cx| {
+                                if mount.is_current() && mount.matches(&view.mount) && view.revision == issued_revision {
+                                    view.start_catalog(None, window, cx);
+                                }
+                            })
+                        }),
+                )
+                .child(
                     Button::new("mm-close")
                         .label("Close")
                         .disabled(self.pending)
@@ -1851,6 +1947,7 @@ impl Render for MultiManagerView {
                     row.windows.len(),
                     match &overlay.source {
                         OverlaySource::Reconnect(_) => "reconnected",
+                        OverlaySource::Catalog(_) => "reconnected",
                         OverlaySource::Restore(_) => "restored",
                     }
                 )));
@@ -2138,6 +2235,18 @@ mod tests {
         assert!(current_provider("mm settings", &action, None, None));
         assert!(!current_provider("mm", &action, None, None));
         assert!(!current_provider("mm settings", &action, Some(&HashSet::new()), None));
+    }
+    #[test]
+    fn reconnect_provider_requires_exact_stock_action() {
+        let action = multi_launcher::multi_manager::commands::search_mm_commands("mm reconnect").into_iter().find(|row| row.action == "mm:reconnect").unwrap();
+        assert!(current_provider("mm reconnect", &action, None, None));
+        assert!(!current_provider("mm", &action, None, None));
+        assert!(!current_provider("mm reconnect", &action, Some(&HashSet::new()), None));
+        assert_eq!(super::workspace_operation(&action), Some(super::WorkspaceOperationKind::CatalogReconnect));
+        let restore = multi_launcher::multi_manager::commands::search_mm_commands("mm restore bindings").into_iter().find(|row| row.action == "mm:restore-bindings").unwrap();
+        assert_eq!(super::workspace_operation(&restore), Some(super::WorkspaceOperationKind::RestoreBindings));
+        let mut forged = action; forged.args = Some("other".into());
+        assert_eq!(super::workspace_operation(&forged), None);
     }
     #[test]
     fn duplicate_id_rows_require_exact_ordinal_revision_and_record() {

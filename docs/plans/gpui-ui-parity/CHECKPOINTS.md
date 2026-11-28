@@ -2110,3 +2110,15 @@ Scoped locked `fast-dev` checks passed for the shared and corrected shared chang
 P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open with two owned source pairs and both Paste Sequence shortcuts disabled. Verify the exact form, Cancel and Escape, dirty refusal, Save preserving the four data files, and a fresh `mm` reading the new pair. Check egui readback after relaunch. Other Settings controls, the runtime and hotkeys stay open.
 
 Continue P0.10 checked whole-catalog Reconnect while essential Windows replay is paused. Reuse the existing matcher and checked workspace owner.
+
+### P0.10 checked whole-catalog MultiManager Reconnect
+
+The exact stock `mm reconnect` result and **Reconnect Windows** in the retained workspace pane use the same checked operation. The request retains its original mount, foreground, visibility and restart authority through cold load and the deferred worker. It requires a clean committed source. Other workspace operations retain their existing owner.
+
+The worker clears historical window authority and runs the stock matcher once across eligible rows with one fallible enumeration and one assigned-window set. Disabled, invalid and ambiguous rows are excluded. Legacy rows use the exact retained source and original ordinal. Failure, no match and partial matches have distinct feedback. Final source bytes are checked on the worker. Publication checks the same retained basis and replaces Reconnect overlays while preserving Restore entries. Placement rechecks source and native identity before using an overlay. Reconnect changes no stored data and performs no placement or activation.
+
+Scoped locked `fast-dev` checks passed in 1m 55s, 37.19s and 34.45s. Independent review covered one enumeration, stale source, focus lease, typed handoff and separate overlay ownership. Grouped library and launcher link took 11m 33s. Nextest run `6fe7eaae-a986-4d0f-8172-9d3ad24bc7fc` passed 11 of 11 in 3.031 s with 9556 skips.
+
+P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open with owned workspace fixtures and both Paste Sequence shortcuts disabled. Verify both entry points, unchanged geometry and store bytes during Reconnect, and a subsequent checked Home or Target on each workspace. Automatic reconnect-on-load, workspace hotkeys and original G24 criteria stay open.
+
+Continue the P0.09 Note Editor’s Bold Selection and Italic Selection. MultiManager startup reconnect needs a launcher-owned publication before the retained pane exists.
