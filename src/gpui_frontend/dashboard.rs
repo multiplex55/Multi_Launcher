@@ -204,6 +204,7 @@ fn project(layout: &DashboardLayout) -> Vec<Slot> {
 
 pub(super) struct Source {
     pub settings: multi_launcher::settings::DashboardSettings,
+    path: std::path::PathBuf,
     state: Arc<Mutex<Option<Arc<Snapshot>>>>,
     active: Arc<AtomicBool>,
     wake: Arc<HashWakeSignal>,
@@ -228,12 +229,16 @@ impl Source {
             let wake = wake.clone();
             let sender = sender.clone();
             std::thread::spawn(move || {
-                let callback_active = active.clone();
-                let watcher = multi_launcher::common::json_watch::watch_json(&path, move || {
-                    if callback_active.load(Ordering::Acquire) {
-                        let _ = sender.try_send(());
-                    }
-                });
+                let install = || {
+                    let callback_active = active.clone();
+                    let callback_sender = sender.clone();
+                    multi_launcher::common::json_watch::watch_json(&path, move || {
+                        if callback_active.load(Ordering::Acquire) {
+                            let _ = callback_sender.try_send(());
+                        }
+                    })
+                };
+                let mut watcher = install();
                 let registry = WidgetRegistry::with_defaults();
                 let mut layout = DashboardLayout::initial(&path, &registry);
                 if let Err(error) = &watcher {
@@ -263,7 +268,10 @@ impl Source {
                     if receiver.recv().is_err() || !active.load(Ordering::Acquire) {
                         break;
                     }
-                    let next = match DashboardLayout::reload(&path, &registry) {
+                    if watcher.is_err() {
+                        watcher = install();
+                    }
+                    let mut next = match DashboardLayout::reload(&path, &registry) {
                         Ok(next) => next,
                         Err(error) => {
                             let mut retained = layout.clone();
@@ -271,6 +279,10 @@ impl Source {
                             retained
                         }
                     };
+                    if let Err(error) = &watcher {
+                        next.warnings
+                            .push(format!("Dashboard watch failed: {error}"));
+                    }
                     if next != layout {
                         generation = generation.wrapping_add(1);
                         layout = next;
@@ -281,6 +293,7 @@ impl Source {
         };
         Self {
             settings,
+            path,
             state,
             active,
             wake,
@@ -294,6 +307,16 @@ impl Source {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub fn request_reload(&self) {
+        if self.active.load(Ordering::Acquire) {
+            let _ = self.sender.try_send(());
+        }
     }
 
     fn claim(&self, predicate: impl FnOnce(&Snapshot) -> bool) -> bool {
@@ -461,6 +484,37 @@ impl RootWindow {
             .min_h(px(0.0))
             .overflow_y_scroll()
             .track_scroll(&outer);
+        let generation = snapshot.generation;
+        body = body.child(
+            Button::new("dashboard-customize")
+                .label("Customize Dashboard")
+                .on_click(cx.listener(move |root, _, window, cx| {
+                    if window.has_active_dialog(cx)
+                        || !root.dashboard_body_owned(cx)
+                        || root.dashboard_epoch != epoch
+                        || !window.is_window_active()
+                        || !root.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+                        || !root.native_window.is_some_and(|native| {
+                            current_foreground_identity() == Some(native.identity)
+                                && json_utility::native_host_current(
+                                    &root.root_visibility,
+                                    revision,
+                                    Some(native),
+                                    false,
+                                )
+                        })
+                    {
+                        return;
+                    }
+                    if let Some(_permit) = root.restart_admission.admit()
+                        && root.dashboard_source.claim(|snapshot| {
+                            snapshot.generation == generation && !snapshot.slots.is_empty()
+                        })
+                    {
+                        root.open_dashboard_editor(window, cx);
+                    }
+                })),
+        );
         for (index, warning) in snapshot.layout.warnings.iter().enumerate() {
             body = body.child(
                 Label::new(warning.clone())
@@ -603,7 +657,8 @@ impl RootWindow {
                                     let focus_identity = identity.clone();
                                     let inner = scroll.clone();
                                     let outer = outer.clone();
-                                    let outer_index = snapshot.layout.warnings.len() + row_index;
+                                    let outer_index =
+                                        1 + snapshot.layout.warnings.len() + row_index;
                                     let subscription =
                                         cx.on_focus(&focus, window, move |root, window, cx| {
                                             if root.dashboard_action_current(
@@ -894,6 +949,49 @@ mod tests {
                 && matches!(&snapshot.slots[0].widget, Widget::QuickTools { .. })
         });
         assert!(recovered.layout.warnings.is_empty());
+        source.shutdown();
+    }
+
+    #[test]
+    fn explicit_save_reload_rebinds_missing_parent_watch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new-parent").join("dashboard.json");
+        let mut settings = multi_launcher::settings::DashboardSettings::default();
+        settings.config_path = Some(path.to_string_lossy().into_owned());
+        let source = Source::start(settings, Arc::new(HashWakeSignal::default()));
+        let wait = |predicate: &dyn Fn(&super::Snapshot) -> bool| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(snapshot) = source.snapshot() {
+                    if predicate(&snapshot) {
+                        break;
+                    }
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "Dashboard source did not settle"
+                );
+                std::thread::yield_now();
+            }
+        };
+        wait(&|snapshot| {
+            snapshot
+                .layout
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("watch failed"))
+        });
+        let mut draft =
+            multi_launcher::dashboard::checked_editor::DashboardDraft::load(&path).unwrap();
+        draft.save(|| true).unwrap();
+        source.request_reload();
+        wait(&|snapshot| {
+            !snapshot
+                .layout
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("watch failed"))
+        });
         source.shutdown();
     }
 }

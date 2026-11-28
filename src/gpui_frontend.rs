@@ -60,6 +60,7 @@ mod todo_view;
 mod calendar_view;
 mod calendar_results;
 mod dashboard;
+mod dashboard_editor;
 mod gesture_editor;
 mod gesture_query;
 mod invocation;
@@ -614,7 +615,7 @@ impl LauncherSearchCatalog {
                 let folder_size_result = provider == "folder_size" && folder_size::current_provider(raw_query, &action, None, None);
                 let file_lock_result = cfg!(windows) && provider == "file_lock" && file_lock::current_provider(raw_query, &action, None, None);
                 let file_result = provider == "file_search" && multi_launcher::plugins::file_search::scoped_search_start(raw_query, &action).is_some();
-                let settings_result = provider == "settings" && settings_navigation::current_provider(raw_query, &action, None, None).is_some();
+                let settings_result = provider == "settings" && (settings_navigation::current_provider(raw_query, &action, None, None).is_some() || dashboard_editor::current_provider(raw_query, &action, None, None));
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
                     .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || provider == "tempfile" || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || calculation_pad_result || note_source.is_some() || note_new.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
@@ -1293,6 +1294,7 @@ struct SettingsEditorPanel {
     metrics: multi_launcher::gui::theme::ThemeMetrics,
     palette: multi_launcher::gui::theme::SemanticPalette,
     settings_owner_focus_handle: FocusHandle,
+    visibility_revision: u64,
 }
 
 #[derive(IntoElement)]
@@ -1721,6 +1723,10 @@ impl RenderOnce for QuickHelpPanel {
 impl RenderOnce for SettingsEditorPanel {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
         let reload_root = self.root.clone();
+        let dashboard_root = self.root.clone();
+        let settings_focus = self.settings_owner_focus_handle.clone();
+        let navigation_id = self.navigation.as_ref().map(|view| view.entity_id());
+        let visibility_revision = self.visibility_revision;
         let cancel_root = self.root;
         let scroll = self.scroll.clone();
         let line_height = px(self.metrics.line_height);
@@ -1744,6 +1750,25 @@ impl RenderOnce for SettingsEditorPanel {
             .when_some(self.search, |panel, search| panel.child(search))
             .when_some(self.actions, |panel, actions| panel.child(actions))
             .when_some(self.omni, |panel, omni| panel.child(omni))
+            .child(Button::new("settings-customize-dashboard").label("Customize Dashboard")
+                .disabled(self.busy).on_click(move |_, window, app| {
+                    let _ = dashboard_root.update(app, |root, cx| {
+                        if !root.settings_editor.open
+                            || root.settings_navigation.as_ref().map(|view| view.entity_id()) != navigation_id
+                            || !settings_focus.contains_focused(window, cx)
+                            || !window.is_window_active() || window.has_active_dialog(cx)
+                            || root.restart_admission.is_fenced()
+                            || !root.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+                            || root.settings_search.as_ref().is_some_and(|view| view.read(cx).busy())
+                            || root.settings_actions.as_ref().is_some_and(|view| view.read(cx).busy())
+                            || root.settings_hotkey.as_ref().is_some_and(|view| view.read(cx).busy())
+                            || root.settings_omni.as_ref().is_some_and(|view| view.read(cx).busy())
+                            || !root.native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity)
+                                && json_utility::native_host_current(&root.root_visibility, visibility_revision, Some(native), false)) { return; }
+                        let Some(_permit) = root.restart_admission.admit() else { return; };
+                        root.open_dashboard_editor(window, cx);
+                    });
+                }))
             .child(Button::new("settings-reload-application-index").label("Reload application index")
                 .disabled(self.index_busy || self.busy).on_click(move |_, _, app| {
                     let _ = reload_root.update(app, |root, cx| root.reload_application_index(cx));
@@ -2551,6 +2576,7 @@ struct RootWindow {
     calendar_wake: Arc<HashWakeSignal>,
     calendar_results: calendar_results::Owner,
     dashboard_source: Arc<dashboard::Source>,
+    dashboard_editor: Option<Entity<dashboard_editor::Editor>>,
     dashboard_timer_rows: Vec<multi_launcher::plugins::timer_session::TimerRow>,
     dashboard_ticking: bool,
     dashboard_epoch: u64,
@@ -3748,6 +3774,7 @@ enum RootCloseBlocker {
     TempfileAlias,
     TimerOperation,
     GestureEditor,
+    DashboardEditor,
     FileSearchEffect,
     FolderSize,
     FileLock,
@@ -5029,6 +5056,7 @@ impl RootWindow {
     }
 
     fn revoke_focus_bound_utility_operations(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.dashboard_editor { view.update(cx, |view, _| view.revoke()); }
         self.dashboard_epoch = self.dashboard_epoch.wrapping_add(1);
         if let Some(view) = &self.gesture_editor {
             view.update(cx, |view, _| view.revoke_enabled_operation());
@@ -5764,6 +5792,7 @@ impl RootWindow {
         &mut self,
         cx: &mut Context<Self>,
     ) -> Result<RestartSnapshot, String> {
+        if self.dashboard_editor.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Err(dashboard_editor::WAIT.into()); }
         let gesture_reservation = multi_launcher::plugins::mouse_gestures::reserve_frontend_restart()
             .map_err(|error| format!("Mouse Gestures prevents restart: {error}. Disable gestures and stop click observation, or quit and reopen."))?;
         drop(gesture_reservation);
@@ -7391,6 +7420,8 @@ impl RootWindow {
                     is_downloads_triage_opener(action)
                 } else if provider == "settings" && action.action == "settings:search" {
                     settings_navigation::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()).is_some()
+                } else if provider == "settings" && action.action == "dashboard:settings" {
+                    dashboard_editor::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "duplicate_finder" {
                     duplicate_finder::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "MultiManager" {
@@ -8227,6 +8258,15 @@ impl RootWindow {
                     self.settings_panel_scroll.set_offset(point(px(0.0), px(0.0)));
                     if let Some(navigation) = self.settings_navigation.clone() { navigation.update(cx, |navigation, cx| navigation.set_query(term, window, cx)); }
                 }
+            }
+            return;
+        }
+        if result.action.action == "dashboard:settings" {
+            if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "settings")
+                && dashboard_editor::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+                && self.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+                && self.native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity)) {
+                self.open_dashboard_editor(window, cx);
             }
             return;
         }
@@ -10665,6 +10705,7 @@ impl RootWindow {
             Some(RootCloseBlocker::TempfileSave) => { self.restart_status = Some(tempfile_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::TimerOperation) => { self.restart_status = Some(timer_view::WAIT.to_owned()); }
             Some(RootCloseBlocker::GestureEditor) => { self.restart_status = Some("Finish the Mouse Gestures operation, or save or discard its draft before closing.".into()); }
+            Some(RootCloseBlocker::DashboardEditor) => { self.restart_status = Some(dashboard_editor::WAIT.into()); }
             Some(RootCloseBlocker::SnippetsSave) => { self.restart_status = Some(snippets::SAVE_WAIT.to_owned()); }
             Some(RootCloseBlocker::ClipboardHistory) => { self.restart_status = Some(clipboard_history::WAIT.to_owned()); }
             Some(RootCloseBlocker::RegexPresets) => { self.restart_status = Some(regex_presets::WAIT_QUIT.to_owned()); }
@@ -10789,6 +10830,7 @@ impl RootWindow {
         cx: &App,
     ) -> Option<RootCloseBlocker> {
         if self.timer_busy.load(Ordering::Acquire) { return Some(RootCloseBlocker::TimerOperation); }
+        if self.dashboard_editor.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Some(RootCloseBlocker::DashboardEditor); }
         if self.gesture_editor.as_ref().is_some_and(|view| view.read(cx).blocks_root_close(cx)) { return Some(RootCloseBlocker::GestureEditor); }
         if self.clipboard_modify_startup.pending || self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).blocks_close() || view.read(cx).rehosting) { return Some(RootCloseBlocker::ClipboardModifyBlocked); }
         if self.settings_omni.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::SettingsOmniSave); }
@@ -11288,6 +11330,7 @@ impl Render for RootWindow {
             status: self.settings_editor.status.clone(), index_busy: self.indexed_applications.busy(),
             index_status: self.indexed_applications.status.clone(), width: root_controls_width, metrics, palette,
             settings_owner_focus_handle: self.settings_owner_focus_handle.clone(),
+            visibility_revision: self.root_visibility.request_revision.load(Ordering::Acquire),
         });
         let toast_log_viewer_panel = self.toast_log_viewer.open.then(|| ToastLogViewerPanel {
             root: cx.entity().downgrade(),
@@ -11799,6 +11842,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.tempfile_alias.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.dashboard_editor.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         // ScrollHandle bounds update during prepaint. Re-render either tool
@@ -13867,6 +13913,7 @@ pub(crate) fn run_foundation_window(
                 calendar_wake: calendar_wake_for_root.clone(),
                 calendar_results: calendar_results::Owner::default(),
                 dashboard_source: dashboard_source_for_root.clone(),
+                dashboard_editor: None,
                 dashboard_timer_rows: Vec::new(),
                 dashboard_ticking: false,
                 dashboard_epoch: 0,
@@ -14428,6 +14475,7 @@ pub(crate) fn run_foundation_window(
                     Some(RootCloseBlocker::TempfileSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(tempfile_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::TimerOperation) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(timer_view::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::GestureEditor) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some("Finish the Mouse Gestures operation, or save or discard its draft before closing.".into()); cx.notify(); }); false }
+                    Some(RootCloseBlocker::DashboardEditor) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(dashboard_editor::WAIT.into()); cx.notify(); }); false }
                     Some(RootCloseBlocker::SnippetsSave) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(snippets::SAVE_WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::ClipboardHistory) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(clipboard_history::WAIT.to_owned()); cx.notify(); }); false }
                     Some(RootCloseBlocker::RegexPresets) => { let _ = root_for_window_close.update(app, |root, cx| { root.restart_status = Some(regex_presets::WAIT_CLOSE.to_owned()); cx.notify(); }); false }

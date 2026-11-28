@@ -300,7 +300,7 @@ impl DashboardConfig {
     }
 }
 
-fn dashboard_config_transaction_guard() -> MutexGuard<'static, ()> {
+pub(crate) fn dashboard_config_transaction_guard() -> MutexGuard<'static, ()> {
     DASHBOARD_CONFIG_TRANSACTION
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

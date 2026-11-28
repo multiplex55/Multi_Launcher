@@ -898,6 +898,33 @@ impl Default for SettingsSaveWorkerRegistry {
 }
 
 impl SettingsSaveWorkerRegistry {
+    /// Read a Dashboard draft on the registered worker without changing the file.
+    pub fn begin_dashboard_editor_read(&self, path: std::path::PathBuf) -> Result<Receiver<anyhow::Result<crate::dashboard::checked_editor::DashboardDraft>>, String> {
+        let (sender, receiver) = mpsc::channel();
+        self.spawn(move || { let _ = sender.send(crate::dashboard::checked_editor::DashboardDraft::load(&path)); })
+            .map_err(|error| format!("could not start the Dashboard reader: {error}"))?;
+        Ok(receiver)
+    }
+
+    /// Save the exclusively borrowed draft on the registered writer.
+    pub fn begin_dashboard_editor_save(&self, draft: Arc<Mutex<crate::dashboard::checked_editor::DashboardDraft>>, current: Arc<dyn Fn() -> bool + Send + Sync>)
+        -> Result<(Receiver<Result<(), crate::dashboard::checked_editor::SaveError>>, SettingsBooleanSaveToken), String> {
+        let token = self.reserve_preference_token()?;
+        let (sender, receiver) = mpsc::channel();
+        let registry = self.clone();
+        let worker_token = token.clone();
+        if let Err(error) = self.spawn(move || {
+            let result = draft.lock().map_err(|_| crate::dashboard::checked_editor::SaveError::Store("Dashboard draft unavailable".into()))
+                .and_then(|mut draft| draft.save_with_claim(|| !worker_token.is_canceled() && current(), || worker_token.begin_irrevocable_commit()));
+            let failure = result.as_ref().err().filter(|_| !worker_token.is_canceled()).map(ToString::to_string);
+            registry.complete_preference_token(worker_token.id(), failure);
+            let _ = sender.send(result);
+        }) {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).boolean_preference_pending.remove(&token.id());
+            return Err(format!("could not start the Dashboard writer: {error}"));
+        }
+        Ok((receiver, token))
+    }
     /// Start the one-leaf GPUI launcher transaction on the registered worker.
     pub fn begin_launcher_hotkey_save(
         &self, path: String, baseline: crate::settings::LauncherHotkeySnapshot,

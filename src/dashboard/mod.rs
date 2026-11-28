@@ -5,6 +5,7 @@ pub mod diagnostics;
 pub(crate) mod editor_presentation;
 pub mod layout;
 pub mod layout_snapshot;
+pub mod checked_editor;
 pub mod repaint;
 pub mod widgets;
 
