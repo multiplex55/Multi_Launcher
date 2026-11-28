@@ -659,6 +659,10 @@ pub(super) struct Request {
     pub settings: Settings,
 }
 
+fn clipboard_modify_hide(intent: &multi_launcher::clipboard_modify::parser::ClipboardModifyIntent, named_hide: bool) -> bool {
+    matches!(intent, multi_launcher::clipboard_modify::parser::ClipboardModifyIntent::Stages(_)) || named_hide
+}
+
 pub(super) struct WorkerResult {
     pub outcome: Result<CommandOutcome, CommandError>,
     pub history_error: Option<String>,
@@ -1576,8 +1580,7 @@ impl RootWindow {
             && super::json_utility::native_host_current(&visibility, revision, Some(native), false)
             && current_foreground_identity() == Some(native.identity)
             && shared.read().ok().is_some_and(|live| Arc::ptr_eq(&live, &expected)));
-        let hide = matches!(intent, multi_launcher::clipboard_modify::parser::ClipboardModifyIntent::Stages(_))
-            || self.external_launch_preferences.clipboard_modify_hide_after_apply;
+        let hide = clipboard_modify_hide(&intent, self.external_launch_preferences.clipboard_modify_hide_after_apply);
         self.start_run(action, RunCommand::ClipboardExecute { intent, catalog, canonical, hide, current, lease }, query, source, None, window, cx);
     }
     pub(super) fn start_clipboard_undo(&mut self, action: Action, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
@@ -2364,6 +2367,17 @@ pub(super) fn bookkeep_bookmark(outcome: Result<CommandOutcome, CommandError>, a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_visibility_keeps_inline_hide_and_captures_named_policy() {
+        use multi_launcher::clipboard_modify::parser::ClipboardModifyIntent;
+        assert!(super::clipboard_modify_hide(&ClipboardModifyIntent::Stages(vec![]), false));
+        let named = ClipboardModifyIntent::ApplyTemplate { name: "example".into() };
+        let captured = super::clipboard_modify_hide(&named, true);
+        assert!(captured);
+        assert!(!super::clipboard_modify_hide(&named, false));
+        assert!(!super::clipboard_modify_hide(&ClipboardModifyIntent::ApplySavedPipeline { name: "example".into() }, false));
+    }
 
     #[test]
     fn todo_replace_retries_keep_one_claim_but_recheck_authority() {

@@ -1,5 +1,6 @@
 //! Typed sparse edits shared by the Settings frontends.
 use super::*;
+use crate::settings::ClipboardModifyPluginSettings;
 use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -26,6 +27,7 @@ pub enum ScopedSetting {
     StaticSize,
     MouseGesturesEnabled,
     MouseGesturesPracticeMode,
+    ClipboardModifyHideAfterApply,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +58,7 @@ pub enum ScopedSettingsError {
     Conflict(ScopedSetting),
     Invalid(ScopedSetting),
     Store(String),
+    CommittedUnverified(String),
 }
 impl std::fmt::Display for ScopedSettingsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -64,6 +67,7 @@ impl std::fmt::Display for ScopedSettingsError {
             Self::Conflict(field) => write!(f, "{field:?} changed since the editor was opened"),
             Self::Invalid(field) => write!(f, "{field:?} has an invalid value"),
             Self::Store(message) => f.write_str(message),
+            Self::CommittedUnverified(message) => write!(f, "Settings were written but could not be verified; reload before retrying: {message}"),
         }
     }
 }
@@ -96,6 +100,7 @@ impl ScopedSetting {
             Self::StaticSize => ("static_size", None),
             Self::MouseGesturesEnabled => ("plugin_settings", Some("enabled")),
             Self::MouseGesturesPracticeMode => ("plugin_settings", Some("practice_mode")),
+            Self::ClipboardModifyHideAfterApply => ("plugin_settings", Some("hide_launcher_after_apply")),
         }
     }
     pub fn value(self, settings: &Settings) -> ScopedSettingValue {
@@ -125,6 +130,7 @@ impl ScopedSetting {
             Self::StaticSize => OptionalPair(settings.static_size),
             Self::MouseGesturesEnabled => Bool(settings.plugin_settings.get("mouse_gestures").and_then(|value| value.get("enabled")).and_then(serde_json::Value::as_bool).unwrap_or(true)),
             Self::MouseGesturesPracticeMode => Bool(settings.plugin_settings.get("mouse_gestures").and_then(|value| value.get("practice_mode")).and_then(serde_json::Value::as_bool).unwrap_or(false)),
+            Self::ClipboardModifyHideAfterApply => Bool(settings.plugin_settings.get("clipboard_modify").and_then(|value| serde_json::from_value::<ClipboardModifyPluginSettings>(value.clone()).ok()).unwrap_or_default().hide_launcher_after_apply),
         }
     }
     fn valid(self, value: &ScopedSettingValue) -> bool {
@@ -151,7 +157,7 @@ impl ScopedSetting {
                 | Self::GridRespectCapability,
                 Bool(_),
             ) => true,
-            (Self::FollowMouse | Self::StaticLocationEnabled | Self::MouseGesturesEnabled | Self::MouseGesturesPracticeMode,
+            (Self::FollowMouse | Self::StaticLocationEnabled | Self::MouseGesturesEnabled | Self::MouseGesturesPracticeMode | Self::ClipboardModifyHideAfterApply,
                 Bool(_),
             ) => true,
             _ => false,
@@ -189,6 +195,23 @@ fn mouse_gestures_objects(root: &RawSettingsObject) -> Result<(RawSettingsObject
         }
     }
     Ok((plugins, mouse))
+}
+
+fn clipboard_objects(root: &RawSettingsObject) -> Result<(RawSettingsObject, RawSettingsObject), ScopedSettingsError> {
+    let object = |raw: Option<&Box<serde_json::value::RawValue>>, name: &str| -> Result<RawSettingsObject, ScopedSettingsError> {
+        match raw {
+            None => Ok(RawSettingsObject::new()),
+            Some(value) => super::omni_preferences::unique_object(value.get())
+                .map_err(|error| ScopedSettingsError::Store(format!("Invalid {name}: {error}"))),
+        }
+    };
+    let plugins = object(root.get("plugin_settings"), "plugin_settings")?;
+    let clipboard = object(plugins.get("clipboard_modify"), "clipboard_modify")?;
+    if let Some(value) = plugins.get("clipboard_modify") {
+        serde_json::from_str::<ClipboardModifyPluginSettings>(value.get())
+            .map_err(|error| ScopedSettingsError::Store(format!("Invalid clipboard settings: {error}")))?;
+    }
+    Ok((plugins, clipboard))
 }
 
 impl Settings {
@@ -260,6 +283,7 @@ impl Settings {
         }
         let placement = [ScopedSetting::FollowMouse, ScopedSetting::StaticLocationEnabled, ScopedSetting::StaticPosition, ScopedSetting::StaticSize];
         let grouped = placement.iter().any(|field| seen.contains(field));
+        let clipboard_group = seen.contains(&ScopedSetting::ClipboardModifyHideAfterApply);
         let mouse_group = seen.contains(&ScopedSetting::MouseGesturesEnabled) || seen.contains(&ScopedSetting::MouseGesturesPracticeMode);
         if grouped && !placement.iter().all(|field| seen.contains(field)) {
             return Err(ScopedSettingsError::Invalid(ScopedSetting::FollowMouse));
@@ -268,18 +292,45 @@ impl Settings {
         if token.is_some_and(SettingsBooleanSaveToken::is_canceled) {
             return Err(ScopedSettingsError::Cancelled);
         }
-        let bytes = read_exact_bytes(path)
-            .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
+        let original = if clipboard_group {
+            match std::fs::read(path) {
+                Ok(bytes) => Some(bytes),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(ScopedSettingsError::Store(error.to_string())),
+            }
+        } else { Some(read_exact_bytes(path).map_err(|error| ScopedSettingsError::Store(error.to_string()))?) };
+        let bytes = original.clone().unwrap_or_default();
         let settings = parse_effective_settings(path, &bytes)
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
+        let positional = if clipboard_group && bytes.iter().copied().find(|byte| !byte.is_ascii_whitespace()) == Some(b'[') {
+            Some(serde_json::from_slice::<Vec<Box<serde_json::value::RawValue>>>(&bytes)
+                .map_err(|error| ScopedSettingsError::Store(error.to_string()))?)
+        } else { None };
+        let fields = if positional.is_some() {
+            Some(super::omni_preferences::ordered_fields(&settings).map_err(|error| ScopedSettingsError::Store(error.to_string()))?)
+        } else { None };
+        let positional_root = if let (Some(values), Some(fields)) = (&positional, &fields) {
+            let mut root = RawSettingsObject::new();
+            for ((name, _), value) in fields.iter().zip(values) { root.insert(name.clone(), value.clone()); }
+            Some(root)
+        } else { None };
+        if clipboard_group {
+            let root = if let Some(root) = &positional_root { root.clone() }
+                else if bytes.iter().all(u8::is_ascii_whitespace) { RawSettingsObject::new() }
+                else { super::omni_preferences::unique_object(std::str::from_utf8(&bytes).map_err(|error| ScopedSettingsError::Store(error.to_string()))?)
+                    .map_err(|error| ScopedSettingsError::Store(error.to_string()))? };
+            clipboard_objects(&root)?;
+        }
         if mouse_group && !bytes.iter().all(u8::is_ascii_whitespace) {
-            let root: RawSettingsObject = serde_json::from_slice(&bytes).map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
+            let root: RawSettingsObject = if let Some(root) = &positional_root { root.clone() } else {
+                serde_json::from_slice(&bytes).map_err(|error| ScopedSettingsError::Store(error.to_string()))?
+            };
             mouse_gestures_objects(&root)?;
         }
         let mut pending = Vec::new();
-        for change in changes.iter().filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field))) {
+        for change in changes.iter().filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)) || change.field == ScopedSetting::ClipboardModifyHideAfterApply) {
             let actual = change.field.value(&settings);
-            if actual == change.desired && change.desired != change.baseline {
+            if actual == change.desired && change.desired != change.baseline && change.field != ScopedSetting::ClipboardModifyHideAfterApply {
                 continue;
             }
             if actual != change.baseline {
@@ -291,10 +342,14 @@ impl Settings {
             if token.is_some_and(SettingsBooleanSaveToken::is_canceled) {
                 return Err(ScopedSettingsError::Cancelled);
             }
+            if clipboard_group {
+                let now = match std::fs::read(path) { Ok(value) => Some(value), Err(error) if error.kind() == std::io::ErrorKind::NotFound => None, Err(error) => return Err(ScopedSettingsError::Store(error.to_string())) };
+                if now != original { return Err(ScopedSettingsError::Store("Settings changed while reading; reload and retry".into())); }
+            }
             return Ok(ScopedSettingsAcknowledgement {
                 values: changes
                     .iter()
-                    .filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)))
+                    .filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)) || change.field == ScopedSetting::ClipboardModifyHideAfterApply)
                     .map(|change| (change.field, change.desired.clone()))
                     .collect(),
                 persisted: false,
@@ -306,7 +361,7 @@ impl Settings {
         } else {
             bytes.clone()
         };
-        let mut root: RawSettingsObject = match serde_json::from_slice(&raw_source) {
+        let mut root: RawSettingsObject = if let Some(root) = positional_root { root } else if clipboard_group && bytes.iter().all(u8::is_ascii_whitespace) { RawSettingsObject::new() } else { match serde_json::from_slice(&raw_source) {
             Ok(root) => root,
             Err(_) => raw_object(
                 raw_value(&settings)
@@ -314,8 +369,15 @@ impl Settings {
                     .as_ref(),
             )
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?,
-        };
+        }};
         for change in pending {
+            if change.field == ScopedSetting::ClipboardModifyHideAfterApply {
+                let (mut plugins, mut clipboard) = clipboard_objects(&root)?;
+                clipboard.insert("hide_launcher_after_apply".into(), change.desired.raw()?);
+                plugins.insert("clipboard_modify".into(), raw_value(&clipboard).map_err(|error| ScopedSettingsError::Store(error.to_string()))?);
+                root.insert("plugin_settings".into(), raw_value(&plugins).map_err(|error| ScopedSettingsError::Store(error.to_string()))?);
+                continue;
+            }
             if matches!(change.field, ScopedSetting::MouseGesturesEnabled | ScopedSetting::MouseGesturesPracticeMode) {
                 let (mut plugins, mut mouse) = mouse_gestures_objects(&root)?;
                 let member = if change.field == ScopedSetting::MouseGesturesEnabled { "enabled" } else { "practice_mode" };
@@ -350,27 +412,70 @@ impl Settings {
                 root.insert(key.to_owned(), change.desired.raw()?);
             }
         }
-        let candidate = serde_json::to_vec(&root)
+        let candidate = if let (Some(mut values), Some(fields)) = (positional, fields) {
+            for (index, (name, _)) in fields.iter().enumerate() {
+                if let Some(value) = root.get(name) {
+                    while values.len() <= index { values.push(fields[values.len()].1.clone()); }
+                    values[index] = value.clone();
+                }
+            }
+            serde_json::to_vec(&values)
+        } else { serde_json::to_vec(&root) }
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
         let candidate_settings = parse_effective_settings(path, &candidate)
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
         if changes
             .iter()
-            .filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)))
+            .filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)) || change.field == ScopedSetting::ClipboardModifyHideAfterApply)
             .any(|change| change.field.value(&candidate_settings) != change.desired)
         {
             return Err(ScopedSettingsError::Store(
                 "Settings patch did not produce the requested values".into(),
             ));
         }
-        if grouped || mouse_group {
+        if clipboard_group {
+            use std::io::Write;
+            let claimed = std::cell::Cell::new(false);
+            let failure = std::cell::RefCell::new(None);
+            let current = || {
+                if !claimed.get() && token.is_some_and(|token| !token.begin_irrevocable_commit()) {
+                    *failure.borrow_mut() = Some(ScopedSettingsError::Cancelled);
+                    return false;
+                }
+                claimed.set(true);
+                let now = match std::fs::read(path) { Ok(value) => Some(value), Err(error) if error.kind() == std::io::ErrorKind::NotFound => None, Err(error) => { *failure.borrow_mut() = Some(ScopedSettingsError::Store(error.to_string())); return false; } };
+                if now != original { *failure.borrow_mut() = Some(ScopedSettingsError::Conflict(ScopedSetting::ClipboardModifyHideAfterApply)); return false; }
+                true
+            };
+            let result = if original.is_some() {
+                crate::common::atomic_file::save_atomic_if(path, &candidate, current).map_err(|error| error.to_string())
+            } else {
+                let parent = path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+                (|| -> std::io::Result<()> {
+                    let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+                    staged.write_all(&candidate)?;
+                    staged.flush()?;
+                    staged.as_file().sync_all()?;
+                    if !current() { return Err(std::io::Error::other("Settings save superseded")); }
+                    staged.persist_noclobber(path).map_err(|error| error.error)?;
+                    Ok(())
+                })().map_err(|error| error.to_string())
+            };
+            if let Some(error) = failure.into_inner() { return Err(error); }
+            result.map_err(ScopedSettingsError::Store)?;
+            match std::fs::read(path) {
+                Ok(readback) if readback == candidate => {},
+                Ok(_) => return Err(ScopedSettingsError::CommittedUnverified("Settings changed after installation".into())),
+                Err(error) => return Err(ScopedSettingsError::CommittedUnverified(error.to_string())),
+            }
+        } else if grouped || mouse_group {
             let failure = std::cell::RefCell::new(None);
             let committed = std::cell::Cell::new(false);
             let result = crate::common::atomic_file::save_atomic_if(path, &candidate, || {
                 let error = match read_exact_bytes(path) {
                     Ok(current) if current == bytes => if !committed.get() && token.is_some_and(|token| !token.begin_irrevocable_commit()) { Some(ScopedSettingsError::Cancelled) } else { committed.set(true); None },
                     Ok(current) => match parse_effective_settings(path, &current) {
-                        Ok(settings) => changes.iter().find(|change| (placement.contains(&change.field) || matches!(change.field, ScopedSetting::MouseGesturesEnabled | ScopedSetting::MouseGesturesPracticeMode)) && change.field.value(&settings) != change.baseline).map(|change| ScopedSettingsError::Conflict(change.field)).or_else(|| Some(ScopedSettingsError::Store("Settings changed while saving; retry the save".into()))),
+                        Ok(settings) => changes.iter().find(|change| (placement.contains(&change.field) || matches!(change.field, ScopedSetting::MouseGesturesEnabled | ScopedSetting::MouseGesturesPracticeMode | ScopedSetting::ClipboardModifyHideAfterApply)) && change.field.value(&settings) != change.baseline).map(|change| ScopedSettingsError::Conflict(change.field)).or_else(|| Some(ScopedSettingsError::Store("Settings changed while saving; retry the save".into()))),
                         Err(error) => Some(ScopedSettingsError::Store(error.to_string())),
                     },
                     Err(error) => Some(ScopedSettingsError::Store(error.to_string())),
@@ -386,7 +491,7 @@ impl Settings {
         Ok(ScopedSettingsAcknowledgement {
             values: changes
                 .iter()
-                .filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)))
+                .filter(|change| change.desired != change.baseline || (grouped && placement.contains(&change.field)) || change.field == ScopedSetting::ClipboardModifyHideAfterApply)
                 .map(|change| (change.field, change.desired.clone()))
                 .collect(),
             persisted: true,
@@ -589,6 +694,55 @@ mod tests {
             assert!(Settings::save_scoped_preferences_checked(&path, &changes).is_err());
             assert_eq!(std::fs::read(&path).unwrap(), invalid);
         }
+    }
+
+    #[test]
+    fn clipboard_visibility_checked_sparse_and_positional_preserves_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let change = Change { field: Field::ClipboardModifyHideAfterApply, baseline: Value::Bool(true), desired: Value::Bool(false) };
+        let original = br#"{"plugin_settings":{"clipboard_modify":{"opaque":{"wide":123456789012345678901}},"other":{"v":1}},"opaque":7}"#;
+        std::fs::write(&path, original).unwrap();
+        let token = SettingsBooleanSaveToken::new(777);
+        assert!(token.request_cancel());
+        assert_eq!(Settings::save_scoped_preferences_cancellable(&path, &[change.clone()], &token), Err(ScopedSettingsError::Cancelled));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let ack = Settings::save_scoped_preferences_checked(&path, &[change.clone()]).unwrap();
+        assert!(ack.persisted);
+        assert_eq!(ack.values, vec![(Field::ClipboardModifyHideAfterApply, Value::Bool(false))]);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(String::from_utf8_lossy(&bytes).contains("123456789012345678901"));
+        assert_eq!(Field::ClipboardModifyHideAfterApply.value(&parse_effective_settings(&path, &bytes).unwrap()), Value::Bool(false));
+        assert_eq!(Settings::save_scoped_preferences_checked(&path, &[change.clone()]), Err(ScopedSettingsError::Conflict(Field::ClipboardModifyHideAfterApply)));
+        for invalid in [br#"{"plugin_settings":{"clipboard_modify":{"hide_launcher_after_apply":"bad"}}}"#.as_slice(), br#"{"plugin_settings":{"clipboard_modify":{"dialog_width":"bad"}}}"#.as_slice(), br#"{"plugin_settings":{"clipboard_modify":{"hide_launcher_after_apply":true,"hide_launcher_after_apply":false}}}"#.as_slice()] {
+            std::fs::write(&path, invalid).unwrap();
+            let no_op = Change { desired: Value::Bool(true), ..change.clone() };
+            assert!(Settings::save_scoped_preferences_checked(&path, &[no_op]).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), invalid);
+        }
+        let defaults = Settings::default();
+        let positional = super::super::legacy_positional_settings(&defaults);
+        std::fs::write(&path, &positional).unwrap();
+        let before: Vec<Box<serde_json::value::RawValue>> = serde_json::from_slice(&positional).unwrap();
+        let fields = super::super::omni_preferences::ordered_fields(&defaults).unwrap();
+        let plugin_index = fields.iter().position(|(name, _)| name == "plugin_settings").unwrap();
+        let mouse = Change { field: Field::MouseGesturesEnabled, baseline: Value::Bool(true), desired: Value::Bool(false) };
+        Settings::save_scoped_preferences_checked(&path, &[change.clone(), mouse]).unwrap();
+        let after: Vec<Box<serde_json::value::RawValue>> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(before.len(), after.len());
+        for index in 0..before.len() { if index != plugin_index { assert_eq!(before[index].get(), after[index].get()); } }
+        let parsed = parse_effective_settings(&path, &std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(Field::ClipboardModifyHideAfterApply.value(&parsed), Value::Bool(false));
+        assert_eq!(Field::MouseGesturesEnabled.value(&parsed), Value::Bool(false));
+        std::fs::remove_file(&path).unwrap();
+        Settings::save_scoped_preferences_checked(&path, &[change.clone()]).unwrap();
+        let missing_created = std::fs::read(&path).unwrap();
+        let root: RawSettingsObject = serde_json::from_slice(&missing_created).unwrap();
+        assert_eq!(root.len(), 1);
+        std::fs::write(&path, b" ").unwrap();
+        Settings::save_scoped_preferences_checked(&path, &[change]).unwrap();
+        let root: RawSettingsObject = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(root.len(), 1);
     }
 
     #[test]

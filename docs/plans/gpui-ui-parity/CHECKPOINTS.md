@@ -2266,3 +2266,15 @@ Locked `fast-dev` shared checks passed in 1m 13s and 23.34s. Integrated library 
 P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use matched owned profiles with both Paste Sequence shortcuts disabled and two live owned windows on the current desktop. Check both exact Home rectangles, the final authorized foreground, topmost cleanup, interruption with a newer foreground, and unchanged GPUI Workspace and Bindings bytes. Typed and broader runtime operations retain their criteria.
 
 Continue P0.07/P0.14 live Clipboard Modify named-Apply visibility Settings.
+
+### P0.07 P0.14 live Clipboard Modify named-Apply visibility
+
+Retained GPUI Settings exposes the stock **Hide Launcher after applying template or pipeline** checkbox. The stock Settings Search destination focuses the control in Actions and Feedback. The draft supports the existing Save, discard and close behavior.
+
+The checked write owns only the canonical Clipboard Modify Boolean and any other explicitly edited fields. It preserves opaque values and legacy positional settings, uses sparse no-clobber creation when needed, and verifies the written bytes. A matching acknowledgement updates the next named template or pipeline request. An admitted request keeps its captured policy. Inline stages retain their always-hide behavior, and pane Apply, Undo, clipboard ownership and the modifier catalog retain their existing behavior. An unverified commit leaves live behavior alone and offers reopen and relaunch recovery.
+
+The locked `fast-dev` library check passed in 1m 06s and the corrected library check in 23.78s. The integrated library and launcher check passed in 5.20s. Independent review cleared stock configuration compatibility, exact persistence, the typed Settings destination and the named-Apply receipt. The final grouped link took 7m 18s. Nextest run `5592e1ba-6360-43c5-a9d6-ead96e898c6a` passed all seven selected cases across two binaries in 3.092s with 9623 skipped.
+
+P0.07 and P0.14 remain Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned settings and catalog in matched profiles with both Paste Sequence shortcuts disabled. Verify discard, Save, egui readback and the actual named template and pipeline under both policies with synthetic clipboard text. The remaining Clipboard Modify Settings controls stay open.
+
+Continue P0.16 checked typed Temporary File creation and exact editor handoff.

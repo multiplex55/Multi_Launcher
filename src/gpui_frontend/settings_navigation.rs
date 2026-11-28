@@ -16,6 +16,7 @@ pub(super) enum Target {
     Respect,
     ClearQuery,
     HideWindow,
+    ClipboardHideAfterApply,
     Toasts,
     Duration,
     Inline,
@@ -42,6 +43,7 @@ impl Target {
             ids::SEARCH_RESPECT_PLUGIN_CAPABILITY => Self::Respect,
             ids::ACTIONS_CLEAR_QUERY => Self::ClearQuery,
             ids::ACTIONS_HIDE_AFTER_RUN => Self::HideWindow,
+            "plugin.clipboard_modify.hide_after_apply" => Self::ClipboardHideAfterApply,
             ids::FEEDBACK_TOASTS => Self::Toasts,
             ids::FEEDBACK_TOAST_DURATION | ids::FEEDBACK_TOAST_DURATION_VALUE => Self::Duration,
             ids::FEEDBACK_INLINE_ERRORS => Self::Inline,
@@ -473,6 +475,12 @@ mod tests {
     use super::{Target, current_provider, navigation_receipt_current};
     use multi_launcher::plugin::Plugin;
     use std::collections::{HashMap, HashSet};
+    #[test]
+    fn clipboard_modify_catalog_maps_to_visibility_control() {
+        assert_eq!(Target::from_id("plugin.clipboard_modify.hide_after_apply"), Some(Target::ClipboardHideAfterApply));
+        assert!(multi_launcher::settings_editor::catalog::SettingsCatalog::default().search("clipboard modify").iter().any(|entry| Target::from_id(entry.id.as_str()) == Some(Target::ClipboardHideAfterApply)));
+    }
+
     #[test]
     fn omni_category_catalog_maps_to_search_apps_target() {
         assert_eq!(super::Target::from_id("plugin.omni_search.included_categories"), Some(super::Target::OmniCategories));

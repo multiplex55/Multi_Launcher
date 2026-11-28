@@ -11,6 +11,7 @@ pub(super) const WAIT: &str = "Wait for Actions and Feedback settings to finish.
 struct Values {
     clear: bool,
     hide: bool,
+    clipboard_hide: bool,
     toasts: bool,
     duration: f32,
     inline: bool,
@@ -21,6 +22,7 @@ impl Values {
         Self {
             clear: settings.clear_query_after_run,
             hide: settings.hide_after_run,
+            clipboard_hide: matches!(Field::ClipboardModifyHideAfterApply.value(settings), Value::Bool(true)),
             toasts: settings.enable_toasts,
             duration: settings.toast_duration,
             inline: settings.show_inline_errors,
@@ -38,6 +40,11 @@ impl Values {
                 Field::HideAfterRun,
                 Value::Bool(self.hide),
                 Value::Bool(desired.hide),
+            ),
+            (
+                Field::ClipboardModifyHideAfterApply,
+                Value::Bool(self.clipboard_hide),
+                Value::Bool(desired.clipboard_hide),
             ),
             (
                 Field::EnableToasts,
@@ -130,6 +137,7 @@ impl ActionsSettings {
         let checkbox_focus = [
             Field::ClearQueryAfterRun,
             Field::HideAfterRun,
+            Field::ClipboardModifyHideAfterApply,
             Field::EnableToasts,
             Field::ShowInlineErrors,
             Field::ShowErrorToasts,
@@ -161,7 +169,7 @@ impl ActionsSettings {
             return false;
         };
         match target {
-            ClearQuery | HideWindow | Toasts | Inline | ErrorToasts => true,
+            ClearQuery | HideWindow | ClipboardHideAfterApply | Toasts | Inline | ErrorToasts => true,
             Duration => draft.toasts,
             _ => false,
         }
@@ -182,13 +190,14 @@ impl ActionsSettings {
                 self.checkbox_focus.get(&Field::ClearQueryAfterRun).cloned(),
             ),
             HideWindow => (2, self.checkbox_focus.get(&Field::HideAfterRun).cloned()),
-            Toasts => (3, self.checkbox_focus.get(&Field::EnableToasts).cloned()),
+            ClipboardHideAfterApply => (3, self.checkbox_focus.get(&Field::ClipboardModifyHideAfterApply).cloned()),
+            Toasts => (4, self.checkbox_focus.get(&Field::EnableToasts).cloned()),
             Inline => (
-                4,
+                5,
                 self.checkbox_focus.get(&Field::ShowInlineErrors).cloned(),
             ),
-            ErrorToasts => (5, self.checkbox_focus.get(&Field::ShowErrorToasts).cloned()),
-            Duration => (7, Some(self.duration.focus_handle(cx))),
+            ErrorToasts => (6, self.checkbox_focus.get(&Field::ShowErrorToasts).cloned()),
+            Duration => (8, Some(self.duration.focus_handle(cx))),
             _ => return false,
         };
         let Some(focus) = focus else {
@@ -459,6 +468,11 @@ impl ActionsSettings {
                             "Settings acknowledgement did not match the requested values.".into(),
                         )
                     }
+                    Err(ScopedSettingsError::CommittedUnverified(error)) => {
+                        view.baseline = None;
+                        view.draft = None;
+                        view.status = Some(format!("Settings were written but could not be verified: {error}. Close and reopen Settings to read the file; relaunch to reconcile live behavior."));
+                    }
                     Err(error) => {
                         view.status = Some(format!("Could not save Actions and Feedback: {error}"))
                     }
@@ -519,6 +533,7 @@ fn apply_acknowledged(settings: &mut external_launch::Settings, changes: &[Chang
                 settings.clear_query_after_run = *value
             }
             (Field::HideAfterRun, Value::Bool(value)) => settings.hide_after_run = *value,
+            (Field::ClipboardModifyHideAfterApply, Value::Bool(value)) => settings.clipboard_modify_hide_after_apply = *value,
             (Field::EnableToasts, Value::Bool(value)) => settings.enable_toasts = *value,
             (Field::ToastDuration, Value::Float(value)) => settings.toast_duration = *value,
             (Field::ShowInlineErrors, Value::Bool(value)) => settings.show_inline_errors = *value,
@@ -529,7 +544,7 @@ fn apply_acknowledged(settings: &mut external_launch::Settings, changes: &[Chang
 }
 
 impl Render for ActionsSettings {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.busy();
         let scroll = self.scroll.clone();
         let mut panel = div()
@@ -570,6 +585,11 @@ impl Render for ActionsSettings {
                     draft.hide,
                 ),
                 (
+                    Field::ClipboardModifyHideAfterApply,
+                    "Hide Launcher after applying template or pipeline",
+                    draft.clipboard_hide,
+                ),
+                (
                     Field::EnableToasts,
                     "Enable toast notifications",
                     draft.toasts,
@@ -582,6 +602,8 @@ impl Render for ActionsSettings {
                 let Some(focus) = self.checkbox_focus.get(&field).cloned() else {
                     continue;
                 };
+                let palette = appearance::current(cx).palette;
+                let focused = focus.is_focused(window);
                 panel = panel.child(
                     Checkbox::new(SharedString::from(format!("actions-setting-{field:?}")))
                         .checked(checked)
@@ -599,6 +621,7 @@ impl Render for ActionsSettings {
                                     match field {
                                         Field::ClearQueryAfterRun => draft.clear = value,
                                         Field::HideAfterRun => draft.hide = value,
+                                        Field::ClipboardModifyHideAfterApply => draft.clipboard_hide = value,
                                         Field::EnableToasts => draft.toasts = value,
                                         Field::ShowInlineErrors => draft.inline = value,
                                         Field::ShowErrorToasts => draft.errors = value,
@@ -613,7 +636,13 @@ impl Render for ActionsSettings {
                             div()
                                 .flex()
                                 .gap_2()
-                                .child(CheckboxIndicator::new().checked(checked))
+                                .child(CheckboxIndicator::new().checked(checked)
+                                    .when(field == Field::ClipboardModifyHideAfterApply, |indicator| {
+                                        indicator.size(px(18.0)).rounded(px(3.0)).border_1()
+                                            .border_color(appearance::to_hsla(if focused { palette.focus } else { palette.control_border }))
+                                            .when(checked, |indicator| indicator.bg(appearance::to_hsla(palette.accent)).text_color(appearance::to_hsla(palette.primary_text)))
+                                            .items_center().justify_center().child(if checked { "✓" } else { "" })
+                                    }))
                                 .child(Label::new(label)),
                         ),
                 );
@@ -700,6 +729,22 @@ mod tests {
         assert!(apply_if_acknowledged(&mut settings, &changes, &right));
         assert!(settings.hide_after_run);
         assert!(settings.enable_toasts);
+    }
+
+    #[test]
+    fn clipboard_visibility_requires_exact_ack_before_live_adoption() {
+        let mut settings = super::external_launch::Settings {
+            preserve_command: false, clear_query_after_run: false, hide_after_run: false,
+            history_limit: 10, enable_toasts: true, show_error_toasts: true,
+            show_inline_errors: true, toast_duration: 2.0, clipboard_modify_hide_after_apply: true,
+        };
+        let changes = vec![Change { field: Field::ClipboardModifyHideAfterApply, baseline: Value::Bool(true), desired: Value::Bool(false) }];
+        let wrong = ScopedSettingsAcknowledgement { values: vec![(Field::ClipboardModifyHideAfterApply, Value::Bool(true))], persisted: true };
+        assert!(!apply_if_acknowledged(&mut settings, &changes, &wrong));
+        assert!(settings.clipboard_modify_hide_after_apply);
+        let right = ScopedSettingsAcknowledgement { values: vec![(Field::ClipboardModifyHideAfterApply, Value::Bool(false))], persisted: true };
+        assert!(apply_if_acknowledged(&mut settings, &changes, &right));
+        assert!(!settings.clipboard_modify_hide_after_apply);
     }
 
     #[test]

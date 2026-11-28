@@ -10,4 +10,4 @@ Select `clipboard_modify_settings_round_trip_editor_conversion` and `migration_a
 
 The current source reads the hide preference and legacy dialog dimensions. The navigation width, split, filters and management sort serialize in Settings, but their runtime consumers are unconfirmed.
 
-Native and GPUI remain pending.
+The stock **Hide Launcher after applying template or pipeline** control is available in retained GPUI Settings. Settings Search targets the control. A verified Save updates future named template and pipeline runs. Focused tests cover the canonical setting, acknowledgement and execution policy. Paired Windows replay and the remaining settings stay open. [Clipboard visibility checkpoint](../CHECKPOINTS.md#p007-p014-live-clipboard-modify-named-apply-visibility)
