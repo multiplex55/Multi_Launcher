@@ -13,6 +13,7 @@ pub use plugin_membership::{StatelessPlugin, PluginMembershipSnapshot, PluginMem
 #[path = "multi_manager_paths.rs"]
 mod multi_manager_paths;
 pub use multi_manager_paths::{MultiManagerPaths, MultiManagerPathsSnapshot, MultiManagerPathsAcknowledgement, MultiManagerPathsError};
+pub(crate) use multi_manager_paths::with_checked_multi_manager_sources;
 #[path = "calculation_pad_format.rs"]
 mod calculation_pad_format;
 pub use calculation_pad_format::{

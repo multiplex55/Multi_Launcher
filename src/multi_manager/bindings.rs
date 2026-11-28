@@ -7,6 +7,38 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::io::Write;
+
+static BINDINGS_TRANSACTION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) fn bindings_transaction() -> std::sync::MutexGuard<'static, ()> {
+    BINDINGS_TRANSACTION.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+pub(crate) fn read_binding_bytes(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("read {}", path.display())),
+    }
+}
+
+/// Caller owns the binding transaction; `current` performs the final source check.
+pub(crate) fn save_checked_binding_bytes(path: &Path, before: Option<&[u8]>, bytes: &[u8], prepare: impl Fn() -> bool, current: impl Fn() -> bool) -> Result<()> {
+    if before.is_some() {
+        crate::common::atomic_file::save_atomic_if(path, bytes, current)
+    } else {
+        let parent = path.parent().filter(|path| !path.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+        anyhow::ensure!(prepare(), "Binding save superseded");
+        std::fs::create_dir_all(parent)?;
+        let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+        staged.write_all(bytes)?;
+        staged.flush()?;
+        staged.as_file().sync_all()?;
+        anyhow::ensure!(current(), "Binding save superseded");
+        staged.persist_noclobber(path).map_err(|error| error.error)?;
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct WorkspaceBindingSnapshot {
@@ -51,6 +83,7 @@ fn save_bindings_with_validator(
     workspaces: &[MmWorkspace],
     is_valid_window: impl Fn(usize) -> bool,
 ) -> Result<()> {
+    let _transaction = bindings_transaction();
     let snapshots = binding_snapshots_with_validator(workspaces, is_valid_window);
     // A missing file is valid first-run state. Existing malformed/unreadable
     // bindings are retained for diagnosis rather than replaced from a
@@ -60,7 +93,7 @@ fn save_bindings_with_validator(
         .with_context(|| format!("atomically replace {}", path.display()))
 }
 
-fn binding_snapshots_with_validator(
+pub(crate) fn binding_snapshots_with_validator(
     workspaces: &[MmWorkspace],
     is_valid_window: impl Fn(usize) -> bool,
 ) -> Vec<WorkspaceBindingSnapshot> {
@@ -270,6 +303,20 @@ pub fn refresh_live_titles(workspaces: &mut [MmWorkspace]) -> bool {
 mod tests {
     use super::*;
     use crate::multi_manager::model::{MmWindow, MmWorkspace};
+
+    #[test]
+    fn checked_first_binding_save_never_clobbers_late_creator() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.json");
+        let calls = std::cell::Cell::new(0);
+        let result = save_checked_binding_bytes(&path, None, b"[]", || true, || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 { std::fs::write(&path, b"[ ]").unwrap(); }
+            true
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(path).unwrap(), b"[ ]");
+    }
 
     #[test]
     fn snapshot_workspace_association_prefers_first_id_then_legacy_name() {

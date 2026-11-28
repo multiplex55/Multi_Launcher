@@ -2230,3 +2230,15 @@ The locked `fast-dev` library check passed in 1m 31s. Review identified a late b
 P0.17 remains Stage 2. Paired 1516 × 937 Windows replay remains open. The owned profiles use the preserve or hide policies and disable both Paste Sequence shortcuts. Start one short silent countdown and one labelled future alarm. Check exact History and Usage, completion once, visibility and relaunch readback of the alarm. The remaining typed controls, host behavior and broader G23 criteria stay open.
 
 Continue P0.10 MultiManager Save HWND Snapshot.
+
+### P0.10 checked MultiManager Save HWND Snapshot
+
+The retained MultiManager pane exposes the stock **Save HWND Snapshot** action for a clean loaded workspace with checked live bindings. It uses current per-row, catalog, startup or Restore evidence for the exact workspace and member. It reobserves those HWNDs and uses the stock snapshot format and captured metadata. Stale and duplicate evidence is refused. Save performs no enumeration or placement and writes only the configured bindings file.
+
+The worker keeps exact workspace and binding bytes, validates the configured paths and file identities, and rechecks foreground, restart and any Startup owner. Each replace attempt verifies native identities after the one-shot claim and then compares the sources. A missing destination uses no-clobber creation. Verified publication updates the saved summary and keeps Restore evidence that matches the exact written bytes. An unverified commit retires Restore and requires Reload before another Save. Unrelated Reconnect evidence stays available.
+
+Locked `fast-dev` shared checks passed in 1m 15s and 24.24s. Integrated checks passed in 40.02s and 44.60s. Independent review cleared the default relative paths, post-claim native checks, canonical row pairing, Restore retirement and allocation-free availability check. The grouped link took 19m 27s. Nextest run `b75c6dfa-cd13-4f03-8d45-5e0ce35b6c10` passed all 12 selected cases across two binaries in 4.035s with 9607 skipped. Nextest reported one handle leak on the GPUI Restore receipt fixture. Its isolated prebuilt rerun `d0a82d2d-ccaa-47f0-823f-b08db0621106` passed in 0.388s without that diagnostic.
+
+P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open. In matched owned profiles with both Paste Sequence shortcuts disabled, reconnect two owned windows, save their bindings and confirm workspace bytes and geometry are unchanged. Keep the same windows live across launcher relaunch with automatic Reconnect off and restore the exact saved bindings. Typed and automatic binding saves and remaining MultiManager runtime criteria stay open.
+
+Continue P0.18 checked local application Execute from Mouse Gestures.

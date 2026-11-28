@@ -50,6 +50,9 @@ pub struct RestorePlan {
 }
 impl RestorePlan {
     pub fn rows(&self) -> &[RestoredWorkspace] { &self.rows }
+    pub fn matches_binding_source(&self, source: &CheckedBindingSource) -> bool {
+        self.bindings_path == source.path && source.bytes.as_ref() == Some(&self.binding_bytes)
+    }
     fn is_current(&self) -> bool {
         let Ok(_workspace_permit) = crate::common::repair_watch::require_path_read(self.workspaces.path()) else { return false; };
         let Ok(_bindings_permit) = crate::common::repair_watch::require_path_read(&self.bindings_path) else { return false; };
@@ -61,8 +64,176 @@ impl RestorePlan {
     }
 }
 
-/// Load the editor's paired sources while Repair is excluded from both paths.
-pub fn load_editor_sources_checked(workspace_path: &Path, bindings_path: &Path, current: impl Fn() -> bool) -> (Result<CheckedWorkspaceSnapshot>, Result<Option<Vec<WorkspaceBindingSnapshot>>>) {
+/// Exact original binding bytes and their stock-decoded summary.
+#[derive(Clone, Debug)]
+pub struct CheckedBindingSource {
+    path: PathBuf,
+    bytes: Option<Vec<u8>>,
+    summary: Option<Vec<WorkspaceBindingSnapshot>>,
+}
+impl CheckedBindingSource {
+    pub fn path(&self) -> &Path { &self.path }
+    pub fn summary(&self) -> Option<&[WorkspaceBindingSnapshot]> { self.summary.as_deref() }
+}
+
+pub fn load_checked_binding_source(path: &Path, current: impl Fn() -> bool) -> Result<CheckedBindingSource> {
+    let _permit = crate::common::repair_watch::require_path_read(path)?;
+    let _transaction = bindings::bindings_transaction();
+    read_binding_source_unlocked(path, current)
+}
+
+fn read_binding_source_unlocked(path: &Path, current: impl Fn() -> bool) -> Result<CheckedBindingSource> {
+    anyhow::ensure!(current(), "Binding read superseded");
+    let bytes = bindings::read_binding_bytes(path)?;
+    let summary = bindings::decode_binding_source(path, bytes.as_deref())?;
+    anyhow::ensure!(current() && bindings::read_binding_bytes(path)? == bytes && current(), "Bindings changed while reading");
+    Ok(CheckedBindingSource { path: path.to_owned(), bytes, summary })
+}
+
+/// Native evidence for one committed workspace, constructed from checked reconnect/restore output.
+#[derive(Clone)]
+pub struct BindingRowReceipt {
+    source: CheckedWorkspaceSnapshot,
+    index: usize,
+    workspace: MmWorkspace,
+    identities: HashMap<usize, WindowSwitchIdentity>,
+    restore_binding: Option<CheckedBindingSource>,
+}
+
+fn reconnect_row_matches_source(expected: &MmWorkspace, observed: &MmWorkspace) -> bool {
+    fn without_binding_state(row: &MmWorkspace) -> MmWorkspace {
+        let mut row = row.clone();
+        row.rotation_offset = 0;
+        for window in &mut row.windows {
+            window.mark_missing();
+            window.live_title.clear();
+        }
+        row
+    }
+    without_binding_state(expected) == without_binding_state(observed)
+}
+
+impl BindingRowReceipt {
+    pub fn from_reconnected(source: &CheckedWorkspaceSnapshot, index: usize, overlay: &ReconnectedWorkspace) -> Option<Self> {
+        let expected = source.workspaces().get(index)?;
+        if !reconnect_row_matches_source(expected, &overlay.workspace) { return None; }
+        Some(Self { source: source.clone(), index, workspace: overlay.workspace.clone(), identities: overlay.identities.clone(), restore_binding: None })
+    }
+    pub fn from_catalog(plan: &ReconnectCatalogPlan, index: usize) -> Option<Self> {
+        let row = plan.rows.iter().find(|row| row.index == index)?;
+        Some(Self { source: plan.source.clone(), index, workspace: row.workspace.clone(), identities: row.identities.clone(), restore_binding: None })
+    }
+    pub fn from_restore(plan: &RestorePlan, source: &CheckedBindingSource, index: usize) -> Option<Self> {
+        if !plan.matches_binding_source(source) { return None; }
+        let row = plan.rows.iter().find(|row| row.index == index)?;
+        Some(Self { source: plan.workspaces.clone(), index, workspace: row.overlay.workspace.clone(), identities: row.overlay.identities.clone(), restore_binding: Some(source.clone()) })
+    }
+    pub fn matches_binding_source(&self, source: &CheckedBindingSource) -> bool {
+        self.restore_binding.as_ref().is_none_or(|basis| basis.path == source.path && basis.bytes == source.bytes)
+    }
+}
+
+/// Published bytes are retained for a subsequent exact Restore receipt.
+pub struct BindingSaveReceipt {
+    pub source: CheckedBindingSource,
+    pub count: usize,
+}
+
+pub enum BindingSaveResult {
+    Published(BindingSaveReceipt),
+    CommittedUnverified(String),
+}
+
+/// Save only native evidence from exact checked rows, never HWNDs from the model.
+/// `current` must remain a liveness check after `claim` succeeds; a transient
+/// rename failure may retry without claiming a second time. Both callbacks are
+/// authority-only and must not re-enter Settings or MultiManager stores.
+pub fn save_binding_snapshot_checked(
+    settings_path: &Path,
+    settings_paths: &crate::settings::MultiManagerPaths,
+    workspace_source: &CheckedWorkspaceSnapshot,
+    binding_source: &CheckedBindingSource,
+    rows: &[BindingRowReceipt],
+    current: impl Fn() -> bool,
+    claim: impl Fn() -> bool,
+    observer: &impl RestoreObserver,
+) -> Result<BindingSaveResult> {
+    crate::settings::store::with_checked_multi_manager_sources(
+        settings_path, settings_paths, workspace_source.path(), binding_source.path(), |paths_current| {
+            let _workspace_permit = crate::common::repair_watch::require_path_read(workspace_source.path())?;
+            let _bindings_permit = crate::common::repair_watch::require_path_read(binding_source.path())?;
+            let _bindings_transaction = bindings::bindings_transaction();
+            anyhow::ensure!(current() && store::checked_workspace_source_is_current(workspace_source), "Workspaces changed or save was superseded");
+            anyhow::ensure!(bindings::read_binding_bytes(binding_source.path())? == binding_source.bytes, "Bindings changed; reload before saving");
+            bindings::decode_binding_source(binding_source.path(), binding_source.bytes.as_deref())?;
+            let original: Vec<MmWorkspace> = match workspace_source.source() {
+                WorkspaceSource::Loaded(bytes) => serde_json::from_slice(bytes).context("parse original MultiManager workspaces")?,
+                WorkspaceSource::Missing | WorkspaceSource::Empty(_) => Vec::new(),
+            };
+            anyhow::ensure!(original.len() == workspace_source.workspaces().len(), "Workspace receipt is inconsistent");
+            let mut shadow = original.clone();
+            for row in &mut shadow { for member in &mut row.windows { member.mark_missing(); } }
+            let mut seen_rows = HashSet::new();
+            let mut seen_hwnds = HashSet::new();
+            let mut evidence = Vec::new();
+            for receipt in rows {
+                anyhow::ensure!(receipt.source.path() == workspace_source.path() && receipt.source.source() == workspace_source.source(), "Reconnect source changed");
+                anyhow::ensure!(receipt.matches_binding_source(binding_source), "Restore bindings changed; restore again");
+                anyhow::ensure!(seen_rows.insert(receipt.index), "Duplicate workspace receipt");
+                let raw = original.get(receipt.index).context("Workspace no longer exists")?;
+                let canonical = workspace_source.workspaces().get(receipt.index).context("Workspace no longer exists")?;
+                anyhow::ensure!(!raw.disabled && raw.valid && !receipt.identities.is_empty(), "Workspace is disabled, invalid or has no live bindings");
+                for (member_index, identity) in &receipt.identities {
+                    let member = raw.windows.get(*member_index).context("Window no longer exists")?;
+                    let canonical_member = canonical.windows.get(*member_index).context("Window no longer exists")?;
+                    let captured = receipt.workspace.windows.get(*member_index).context("Reconnect member missing")?;
+                    anyhow::ensure!(!member.disabled && !canonical_member.disabled && captured.hwnd == identity.native.hwnd && captured.binding_verified && seen_hwnds.insert(identity.native.hwnd), "Window binding is disabled, stale or duplicated");
+                    let (observed, live) = observer.observe(identity.native.hwnd).context("Window is no longer available")?;
+                    anyhow::ensure!(live == *identity && valid_observation(identity.native.hwnd, &observed, &live)
+                        && metadata_matches(member, &observed) && metadata_matches(canonical_member, &observed), "Window identity changed");
+                    shadow[receipt.index].windows[*member_index].mark_bound(identity.native.hwnd);
+                    evidence.push((receipt.index, *member_index, identity.clone()));
+                }
+            }
+            anyhow::ensure!(!evidence.is_empty(), "No checked live bindings to save");
+            let snapshots = bindings::binding_snapshots_with_validator(&shadow, |_| true);
+            for (row, member, _) in &evidence {
+                let snapshot = &snapshots[*row];
+                anyhow::ensure!(unique_workspace(&original, snapshot) == Some(*row), "Workspace identity is ambiguous");
+                let binding = snapshot.windows.iter().find(|binding| binding.window_id == *member).context("Binding could not be serialized")?;
+                anyhow::ensure!(unique_member(&original[*row], binding) == Some(*member), "Window identity is ambiguous");
+            }
+            let bytes = serde_json::to_vec_pretty(&snapshots)?;
+            let claimed = std::cell::Cell::new(false);
+            let final_current = || {
+                if !current() || !paths_current() || !store::checked_workspace_source_is_current(workspace_source) { return false; }
+                if !claimed.get() {
+                    if !claim() { return false; }
+                    claimed.set(true);
+                }
+                if !current() { return false; }
+                for (row, member, identity) in &evidence {
+                    let Some((observed, live)) = observer.observe(identity.native.hwnd) else { return false; };
+                    if live != *identity || !valid_observation(identity.native.hwnd, &observed, &live)
+                        || !metadata_matches(&original[*row].windows[*member], &observed) { return false; }
+                }
+                current() && paths_current() && store::checked_workspace_source_is_current(workspace_source)
+                    && bindings::read_binding_bytes(binding_source.path()).is_ok_and(|value| value == binding_source.bytes)
+            };
+            bindings::save_checked_binding_bytes(binding_source.path(), binding_source.bytes.as_deref(), &bytes, &current, final_current)?;
+            if bindings::read_binding_bytes(binding_source.path()).ok().flatten().as_deref() != Some(bytes.as_slice()) {
+                return Ok(BindingSaveResult::CommittedUnverified("Binding file readback changed or failed".into()));
+            }
+            Ok(BindingSaveResult::Published(BindingSaveReceipt {
+                source: CheckedBindingSource { path: binding_source.path.clone(), bytes: Some(bytes), summary: Some(snapshots) },
+                count: evidence.len(),
+            }))
+        },
+    )
+}
+
+/// One protected paired load that retains the exact binding basis for Save.
+pub fn load_editor_sources_with_binding_checked(workspace_path: &Path, bindings_path: &Path, current: impl Fn() -> bool) -> (Result<CheckedWorkspaceSnapshot>, Result<CheckedBindingSource>) {
     let permits = crate::common::repair_watch::require_path_read(workspace_path).and_then(|workspace| crate::common::repair_watch::require_path_read(bindings_path).map(|bindings| (workspace, bindings)));
     let _permits = match permits {
         Ok(permits) => permits,
@@ -72,7 +243,8 @@ pub fn load_editor_sources_checked(workspace_path: &Path, bindings_path: &Path, 
         }
     };
     let workspace = store::load_checked_workspaces(workspace_path, &current);
-    let bindings = bindings::load_bindings_if_exists(bindings_path).and_then(|value| { anyhow::ensure!(current(), "MultiManager source read superseded"); Ok(value) });
+    let _transaction = bindings::bindings_transaction();
+    let bindings = read_binding_source_unlocked(bindings_path, &current);
     (workspace, bindings)
 }
 
@@ -1050,6 +1222,176 @@ mod tests {
     fn restore_for_test(path: &Path, bindings: &Path, current: impl Fn() -> bool, observer: &impl RestoreObserver) -> Result<RestorePlan> {
         let snapshot = store::load_checked_workspaces(path, &current)?;
         restore_checked(&snapshot, bindings, current, observer)
+    }
+    #[test]
+    fn checked_binding_snapshot_round_trips_two_checked_workspaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        let bindings_path = dir.path().join("bindings.json");
+        std::fs::write(&settings, br#"{"multi_manager":{"workspaces_path":"workspaces.json","bindings_path":"bindings.json"}}"#).unwrap();
+        let first = workspace();
+        let mut second = workspace(); second.id = "two".into(); second.name = "Second".into();
+        let original = serde_json::to_vec(&[first, second]).unwrap();
+        std::fs::write(&workspace_path, &original).unwrap();
+        let workspace_source = store::load_checked_workspaces(&workspace_path, || true).unwrap();
+        let binding_source = load_checked_binding_source(&bindings_path, || true).unwrap();
+        let pid = std::process::id().wrapping_add(1).max(1);
+        let observer = FakeRestore { rows: HashMap::from([(10, (candidate(10), identity(10, pid))), (11, (candidate(11), identity(11, pid)))]), replace: None };
+        let mut rows = Vec::new();
+        for (index, hwnd) in [(0, 10), (1, 11)] {
+            let mut row = workspace_source.workspaces()[index].clone();
+            row.windows[0].mark_bound(hwnd);
+            let overlay = ReconnectedWorkspace { workspace: row, identities: HashMap::from([(0, identity(hwnd, pid))]), summary: ReconnectSummary::default() };
+            rows.push(BindingRowReceipt::from_reconnected(&workspace_source, index, &overlay).unwrap());
+        }
+        let paths = crate::settings::MultiManagerPaths { workspaces: "workspaces.json".into(), bindings: "bindings.json".into() };
+        let mut duplicate_row = workspace_source.workspaces()[1].clone();
+        duplicate_row.windows[0].mark_bound(10);
+        let duplicate_overlay = ReconnectedWorkspace { workspace: duplicate_row, identities: HashMap::from([(0, identity(10, pid))]), summary: ReconnectSummary::default() };
+        let duplicate = BindingRowReceipt::from_reconnected(&workspace_source, 1, &duplicate_overlay).unwrap();
+        assert!(save_binding_snapshot_checked(&settings, &paths, &workspace_source, &binding_source, &[rows[0].clone(), duplicate], || true, || true, &observer).is_err());
+        assert!(!bindings_path.exists());
+        let saved = save_binding_snapshot_checked(&settings, &paths, &workspace_source, &binding_source, &rows, || true, || true, &observer).unwrap();
+        let BindingSaveResult::Published(saved) = saved else { panic!("expected verified publication") };
+        assert_eq!(saved.count, 2);
+        assert_eq!(saved.source.summary().unwrap().len(), 2);
+        let restored = restore_checked(&workspace_source, &bindings_path, || true, &observer).unwrap();
+        assert_eq!(restored.bound, 2);
+        assert!(restored.matches_binding_source(&saved.source));
+        assert!(!restored.matches_binding_source(&binding_source));
+        assert_eq!(std::fs::read(&workspace_path).unwrap(), original);
+    }
+
+    #[test]
+    fn checked_binding_snapshot_refuses_stale_sources_and_native_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        let bindings_path = dir.path().join("bindings.json");
+        std::fs::write(&settings, br#"{"multi_manager":{"workspaces_path":"workspaces.json","bindings_path":"bindings.json"}}"#).unwrap();
+        std::fs::write(&workspace_path, serde_json::to_vec(&[workspace()]).unwrap()).unwrap();
+        let source = store::load_checked_workspaces(&workspace_path, || true).unwrap();
+        let bindings = load_checked_binding_source(&bindings_path, || true).unwrap();
+        let pid = std::process::id().wrapping_add(1).max(1);
+        let mut row = source.workspaces()[0].clone(); row.windows[0].mark_bound(10);
+        let overlay = ReconnectedWorkspace { workspace: row, identities: HashMap::from([(0, identity(10, pid))]), summary: ReconnectSummary::default() };
+        let receipt = BindingRowReceipt::from_reconnected(&source, 0, &overlay).unwrap();
+        let paths = crate::settings::MultiManagerPaths { workspaces: "workspaces.json".into(), bindings: "bindings.json".into() };
+        let mut reused = identity(10, pid); reused.native.tid += 1;
+        let stale = FakeRestore { rows: HashMap::from([(10, (candidate(10), reused))]), replace: None };
+        assert!(save_binding_snapshot_checked(&settings, &paths, &source, &bindings, std::slice::from_ref(&receipt), || true, || true, &stale).is_err());
+        assert!(!bindings_path.exists());
+        let current = FakeRestore { rows: HashMap::from([(10, (candidate(10), identity(10, pid)))]), replace: None };
+        assert!(save_binding_snapshot_checked(&settings, &paths, &source, &bindings, &[receipt.clone(), receipt.clone()], || true, || true, &current).is_err());
+        struct ChangingObserver<'a> { changed: &'a std::cell::Cell<bool>, pid: u32 }
+        impl RestoreObserver for ChangingObserver<'_> {
+            fn observe(&self, hwnd: usize) -> Option<(EnumeratedWindow, WindowSwitchIdentity)> {
+                let mut live = identity(hwnd, self.pid);
+                if self.changed.get() { live.native.tid += 1; }
+                Some((candidate(hwnd), live))
+            }
+        }
+        let changed = std::cell::Cell::new(false);
+        let observer = ChangingObserver { changed: &changed, pid };
+        assert!(save_binding_snapshot_checked(&settings, &paths, &source, &bindings,
+            std::slice::from_ref(&receipt), || true, || { changed.set(true); true }, &observer).is_err());
+        assert!(!bindings_path.exists());
+        let original_workspace = std::fs::read(&workspace_path).unwrap();
+        let claims = std::cell::Cell::new(0);
+        assert!(save_binding_snapshot_checked(&settings, &paths, &source, &bindings, std::slice::from_ref(&receipt), || true, || {
+            claims.set(claims.get() + 1);
+            std::fs::write(&workspace_path, b"[]").unwrap();
+            true
+        }, &current).is_err());
+        assert_eq!(claims.get(), 1);
+        assert!(!bindings_path.exists());
+        std::fs::write(&workspace_path, original_workspace).unwrap();
+        let claim_binding = std::cell::Cell::new(0);
+        assert!(save_binding_snapshot_checked(&settings, &paths, &source, &bindings, std::slice::from_ref(&receipt), || true, || {
+            claim_binding.set(claim_binding.get() + 1);
+            std::fs::write(&bindings_path, b"[ ]").unwrap();
+            true
+        }, &current).is_err());
+        assert_eq!(claim_binding.get(), 1);
+        assert_eq!(std::fs::read(&bindings_path).unwrap(), b"[ ]");
+        std::fs::remove_file(&bindings_path).unwrap();
+        let changed_settings = FakeRestore { rows: current.rows.clone(), replace: Some(settings.clone()) };
+        assert!(save_binding_snapshot_checked(&settings, &paths, &source, &bindings, std::slice::from_ref(&receipt), || true, || true, &changed_settings).is_err());
+        assert!(!bindings_path.exists());
+        std::fs::write(&settings, br#"{"multi_manager":{"workspaces_path":"workspaces.json","bindings_path":"bindings.json"}}"#).unwrap();
+        let competing = FakeRestore { rows: current.rows.clone(), replace: Some(bindings_path.clone()) };
+        assert!(save_binding_snapshot_checked(&settings, &paths, &source, &bindings, std::slice::from_ref(&receipt), || true, || true, &competing).is_err());
+        assert!(save_binding_snapshot_checked(&settings, &paths, &source, &bindings, &[receipt], || true, || true, &current).is_err());
+        assert_eq!(std::fs::read(&bindings_path).unwrap(), b"[]");
+        std::fs::write(&bindings_path, b"{broken").unwrap();
+        assert!(load_checked_binding_source(&bindings_path, || true).is_err());
+    }
+
+    #[test]
+    fn checked_binding_receipt_rejects_overlay_from_another_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        let mut a = workspace();
+        a.windows[0].captured_title = "Document A".into();
+        let mut b = workspace();
+        b.id = "two".into();
+        b.name = "Second".into();
+        b.windows[0].captured_title = "Document B".into();
+        std::fs::write(&path, serde_json::to_vec(&[a, b]).unwrap()).unwrap();
+        let source = store::load_checked_workspaces(&path, || true).unwrap();
+        let mut row = source.workspaces()[0].clone();
+        row.windows[0].mark_bound(10);
+        let overlay = ReconnectedWorkspace { workspace: row, identities: HashMap::new(), summary: ReconnectSummary::default() };
+        assert!(BindingRowReceipt::from_reconnected(&source, 0, &overlay).is_some());
+        assert!(BindingRowReceipt::from_reconnected(&source, 1, &overlay).is_none());
+    }
+
+    #[test]
+    fn checked_binding_snapshot_uses_legacy_name_not_synthesized_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        let bindings_path = dir.path().join("bindings.json");
+        std::fs::write(&settings, br#"{"multi_manager":{"workspaces_path":"workspaces.json","bindings_path":"bindings.json"}}"#).unwrap();
+        let mut legacy = workspace(); legacy.id.clear(); legacy.name = "Legacy".into();
+        let original = serde_json::to_vec(&[legacy]).unwrap();
+        std::fs::write(&workspace_path, &original).unwrap();
+        let source = store::load_checked_workspaces(&workspace_path, || true).unwrap();
+        let bindings = load_checked_binding_source(&bindings_path, || true).unwrap();
+        let pid = std::process::id().wrapping_add(1).max(1);
+        let observer = FakeRestore { rows: HashMap::from([(10, (candidate(10), identity(10, pid)))]), replace: None };
+        let mut row = source.workspaces()[0].clone(); row.windows[0].mark_bound(10);
+        let overlay = ReconnectedWorkspace { workspace: row, identities: HashMap::from([(0, identity(10, pid))]), summary: ReconnectSummary::default() };
+        let receipt = BindingRowReceipt::from_reconnected(&source, 0, &overlay).unwrap();
+        let paths = crate::settings::MultiManagerPaths { workspaces: "workspaces.json".into(), bindings: "bindings.json".into() };
+        let BindingSaveResult::Published(saved) = save_binding_snapshot_checked(&settings, &paths, &source, &bindings, &[receipt], || true, || true, &observer).unwrap() else { panic!("expected publication") };
+        assert_eq!(saved.source.summary().unwrap()[0].workspace_id, None);
+        assert_eq!(saved.source.summary().unwrap()[0].workspace_name, "Legacy");
+        assert_eq!(restore_checked(&source, &bindings_path, || true, &observer).unwrap().bound, 1);
+        assert_eq!(std::fs::read(workspace_path).unwrap(), original);
+    }
+
+    #[test]
+    fn checked_binding_snapshot_rejects_hardlinked_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let workspace_path = dir.path().join("workspaces.json");
+        let bindings_path = dir.path().join("bindings.json");
+        std::fs::write(&settings, br#"{"multi_manager":{"workspaces_path":"workspaces.json","bindings_path":"bindings.json"}}"#).unwrap();
+        let bytes = br#"[{"id":"one","name":"Workspace","workspace_name":"Workspace","windows":[]}]"#;
+        std::fs::write(&workspace_path, bytes).unwrap();
+        std::fs::hard_link(&workspace_path, &bindings_path).unwrap();
+        let source = store::load_checked_workspaces(&workspace_path, || true).unwrap();
+        let bindings = load_checked_binding_source(&bindings_path, || true).unwrap();
+        let paths = crate::settings::MultiManagerPaths { workspaces: "workspaces.json".into(), bindings: "bindings.json".into() };
+        let observer = FakeRestore { rows: HashMap::new(), replace: None };
+        let error = match save_binding_snapshot_checked(&settings, &paths, &source, &bindings, &[], || true, || true, &observer) {
+            Ok(_) => panic!("hard-linked sources must be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("overlap"));
+        assert_eq!(std::fs::read(workspace_path).unwrap(), bytes);
     }
     #[test]
     fn checked_restore_binds_only_fresh_matching_rows_and_never_writes() {

@@ -149,6 +149,37 @@ fn distinct_paths(settings: &Path, workspace: &Path, bindings: &Path) -> anyhow:
     );
     Ok(())
 }
+
+fn configured_source_paths(settings: &Path, paths: &MultiManagerPaths) -> (PathBuf, PathBuf) {
+    let base = settings.parent().unwrap_or_else(|| Path::new("."));
+    (
+        crate::multi_manager::state::resolve_relative_to(base, &paths.workspaces),
+        crate::multi_manager::state::resolve_relative_to(base, &paths.bindings),
+    )
+}
+
+/// Hold the Settings transaction while a checked MultiManager operation uses its configured sources.
+pub(crate) fn with_checked_multi_manager_sources<T>(
+    settings: &Path,
+    expected: &MultiManagerPaths,
+    workspace: &Path,
+    bindings: &Path,
+    operation: impl FnOnce(&dyn Fn() -> bool) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let _guard = transaction_guard();
+    let current = || -> bool {
+        let Ok(bytes) = source(settings) else { return false; };
+        let Ok(parsed) = root(bytes.as_deref()) else { return false; };
+        let Ok((snapshot, _, _)) = inspect(settings, bytes.as_deref(), &parsed) else { return false; };
+        let (configured_workspace, configured_bindings) = configured_source_paths(settings, &snapshot.paths);
+        snapshot.paths == *expected
+            && configured_workspace == workspace
+            && configured_bindings == bindings
+            && distinct_paths(settings, workspace, bindings).is_ok()
+    };
+    anyhow::ensure!(current(), "MultiManager source paths changed or overlap");
+    operation(&current)
+}
 fn root(bytes: Option<&[u8]>) -> anyhow::Result<Root> {
     match bytes {
         None => Ok(Root::Object(RawSettingsObject::new())),
@@ -499,6 +530,21 @@ fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn bare_settings_path_resolves_like_the_workspace_pane() {
+        let settings = Path::new("settings.json");
+        let defaults = Settings::default().multi_manager;
+        let paths = MultiManagerPaths {
+            workspaces: defaults.workspaces_path,
+            bindings: defaults.bindings_path,
+        };
+        let pane_base = settings.parent().unwrap_or_else(|| Path::new("."));
+        assert_eq!(configured_source_paths(settings, &paths), (
+            crate::multi_manager::state::resolve_relative_to(pane_base, &paths.workspaces),
+            crate::multi_manager::state::resolve_relative_to(pane_base, &paths.bindings),
+        ));
+    }
+
     #[test]
     fn path_only_save_preserves_external_auto_change() {
         let dir = tempfile::tempdir().unwrap();

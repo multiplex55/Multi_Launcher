@@ -2,7 +2,6 @@
 use super::*;
 use multi_launcher::multi_manager::checked;
 use multi_launcher::multi_manager::{
-    bindings,
     model::{MmWorkspace, new_workspace_id},
     state,
     store::{self, CheckedWorkspaceSnapshot},
@@ -56,6 +55,32 @@ fn select_overlay<'a>(
     overlays.iter().rev().find(|overlay| {
         overlay_current(overlay, index, expected, revision) && overlay.bound_count() != 0
     })
+}
+
+fn binding_receipts(
+    snapshot: &CheckedWorkspaceSnapshot,
+    binding_source: &checked::CheckedBindingSource,
+    rows: &[MmWorkspace],
+    overlays: &[PlacementOverlay],
+    revision: u64,
+) -> Option<(Vec<checked::BindingRowReceipt>, Vec<Arc<super::multi_manager_auto::Owner>>)> {
+    let mut receipts = Vec::new();
+    let mut startup_owners = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        let Some(overlay) = select_overlay(overlays, index, row, revision) else { continue; };
+        let receipt = match &overlay.source {
+            OverlaySource::Reconnect(reconnected) => checked::BindingRowReceipt::from_reconnected(snapshot, index, reconnected),
+            OverlaySource::Catalog(plan) if plan.matches_raw_source(snapshot) => checked::BindingRowReceipt::from_catalog(plan, index),
+            OverlaySource::Startup(plan, owner) if owner.is_current() && plan.matches_raw_source(snapshot) => {
+                startup_owners.push(owner.clone());
+                checked::BindingRowReceipt::from_catalog(plan, index)
+            }
+            OverlaySource::Restore(plan) => checked::BindingRowReceipt::from_restore(plan, binding_source, index),
+            _ => None,
+        }?;
+        receipts.push(receipt);
+    }
+    (!receipts.is_empty()).then_some((receipts, startup_owners))
 }
 
 fn replace_restore_entries<T>(
@@ -203,12 +228,16 @@ pub(super) struct MultiManagerView {
     owner: utility_mount::MountOwner,
     mount: utility_mount::MountReceipt,
     focus: FocusHandle,
+    snapshot_focus: FocusHandle,
     review_cancel: FocusHandle,
     workspace_path: PathBuf,
     bindings_path: PathBuf,
+    settings_path: PathBuf,
+    settings_paths: multi_launcher::settings::MultiManagerPaths,
     snapshot: Option<CheckedWorkspaceSnapshot>,
+    workspace_ready: bool,
     rows: Vec<MmWorkspace>,
-    bindings: Option<Vec<bindings::WorkspaceBindingSnapshot>>,
+    binding_source: Option<checked::CheckedBindingSource>,
     binding_error: Option<String>,
     revision: u64,
     attempt: u64,
@@ -231,6 +260,7 @@ pub(super) struct MultiManagerView {
     capture_identities: Vec<multi_launcher::window_catalog::WindowNativeIdentity>,
     ignore_launcher_capture: bool,
     overlays: Vec<PlacementOverlay>,
+    overlay_revision: u64,
     auto: Arc<super::multi_manager_auto::Owner>,
 }
 
@@ -238,6 +268,7 @@ impl MultiManagerView {
     fn retire_auto_reconnect(&mut self) {
         self.auto.retire();
         self.overlays.retain(|overlay| !matches!(&overlay.source, OverlaySource::Startup(_, _)));
+        self.overlay_revision = self.overlay_revision.wrapping_add(1);
     }
     pub(super) fn revoke_operation(&mut self) {
         self.revoke_restore();
@@ -778,12 +809,19 @@ impl MultiManagerView {
             owner,
             mount,
             focus: cx.focus_handle(),
+            snapshot_focus: cx.focus_handle(),
             review_cancel: cx.focus_handle(),
             workspace_path,
             bindings_path,
+            settings_path: settings_path.to_owned(),
+            settings_paths: multi_launcher::settings::MultiManagerPaths {
+                workspaces: settings.workspaces_path.clone(),
+                bindings: settings.bindings_path.clone(),
+            },
             snapshot: None,
+            workspace_ready: false,
             rows: Vec::new(),
-            bindings: None,
+            binding_source: None,
             binding_error: None,
             revision: 0,
             attempt: 0,
@@ -806,6 +844,7 @@ impl MultiManagerView {
             capture_identities: Vec::new(),
             ignore_launcher_capture: settings.ignore_launcher_window_on_capture,
             overlays: Vec::new(),
+            overlay_revision: 0,
             auto,
         };
         view.reload(cx);
@@ -842,6 +881,7 @@ impl MultiManagerView {
         replace_restore_entries(&mut self.overlays, rows, |old| {
             matches!(&old.source, OverlaySource::Startup(_, _))
         });
+        self.overlay_revision = self.overlay_revision.wrapping_add(1);
         if plan.outcome == checked::ReconnectCatalogOutcome::NoMatch {
             self.message = Some("Automatic reconnect found no matching windows.".into());
         }
@@ -1201,6 +1241,8 @@ impl MultiManagerView {
             return;
         }
         self.overlays.clear();
+        self.binding_source = None;
+        self.workspace_ready = false;
         self.pending = true;
         self.loading = true;
         self.attempt = self.attempt.wrapping_add(1);
@@ -1212,7 +1254,7 @@ impl MultiManagerView {
         let admission = self.admission.clone();
         let task = cx.background_executor().spawn(async move {
             let (workspace, bindings) =
-                checked::load_editor_sources_checked(&path, &binding_path, || {
+                checked::load_editor_sources_with_binding_checked(&path, &binding_path, || {
                     worker_receipt.is_current() && !admission.is_fenced()
                 });
             (workspace, bindings.map_err(|error| format!("{error:#}")))
@@ -1228,6 +1270,7 @@ impl MultiManagerView {
                     view.pending = false;
                     view.loading = false;
                     let loaded = workspace.is_ok();
+                    view.workspace_ready = loaded;
                     match workspace {
                         Ok(snapshot) => {
                             view.rows = snapshot.workspaces().to_vec();
@@ -1243,11 +1286,12 @@ impl MultiManagerView {
                         }
                     }
                     match bindings {
-                        Ok(rows) => {
-                            view.bindings = rows;
+                        Ok(source) => {
+                            view.binding_source = Some(source);
                             view.binding_error = None;
                         }
                         Err(error) => {
+                            view.binding_source = None;
                             view.binding_error =
                                 Some(format!("Could not load window bindings: {error}"))
                         }
@@ -1283,6 +1327,140 @@ impl MultiManagerView {
             }
         })
         .detach();
+        cx.notify();
+    }
+
+    fn snapshot_receipts(&self) -> Option<(Vec<checked::BindingRowReceipt>, Vec<Arc<super::multi_manager_auto::Owner>>)> {
+        if !self.workspace_ready || self.pending || self.dirty() || self.rename.is_some()
+            || self.review.is_some() || self.capture_slot.is_some() { return None; }
+        binding_receipts(self.snapshot.as_ref()?, self.binding_source.as_ref()?, &self.rows, &self.overlays, self.revision)
+    }
+
+    fn snapshot_available(&self) -> bool {
+        self.workspace_ready && !self.pending && !self.dirty() && self.rename.is_none()
+            && self.review.is_none() && self.capture_slot.is_none()
+            && self.snapshot.is_some() && self.binding_source.is_some()
+            && self.rows.iter().enumerate().any(|(index, row)| {
+                select_overlay(&self.overlays, index, row, self.revision).is_some()
+            })
+    }
+
+    fn settle_binding_snapshot(
+        &mut self,
+        result: Result<checked::BindingSaveResult, String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending = false;
+        self.operation_lease = None;
+        self.focus_guard = None;
+        self.activation_guard = None;
+        match result {
+            Ok(checked::BindingSaveResult::Published(saved)) => {
+                self.binding_error = None;
+                self.overlays.retain(|overlay| match &overlay.source {
+                    OverlaySource::Restore(plan) => plan.matches_binding_source(&saved.source),
+                    _ => true,
+                });
+                self.binding_source = Some(saved.source);
+                self.message = Some(format!("Saved {} window binding(s).", saved.count));
+            }
+            Ok(checked::BindingSaveResult::CommittedUnverified(error)) => {
+                self.binding_source = None;
+                self.overlays.retain(|overlay| !matches!(&overlay.source, OverlaySource::Restore(_)));
+                self.binding_error = Some(format!("Bindings were written but could not be verified: {error}. Reload before saving again."));
+            }
+            Err(error) => self.message = Some(format!("Could not save window bindings: {error}")),
+        }
+        self.settle_wait(cx);
+        cx.notify();
+    }
+
+    fn save_binding_snapshot(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.current(window, cx) { return; }
+        let Some((rows, startup_owners)) = self.snapshot_receipts() else {
+            self.message = Some("Window bindings changed; reconnect or restore again before saving.".into());
+            cx.notify();
+            return;
+        };
+        let Some(snapshot) = self.snapshot.clone() else { return; };
+        let Some(binding_source) = self.binding_source.clone() else { return; };
+        let Some(native) = self.native else { return; };
+        let Some(permit) = self.admission.admit() else { return; };
+        self.focus.focus(window, cx);
+        let lease = Arc::new(AtomicBool::new(true));
+        let blur = lease.clone();
+        self.focus_guard = Some(cx.on_focus_out(&self.focus, window, move |_, _, _, _| blur.store(false, Ordering::Release)));
+        let active = lease.clone();
+        self.activation_guard = Some(cx.observe_window_activation(window, move |_, window, _| {
+            if !window.is_window_active() { active.store(false, Ordering::Release); }
+        }));
+        self.operation_lease = Some(lease.clone());
+        self.pending = true;
+        self.message = None;
+        self.attempt = self.attempt.wrapping_add(1);
+        let attempt = self.attempt;
+        let revision = self.revision;
+        let mount = self.mount.clone();
+        let visibility_revision = self.visibility.request_revision.load(Ordering::Acquire);
+        let weak = cx.entity().downgrade();
+        window.defer(cx, move |window, app| {
+            let _ = weak.update(app, |view, cx| {
+                let valid = attempt_current(&mount, &view.mount, attempt, view.attempt)
+                    && view.pending && view.revision == revision && !view.dirty()
+                    && lease.load(Ordering::Acquire) && view.focus.is_focused(window)
+                    && view.visibility.request_revision.load(Ordering::Acquire) == visibility_revision
+                    && view.current(window, cx) && startup_owners.iter().all(|owner| owner.is_current());
+                if !valid {
+                    if attempt_current(&mount, &view.mount, attempt, view.attempt) {
+                        view.pending = false; view.operation_lease = None; view.focus_guard = None; view.activation_guard = None;
+                        view.message = Some("Save HWND Snapshot was superseded; try again.".into());
+                        view.settle_wait(cx); cx.notify();
+                    }
+                    return;
+                }
+                let settings_path = view.settings_path.clone();
+                let settings_paths = view.settings_paths.clone();
+                let worker_mount = mount.clone();
+                let worker_lease = lease.clone();
+                let admission = view.admission.clone();
+                let visibility = view.visibility.clone();
+                let host = view.host;
+                let task = cx.background_executor().spawn(async move {
+                    let current = || worker_mount.is_current() && worker_lease.load(Ordering::Acquire)
+                        && !admission.is_fenced() && startup_owners.iter().all(|owner| owner.is_current())
+                        && current_foreground_identity() == Some(native.identity)
+                        && json_utility::native_host_current(&visibility, visibility_revision, Some(native), false);
+                    let gate = super::external_launch::EffectGate::default();
+                    let result = checked::save_binding_snapshot_checked(&settings_path, &settings_paths, &snapshot, &binding_source,
+                        &rows, &current, || gate.claim(&current), &checked::NativeRestore).map_err(|error| format!("{error:#}"));
+                    (permit, result)
+                });
+                cx.spawn(async move |weak, cx| {
+                    let (_permit, result) = task.await;
+                    let result = Arc::new(Mutex::new(Some(result)));
+                    let delivery = result.clone();
+                    let delivered = host.update(cx, |_, _, app| {
+                        let _ = weak.update(app, |view, cx| {
+                            if attempt_current(&mount, &view.mount, attempt, view.attempt) && view.pending {
+                                if let Some(result) = delivery.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+                                    view.settle_binding_snapshot(result, cx);
+                                }
+                            }
+                        });
+                    });
+                    if delivered.is_err() {
+                        let _ = weak.update(cx, |view, cx| {
+                            if attempt_current(&mount, &view.mount, attempt, view.attempt) && view.pending {
+                                if let Some(result) = result.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+                                    view.settle_binding_snapshot(result, cx);
+                                }
+                            }
+                        });
+                    }
+                }).detach();
+                cx.notify();
+            });
+        });
         cx.notify();
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1782,6 +1960,9 @@ impl Render for MultiManagerView {
             return panel;
         }
         let issued_revision = self.revision;
+        let issued_attempt = self.attempt;
+        let issued_overlay_revision = self.overlay_revision;
+        let snapshot_available = self.snapshot_available();
         let mount = self.mount.clone();
         panel = panel.child(
             div()
@@ -1858,6 +2039,24 @@ impl Render for MultiManagerView {
                                 } else {
                                     view.retire_auto_reconnect();
                                     view.reload(cx);
+                                }
+                            })
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("mm-save-hwnd-{:?}-{issued_revision}-{issued_attempt}-{issued_overlay_revision}", cx.entity_id())))
+                        .label("Save HWND Snapshot")
+                        .track_focus(&self.snapshot_focus)
+                        .tab_stop(true)
+                        .disabled(!snapshot_available)
+                        .on_click({
+                            let mount = mount.clone();
+                            cx.listener(move |view, _, window, cx| {
+                                if mount.is_current() && mount.matches(&view.mount)
+                                    && view.revision == issued_revision && view.attempt == issued_attempt
+                                    && view.overlay_revision == issued_overlay_revision
+                                {
+                                    view.save_binding_snapshot(window, cx);
                                 }
                             })
                         }),
@@ -2027,7 +2226,7 @@ impl Render for MultiManagerView {
                         entry.target_rect
                     )));
                 }
-                if let Some(bindings) = &self.bindings {
+                if let Some(bindings) = self.binding_source.as_ref().and_then(|source| source.summary()) {
                     for binding in bindings.iter().filter(|binding| {
                         multi_launcher::multi_manager::bindings::workspace_index_for_snapshot(
                             &self.rows, binding,
@@ -2255,7 +2454,7 @@ impl RootWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        OverlaySource, PlacementOverlay, attempt_current, current_provider, discard_draft,
+        OverlaySource, PlacementOverlay, attempt_current, binding_receipts, current_provider, discard_draft,
         focus_out_revokes, overlay_current, overlay_has_live_identity, replace_restore_entries,
         restore_busy, row_current, select_overlay,
     };
@@ -2389,6 +2588,72 @@ mod tests {
         let mut changed = row;
         changed.name.push('!');
         assert!(!overlay_current(&overlay, 2, &changed, 4));
+    }
+
+    #[test]
+    fn binding_snapshot_selection_requires_current_row_and_revision() {
+        use multi_launcher::window_catalog::{WindowNativeIdentity, WindowSwitchIdentity, WindowTargetIdentity};
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_path = dir.path().join("workspaces.json");
+        let binding_path = dir.path().join("bindings.json");
+        let row = MmWorkspace {
+            id: "one".into(), name: "One".into(),
+            windows: vec![multi_launcher::multi_manager::model::MmWindow {
+                captured_title: "Editor".into(), executable: "editor.exe".into(), ..Default::default()
+            }], ..Default::default()
+        };
+        std::fs::write(&workspace_path, serde_json::to_vec(&[row]).unwrap()).unwrap();
+        let snapshot = store::load_checked_workspaces(&workspace_path, || true).unwrap();
+        let source = checked::load_checked_binding_source(&binding_path, || true).unwrap();
+        let expected = snapshot.workspaces()[0].clone();
+        let mut connected = expected.clone();
+        connected.windows[0].mark_bound(42);
+        let native = WindowNativeIdentity { hwnd: 42, pid: 7, tid: 8 };
+        let identity = WindowSwitchIdentity { native, descriptor: WindowTargetIdentity { hwnd: 42, pid: 7, executable: Some("editor.exe".into()), process_path: None, class_name: None } };
+        let overlay = PlacementOverlay { index: 0, revision: 3, expected: expected.clone(), source: OverlaySource::Reconnect(checked::ReconnectedWorkspace {
+            workspace: connected, identities: [(0, identity)].into_iter().collect(), summary: Default::default(),
+        }) };
+        assert!(binding_receipts(&snapshot, &source, std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 3).is_some());
+        assert!(binding_receipts(&snapshot, &source, std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 4).is_none());
+        let mut changed = expected; changed.name.push('!');
+        assert!(binding_receipts(&snapshot, &source, &[changed], &[overlay], 3).is_none());
+    }
+
+    #[test]
+    fn binding_snapshot_selection_rejects_restore_with_old_binding_bytes() {
+        use multi_launcher::window_catalog::{WindowNativeIdentity, WindowSwitchIdentity, WindowTargetIdentity};
+        use multi_launcher::multi_manager::win::EnumeratedWindow;
+        struct Observer(WindowSwitchIdentity);
+        impl checked::RestoreObserver for Observer {
+            fn observe(&self, hwnd: usize) -> Option<(EnumeratedWindow, WindowSwitchIdentity)> {
+                Some((EnumeratedWindow { hwnd, title: "Editor".into(), executable: "editor.exe".into(), process_path: "C:\\editor.exe".into(), class_name: "Editor".into(), rect: multi_launcher::multi_manager::model::MmRect { x: 0, y: 0, w: 100, h: 100 } }, self.0.clone()))
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let workspace_path = dir.path().join("workspaces.json");
+        let binding_path = dir.path().join("bindings.json");
+        let row = MmWorkspace { id: "one".into(), name: "One".into(), windows: vec![multi_launcher::multi_manager::model::MmWindow {
+            captured_title: "Editor".into(), executable: "editor.exe".into(), process_path: "C:\\editor.exe".into(), class_name: "Editor".into(), ..Default::default()
+        }], ..Default::default() };
+        std::fs::write(&workspace_path, serde_json::to_vec(&[row]).unwrap()).unwrap();
+        let source = store::load_checked_workspaces(&workspace_path, || true).unwrap();
+        let binding = multi_launcher::multi_manager::bindings::WorkspaceBindingSnapshot { workspace_id: Some("one".into()), workspace_name: "One".into(), windows: vec![multi_launcher::multi_manager::bindings::WindowBindingSnapshot {
+            window_id: 0, window_index: 0, captured_title: "Editor".into(), hwnd: 42,
+            executable: Some("editor.exe".into()), process_path: Some("C:\\editor.exe".into()), class_name: Some("Editor".into()), ..Default::default()
+        }] };
+        let bytes = serde_json::to_vec(&[binding]).unwrap();
+        std::fs::write(&binding_path, &bytes).unwrap();
+        let old = checked::load_checked_binding_source(&binding_path, || true).unwrap();
+        let pid = std::process::id().wrapping_add(1).max(1);
+        let identity = WindowSwitchIdentity { native: WindowNativeIdentity { hwnd: 42, pid, tid: 8 }, descriptor: WindowTargetIdentity { hwnd: 42, pid, executable: Some("editor.exe".into()), process_path: Some("C:\\editor.exe".into()), class_name: Some("Editor".into()) } };
+        let plan = Arc::new(checked::restore_checked(&source, &binding_path, || true, &Observer(identity)).unwrap());
+        let expected = source.workspaces()[0].clone();
+        let overlay = PlacementOverlay { index: 0, revision: 1, expected: expected.clone(), source: OverlaySource::Restore(plan) };
+        assert!(binding_receipts(&source, &old, std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 1).is_some());
+        let mut changed = bytes; changed.push(b' ');
+        std::fs::write(&binding_path, changed).unwrap();
+        let newer = checked::load_checked_binding_source(&binding_path, || true).unwrap();
+        assert!(binding_receipts(&source, &newer, &[expected], &[overlay], 1).is_none());
     }
 
     #[test]
