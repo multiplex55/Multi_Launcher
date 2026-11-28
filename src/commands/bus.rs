@@ -98,6 +98,29 @@ impl CommandBus {
         handle_checked_headless_effect(preferences, &invocation, effect)
     }
 
+    /// Apply the normal History outcome to the exact completed checked replay.
+    pub fn complete_checked_history_replay(
+        &self,
+        index: usize,
+        original_action: &Action,
+        source: ActivationSource,
+        effect: anyhow::Result<()>,
+        preferences: LauncherRunPreferences,
+    ) -> Result<CommandOutcome, CommandError> {
+        if original_action.args.is_some() || original_action.action != format!("history:{index}") {
+            return Err(CommandError::new(
+                "history", "History result changed; search History again",
+            ).with_gui_failure_policy());
+        }
+        let invocation = CommandInvocation {
+            command: Command::Storage(super::StorageCommand::HistoryLaunch(index)),
+            original_action: original_action.clone(),
+            query_override: None,
+            source,
+        };
+        handle_checked_headless_effect(preferences, &invocation, effect)
+    }
+
     /// Apply the normal Calculator outcome to a completed checked effect.
     pub fn complete_checked_calculator_result(
         &self,
@@ -358,6 +381,28 @@ mod tests {
         assert!(outcome.search);
         let error = CommandBus.complete_checked_window_close(42, &action, ActivationSource::Enter, Err(anyhow::anyhow!("post failed")), preferences).unwrap_err();
         assert!(error.message.contains("post failed"));
+    }
+
+    #[test]
+    fn checked_history_replay_keeps_outer_action_accounting() {
+        let action = Action {
+            label: "editor".into(), desc: "History".into(),
+            action: "history:2".into(), args: None,
+        };
+        let preferences = LauncherRunPreferences {
+            clear_query_after_run: true, hide_after_run: true, refocus: true,
+        };
+        let outcome = CommandBus.complete_checked_history_replay(
+            2, &action, ActivationSource::Enter, Ok(()), preferences,
+        ).unwrap();
+        assert_eq!(outcome.history, HistoryPolicy::Record);
+        assert!(matches!(&outcome.toasts[0], crate::commands::ToastPolicy::Launched(label) if label == "editor"));
+        assert!(CommandBus.complete_checked_history_replay(
+            2, &action, ActivationSource::Enter, Err(anyhow::anyhow!("stale")), preferences,
+        ).is_err());
+        assert!(CommandBus.complete_checked_history_replay(
+            1, &action, ActivationSource::Enter, Ok(()), preferences,
+        ).is_err());
     }
 
     #[test]

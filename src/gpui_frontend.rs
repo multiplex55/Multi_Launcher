@@ -10,6 +10,7 @@ mod activity;
 mod add_action;
 mod appearance;
 mod external_launch;
+mod history_search;
 mod file_search;
 mod folder_size;
 mod file_lock;
@@ -248,6 +249,7 @@ pub(crate) struct LauncherSearchStartup {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum LauncherResultOrigin {
     Saved,
+    History(Arc<history_search::Receipt>),
     Indexed { generation: u64, index: usize },
     Omni(multi_launcher::plugins::omni_search::OmniSource),
     CalendarJump { serial: u64, index: usize },
@@ -314,6 +316,7 @@ struct LauncherSearchCatalog {
     actions: Arc<Vec<Action>>,
     canonical_saved: Arc<[Action]>,
     canonical_revision: u64,
+    canonical_epoch: Arc<AtomicU64>,
     saved_count: usize,
     index_config: multi_launcher::indexer::coordinator::IndexConfig,
     index_generation: Option<u64>,
@@ -392,6 +395,7 @@ impl LauncherSearchCatalog {
             actions: Arc::new(actions),
             canonical_saved,
             canonical_revision: 1,
+            canonical_epoch: Arc::new(AtomicU64::new(1)),
             saved_count,
             index_config: startup.index_config,
             index_generation: None,
@@ -424,6 +428,7 @@ impl LauncherSearchCatalog {
     fn replace_saved_actions_with(&mut self, rows: Vec<Action>, verified_folders: Vec<Action>, before_change: impl FnOnce()) -> bool {
         if self.canonical_saved.as_ref() != rows.as_slice() {
             self.canonical_revision = self.canonical_revision.wrapping_add(1).max(1);
+            self.canonical_epoch.store(self.canonical_revision, Ordering::Release);
             self.canonical_saved = rows.clone().into();
         }
         let saved = supported_saved_search_actions(rows, &verified_folders);
@@ -539,6 +544,19 @@ impl LauncherSearchCatalog {
         provider_actions: Vec<(String, Action)>,
         raw_provider_results_empty: bool,
     ) -> Vec<LauncherSearchResult> {
+        let history = self.providers.history.projection(raw_query);
+        self.compose_with_history(
+            raw_query, provider_actions, raw_provider_results_empty, history.as_deref(),
+        )
+    }
+
+    fn compose_with_history(
+        &self,
+        raw_query: &str,
+        provider_actions: Vec<(String, Action)>,
+        raw_provider_results_empty: bool,
+        history_projection: Option<&history_search::Projection>,
+    ) -> Vec<LauncherSearchResult> {
         if raw_query.trim().is_empty() {
             use multi_launcher::actions::search::{EmptyBrowseKind, empty_browse_rows};
             let mut local_index = 0;
@@ -608,6 +626,12 @@ impl LauncherSearchCatalog {
                 if omni_source == Some(multi_launcher::plugins::omni_search::OmniSource::Note) && omni_note.is_none() { return None; }
                 let note_source = (provider == "notes").then(|| self.providers.note_source(&note_effective, &action)).flatten();
                 let note_new = (provider == "notes").then(|| self.providers.note_new_source(&note_effective, &action)).flatten();
+                let history = (provider == "history").then(|| {
+                    history_projection.and_then(|projection| projection.receipt(
+                        &action, self.canonical_saved.clone(), self.canonical_revision,
+                    ))
+                }).flatten();
+                if provider == "history" && history.is_none() { return None; }
                 if provider == "omni_search" && omni_source.is_none() { return None; }
                 let date_result = date_search::classify(&provider, &action).is_some();
                 let base_result = base_convert_search::classify(&provider, &action).is_some();
@@ -648,7 +672,8 @@ impl LauncherSearchCatalog {
                 } else {
                     0.0
                 };
-                let origin = omni_note.map(|(version, note)| LauncherResultOrigin::OmniNote { version, note })
+                let origin = history.map(|receipt| LauncherResultOrigin::History(Arc::new(receipt)))
+                    .or_else(|| omni_note.map(|(version, note)| LauncherResultOrigin::OmniNote { version, note }))
                     .or_else(|| omni_source.map(LauncherResultOrigin::Omni))
                     .or_else(|| note_source.map(|(version, note)| LauncherResultOrigin::Note { version, note }))
                     .or_else(|| note_new.map(|version| LauncherResultOrigin::NoteNew { version })).unwrap_or(LauncherResultOrigin::Provider(provider));
@@ -7404,11 +7429,16 @@ impl RootWindow {
     fn publish_launcher_provider_results(&mut self, query: String, raw_provider_actions: Vec<(String, Action)>, scroll_to_search: bool) {
         let raw_provider_results_empty = raw_provider_actions.is_empty();
         let omni_projection = self.search_catalog.providers.omni.projection(&query);
+        let history_projection = self.search_catalog.providers.history.projection(&query);
         let provider_actions = raw_provider_actions
             .into_iter()
             .filter(|(provider, action)| {
                 if self.plugin_membership_pending.is_some_and(|plugin| plugin.id() == provider) { return false; }
-                if provider == "windows" {
+                if provider == "history" {
+                    history_projection.as_ref().and_then(|projection| projection.receipt(
+                        action, self.search_catalog.canonical_saved.clone(), self.search_catalog.canonical_revision,
+                    )).is_some()
+                } else if provider == "windows" {
                     window_search::action_is_operation(provider, action)
                 } else if provider == "calculator" {
                     calculator_search::classify(provider, &query, action).is_some()
@@ -7485,7 +7515,7 @@ impl RootWindow {
             .collect();
         let mut actions =
             self.search_catalog
-                .compose(&query, provider_actions, raw_provider_results_empty);
+                .compose_with_history(&query, provider_actions, raw_provider_results_empty, history_projection.as_deref());
         let layout = self
             .search_catalog
             .resolve_result_layout(&query, self.enabled_plugins.as_ref());
@@ -8247,6 +8277,21 @@ impl RootWindow {
         };
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if self.plugin_membership_pending.is_some_and(|plugin| plugin.id() == name)) { return; }
         if !self.launcher_result_activation_is_live(origin, window, cx) {
+            return;
+        }
+        if let LauncherResultOrigin::History(receipt) = &result.origin {
+            if self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains("history"))
+                || !multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "history")
+                || self.search_catalog.canonical_revision != receipt.canonical_revision
+                || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
+                || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
+            let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+            let guard = external_launch::OmniGuard {
+                catalog: Arc::new(AtomicBool::new(true)), lease: Arc::new(AtomicBool::new(true)),
+                effect_gate: Arc::new(external_launch::EffectGate::default()), visibility: self.root_visibility.clone(),
+                revision: self.root_visibility.request_revision.load(Ordering::Acquire), native, admission: self.restart_admission.clone(),
+            };
+            self.start_history_replay(result.action, receipt.clone(), self.search_catalog.canonical_epoch.clone(), guard, query, source, window, cx);
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::CalendarJump { .. }) {

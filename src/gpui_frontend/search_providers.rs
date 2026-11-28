@@ -356,6 +356,7 @@ pub(super) fn snippets_rows(
 
 /// Providers admitted by GPUI Search, including the owners of watched stores.
 pub(super) struct InstalledLauncherProviders {
+    pub(super) history: super::history_search::Provider,
     pub(super) hash_generator: multi_launcher::plugins::hash_generator::HashGeneratorPlugin,
     settings: multi_launcher::plugins::settings::SettingsPlugin,
     help: multi_launcher::plugins::help::HelpPlugin,
@@ -463,6 +464,7 @@ impl InstalledLauncherProviders {
         let quick_notes = QuickNotesBare::default();
         let omni = super::omni_search::Provider::new(folders.clone(), bookmarks.clone(), quick_notes.owner.clone(), quick_notes.snapshots.clone());
         Self {
+            history: super::history_search::Provider::default(),
             omni,
             omni_wake,
             notes_wake: Arc::new(super::HashWakeSignal::default()),
@@ -520,6 +522,7 @@ impl InstalledLauncherProviders {
         &'a self,
     ) -> impl Iterator<Item = &'a dyn multi_launcher::plugin::Plugin> {
         [
+            Some(&self.history as &dyn multi_launcher::plugin::Plugin),
             Some(&self.hash_generator as &dyn multi_launcher::plugin::Plugin),
             Some(&self.omni as &dyn multi_launcher::plugin::Plugin),
             Some(&self.settings as &dyn multi_launcher::plugin::Plugin),

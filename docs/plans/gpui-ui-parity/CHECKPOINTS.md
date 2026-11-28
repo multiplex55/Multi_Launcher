@@ -2170,3 +2170,15 @@ Locked `fast-dev` launcher checks passed in 5.69s and 35.38s. Independent review
 P0.03, P0.04 and P0.06 remain Stage 2. Paired 1516 × 937 Windows replay remains open. The owned profiles enable Omni Folder and Bookmark with direct Search and both Paste Sequence shortcuts disabled. Verify prefills, Cancel, retained Search focus, exact saved Alias, unchanged siblings, Search refresh and egui readback for both child sources. Folder Repair retains the existing cross-store criteria.
 
 Continue P0.01/P0.02 checked History replay for saved apps.
+
+### P0.01 P0.02 checked History replay for saved apps
+
+The stock `hi [filter]` provider projects the newest History rows with their original ordinals and ten-result cap. GPUI admits a row when its exact app identity and optional Args match one current canonical saved local executable. The stock `app ` label prefix is recognized for blank Search launches. Nested History, unsupported targets, ambiguous saved rows and changed Args are excluded.
+
+The result owns the original History snapshot and saved catalog revision. The existing external worker defers start until the Search focus guard is armed, checks the local executable and rechecks both persisted files sequentially at native entry before claiming the effect. The launch uses the original saved app and stock argument parsing. Successful bookkeeping uses the outer History row, raw query and actual activation source. A retained query refreshes through normal Search scoring and filtering after the append.
+
+The locked `fast-dev` library check passed in 1m 09s. Integrated launcher and library checks passed in 36.68s and 33.15s. Independent review cleared exact saved and History provenance, deferred focus ownership, final durable checks, outer accounting and retained query recomposition. The grouped library and launcher link took 18m 26s. Nextest run `348930fe-ff37-4658-b958-7628b898e007` passed all ten selected tests in 4.101s with 9579 skipped.
+
+The registered History plugin is Stage 2 for this scoped workflow. Paired 1516 × 937 Windows replay remains open with both Paste Sequence shortcuts disabled. Check one launch each with the exact executable, quoted and empty Args, inherited working directory and outer History and Usage. Replay twice with Clear After Run off. Replace the owned History seed after publication to verify stale refusal without a launch or success record. Clear and additional replay types retain their original requirements.
+
+Continue P0.10 launcher-owned automatic MultiManager Reconnect on load.

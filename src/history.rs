@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard, RwLock};
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
     pub query: String,
     #[serde(skip)]
@@ -20,7 +20,7 @@ pub struct HistoryEntry {
     pub timestamp: i64,
 }
 
-const HISTORY_FILE: &str = "history.json";
+pub const HISTORY_FILE: &str = "history.json";
 pub const HISTORY_PINS_FILE: &str = "history_pins.json";
 static PINS_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static HISTORY_TRANSACTION: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -126,6 +126,29 @@ fn load_history_from_path(path: impl AsRef<Path>) -> anyhow::Result<VecDeque<His
         e.query_lc = e.query.to_lowercase();
     }
     Ok(list.into())
+}
+
+/// Read through the stock parser and compare the entire durable sequence and exact row.
+/// Call again at an effect boundary; this read alone does not reserve the source.
+pub fn checked_history_snapshot_matches(
+    path: impl AsRef<Path>,
+    expected: &VecDeque<HistoryEntry>,
+    index: usize,
+    entry: &HistoryEntry,
+    current: impl Fn() -> bool,
+) -> anyhow::Result<bool> {
+    let path = path.as_ref();
+    let _permit = crate::common::repair_watch::require_path_read(path)?;
+    let _transaction = history_transaction_guard();
+    if !current() {
+        return Ok(false);
+    }
+    let durable = load_history_from_path(path)?;
+    if durable != *expected || durable.get(index) != Some(entry) || !current() {
+        return Ok(false);
+    }
+    let final_read = load_history_from_path(path)?;
+    Ok(final_read == *expected && final_read.get(index) == Some(entry))
 }
 
 /// Load a persisted history fixture through the same parser used by startup.
@@ -392,6 +415,36 @@ mod tests {
     use tempfile::tempdir;
 
     static TEST_MUTEX: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
+    #[test]
+    fn checked_history_snapshot_rejects_prepend_and_last_authority_change() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("history.json");
+        let row = HistoryEntry {
+            query: "App One".into(),
+            query_lc: "app one".into(),
+            action: Action { label: "One".into(), desc: "App".into(), action: "one.exe".into(), args: Some("--flag".into()) },
+            source: None,
+            timestamp: 7,
+        };
+        std::fs::write(&path, serde_json::to_vec(&[row.clone()]).unwrap()).unwrap();
+        let snapshot = load_history_from_path(&path).unwrap();
+        assert!(checked_history_snapshot_matches(&path, &snapshot, 0, &row, || true).unwrap());
+        assert!(!checked_history_snapshot_matches(&path, &snapshot, 1, &row, || true).unwrap());
+        let mut earlier = row.clone();
+        earlier.query = "Newer".into();
+        std::fs::write(&path, serde_json::to_vec(&[earlier, row.clone()]).unwrap()).unwrap();
+        assert!(!checked_history_snapshot_matches(&path, &snapshot, 0, &row, || true).unwrap());
+        std::fs::write(&path, serde_json::to_vec(&[row.clone()]).unwrap()).unwrap();
+        let calls = std::cell::Cell::new(0);
+        assert!(!checked_history_snapshot_matches(&path, &snapshot, 0, &row, || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 {
+                std::fs::write(&path, b"[]").unwrap();
+            }
+            true
+        }).unwrap());
+    }
 
     fn pin(action_id: &str) -> HistoryPin {
         HistoryPin {

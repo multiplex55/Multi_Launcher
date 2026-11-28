@@ -544,6 +544,7 @@ pub(super) enum DiagnosticKind {
 
 #[derive(Clone)]
 pub(super) enum RunCommand {
+    HistoryReplay { receipt: Arc<super::history_search::Receipt>, epoch: Arc<AtomicU64>, guard: OmniGuard },
     External { command: ExternalCommand, association: Option<AssociationKind> },
     Omni { command: ExternalCommand, target: OmniTarget, guard: OmniGuard },
     Indexed { command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority },
@@ -791,9 +792,9 @@ impl ExternalLaunch {
             clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
-            omni_lease: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_lease: match &request.command { RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
             omni_category_effect: match &request.command { RunCommand::Omni { target, .. } => !matches!(target, OmniTarget::Tempfile(_)), RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } => true, _ => false },
-            omni_gate: match &request.command { RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
+            omni_gate: match &request.command { RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
         });
         Some(ticket)
     }
@@ -982,6 +983,35 @@ fn execute_request(
     copy: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> Result<CommandOutcome, CommandError> {
     match &request.command {
+        RunCommand::HistoryReplay { receipt, epoch, guard } => {
+            let current = || guard.current()
+                && epoch.load(Ordering::Acquire) == receipt.canonical_revision;
+            let effect = (|| -> anyhow::Result<()> {
+                anyhow::ensure!(current(), "History result changed; search History again");
+                let command = saved_external(&receipt.inner)
+                    .ok_or_else(|| anyhow::anyhow!("Saved application is no longer available"))?;
+                #[cfg(windows)]
+                multi_launcher::actions::exec::checked_local_file(std::path::Path::new(&command.target))?;
+                super::history_search::checked_launch_with(
+                    receipt,
+                    std::path::Path::new(super::add_action::ACTIONS_FILE),
+                    std::path::Path::new(multi_launcher::history::HISTORY_FILE),
+                    current,
+                    || guard.effect_current(),
+                    |entry| multi_launcher::actions::exec::launch_with_identity_if_current(
+                        &command.target, command.args.as_deref(), entry,
+                    ).map(|_| ()),
+                )
+            })();
+            CommandBus.complete_checked_history_replay(
+                receipt.index, &request.action, request.source, effect,
+                multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run,
+                    refocus: true,
+                },
+            )
+        }
         RunCommand::External { command, .. } => CommandBus.dispatch_external(
             command, &request.action, request.source, None, host,
         ),
@@ -1146,7 +1176,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1483,6 +1513,14 @@ impl RootWindow {
         self.start_run(action, RunCommand::External { command, association }, query, source, history_label, window, cx);
     }
 
+    pub(super) fn start_history_replay(
+        &mut self, action: Action, receipt: Arc<super::history_search::Receipt>,
+        epoch: Arc<AtomicU64>, guard: OmniGuard, query: String, source: ActivationSource,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        self.start_run(action, RunCommand::HistoryReplay { receipt, epoch, guard }, query, source, None, window, cx);
+    }
+
     pub(super) fn start_window_switch(
         &mut self, action: Action, checked: multi_launcher::window_activation::CheckedWindowSwitch,
         query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>,
@@ -1651,7 +1689,7 @@ impl RootWindow {
                 lease.store(false, Ordering::Release);
             }
         }
-        if let RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
+        if let RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
             if let Some(focus) = window.focused(cx) {
                 let lease = guard.lease.clone();
                 let effect_gate = guard.effect_gate.clone();
@@ -1669,6 +1707,52 @@ impl RootWindow {
         } else {
             self.query_history.reset();
         }
+        if matches!(&request.command, RunCommand::HistoryReplay { .. }) {
+            let root = cx.entity().downgrade();
+            window.defer(cx, move |window, app| {
+                let _ = root.update(app, |root, cx| {
+                    let current = root.external_launch.pending.as_ref()
+                        .filter(|pending| pending.ticket == ticket)
+                        .is_some_and(|pending| {
+                            let revision = root.root_visibility.request_revision.load(Ordering::Acquire);
+                            let guard_current = match &request.command {
+                                RunCommand::HistoryReplay { receipt, epoch, guard } => guard.current()
+                                    && epoch.load(Ordering::Acquire) == receipt.canonical_revision,
+                                _ => false,
+                            };
+                            guard_current
+                                && pending.stamp.presentation_is_current(
+                                    window.window_handle().window_id(),
+                                    root.launcher_results.generation,
+                                    revision,
+                                    root.query.read(cx).value().as_str(),
+                                    root.root_visibility.visible.load(Ordering::Acquire),
+                                )
+                                && root.external_owner_is_current(pending.stamp.focus.as_ref(), window, cx)
+                        });
+                    if current {
+                        root.spawn_run_worker(ticket, request, window, cx);
+                    } else if root.external_launch.pending.as_ref()
+                        .is_some_and(|pending| pending.ticket == ticket)
+                    {
+                        root.external_launch.pending.take();
+                        cx.notify();
+                    }
+                });
+            });
+            return;
+        }
+        self.spawn_run_worker(ticket, request, window, cx);
+    }
+
+    fn spawn_run_worker(
+        &mut self,
+        ticket: u64,
+        request: Request,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let history = matches!(&request.command, RunCommand::HistoryReplay { .. });
         let task = cx.background_executor().spawn(async move {
             let result = run(&request);
             (request, result)
@@ -1677,7 +1761,7 @@ impl RootWindow {
         let window_handle = window.window_handle();
         cx.spawn(async move |_, cx| {
             let (request, result) = task.await;
-            let _ = window_handle.update(cx, |_, window, app| {
+            let delivered = window_handle.update(cx, |_, window, app| {
                 let _ = root.update(app, |root, cx| {
                     let Some(receipt) = root.external_launch.finish(ticket, request, result) else {
                         return;
@@ -1693,6 +1777,16 @@ impl RootWindow {
                     }
                 });
             });
+            if history && delivered.is_err() {
+                let _ = root.update(cx, |root, cx| {
+                    if root.external_launch.pending.as_ref()
+                        .is_some_and(|pending| pending.ticket == ticket)
+                    {
+                        root.external_launch.pending.take();
+                        cx.notify();
+                    }
+                });
+            }
         })
         .detach();
     }
@@ -1786,6 +1880,8 @@ impl RootWindow {
             RunCommand::ClipboardUndo(current, _) => current() && window.is_window_active(),
             RunCommand::ClipboardExecute { current, .. } => current() && window.is_window_active(),
             RunCommand::SnippetRun { current, .. } => current() && window.is_window_active(),
+            RunCommand::HistoryReplay { receipt, epoch, guard } => guard.receipt_current()
+                && epoch.load(Ordering::Acquire) == receipt.canonical_revision,
             RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => guard.receipt_current(),
             RunCommand::Todo { guard, scope, revision, .. } | RunCommand::CalendarJump { guard, scope, revision, .. } => guard.current() && scope.load(Ordering::Acquire) == *revision,
             _ => true,
@@ -1800,6 +1896,15 @@ impl RootWindow {
         ) && window.window_handle().window_id() == root.window_id()
             && local_focus_owned && switch_current;
         if !current {
+            if matches!(&receipt.request.command, RunCommand::HistoryReplay { .. })
+                && receipt.result.outcome.is_ok() && receipt.result.history_error.is_none()
+                && receipt.stamp.generation == self.launcher_results.generation
+                && receipt.stamp.query == self.query.read(cx).value().as_str()
+                && receipt.stamp.visibility_revision == revision && visible
+                && !self.restart_admission.is_fenced()
+            {
+                self.refresh_launcher_results_with_viewport(receipt.stamp.query.clone(), false, cx);
+            }
             if matches!(&receipt.request.command, RunCommand::TempfileMutation { .. })
                 && receipt.result.outcome.is_ok() && visible && !self.restart_admission.is_fenced() {
                 let query = self.query.read(cx).value().to_string();
@@ -2002,6 +2107,13 @@ impl RootWindow {
             && changed_query.is_none() {
             let query = self.query.read(cx).value().to_string();
             self.refresh_launcher_results_with_viewport(query, false, cx);
+        }
+        if matches!(&receipt.request.command, RunCommand::HistoryReplay { .. })
+            && receipt.result.outcome.is_ok() && receipt.result.history_error.is_none()
+            && changed_query.is_none() && receipt.stamp.generation == self.launcher_results.generation
+            && receipt.stamp.query == self.query.read(cx).value().as_str()
+        {
+            self.refresh_launcher_results_with_viewport(receipt.stamp.query.clone(), false, cx);
         }
         if let (Some(expected_query), Some(message)) = (changed_query, deferred_inline) {
             let expected_generation = receipt.stamp.generation.wrapping_add(1).max(1);
