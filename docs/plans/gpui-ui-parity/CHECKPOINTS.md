@@ -2122,3 +2122,15 @@ Scoped locked `fast-dev` checks passed in 1m 55s, 37.19s and 34.45s. Independent
 P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open with owned workspace fixtures and both Paste Sequence shortcuts disabled. Verify both entry points, unchanged geometry and store bytes during Reconnect, and a subsequent checked Home or Target on each workspace. Automatic reconnect-on-load, workspace hotkeys and original G24 criteria stay open.
 
 Continue the P0.09 Note Editor’s Bold Selection and Italic Selection. MultiManager startup reconnect needs a launcher-owned publication before the retained pane exists.
+
+### P0.09 Note Editor Bold and Italic selection
+
+The retained Note Editor offers **Bold Selection** and **Italic Selection** in Edit and Split. Both use the shared Markdown operation on the active UTF-8 selection with Kit’s atomic replacement. The inner selection and its direction are restored and focus returns to the source. Empty selection leaves the draft intact. Active composition and pending note or save decisions block formatting. The document presentation generation retires stale toolbar presses after a note install, identity-changing Save or mode change.
+
+The existing Change subscription refreshes preview. The existing Save path persists the changed draft. No new file operation runs from either toolbar action.
+
+The corrected and final locked launcher checks passed in 35.60s and 3.98s. Source review checked Kit replacement and the stale pointer guard. The launcher-only link took 33.91s. Nextest run `5743b1e2-5799-4f29-a749-f1b33501456a` passed 5 of 5 in 2.611s. Run `c117488d-abfc-4f4d-9598-61af95a8b3df` reused the unchanged library for all three stock Markdown selection and Undo cases in 1.096s.
+
+Notes remains Stage 2. Paired 1516 × 937 Windows replay stays open for Unicode and reversed selection, Edit and Split preview, direct GPUI Undo and Redo, focus and cross-frontend Save readback. Use owned profiles with both Paste Sequence shortcuts disabled. Other editor actions retain their original G12 criteria.
+
+Continue P0.11 Calculation Pad result formatting and Copy Formatted Result. Use the stock display formatter and preserve canonical Copy and evaluation behavior.

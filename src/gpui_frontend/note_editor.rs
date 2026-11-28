@@ -1,6 +1,8 @@
 //! Retained existing-note editor and checked canonical open/save.
 use super::*;
+use gpui_kit::EntityInputHandler;
 use gpui_kit::component::text::{MarkdownExtensions, TextView, TextViewState};
+use multi_launcher::notes_markdown::{MarkdownInlineFormat, PreparedMarkdownEdit, prepare_inline_format};
 use multi_launcher::plugins::note::{self, CheckedNewNote, Note, QuickNoteDraft, QuickNoteWrite};
 use multi_launcher::settings::{NoteSettings, NoteViewMode};
 
@@ -116,6 +118,14 @@ fn issued_receipt_current(lease: &AtomicBool, issued_revision: u64, current_revi
     lease.load(Ordering::Acquire) && issued_revision == current_revision
 }
 
+fn inline_selection_edit(source: &str, selection: std::ops::Range<usize>, format: MarkdownInlineFormat) -> Result<Option<(PreparedMarkdownEdit, std::ops::Range<usize>)>, multi_launcher::notes_markdown::MarkdownEditError> {
+    if selection.is_empty() { return Ok(None); }
+    let delimiter = match &format { MarkdownInlineFormat::Strong => 2, MarkdownInlineFormat::Emphasis => 1, _ => return Ok(None) };
+    let edit = prepare_inline_format(source, selection.clone(), format)?;
+    let inner = (selection.start + delimiter)..(selection.end + delimiter);
+    Ok(Some((edit, inner)))
+}
+
 pub(super) struct NoteEditor {
     pub(super) open: bool,
     root: WeakEntity<RootWindow>,
@@ -135,6 +145,7 @@ pub(super) struct NoteEditor {
     identity: Identity,
     baseline: String,
     mode: NoteViewMode,
+    presentation_epoch: u64,
     settings: NoteSettings,
     save_on_close: bool,
     confirm_discard: bool,
@@ -149,6 +160,28 @@ pub(super) struct NoteEditor {
 }
 
 impl NoteEditor {
+    fn format_selection(&mut self, format: MarkdownInlineFormat, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(self.mode, NoteViewMode::Edit | NoteViewMode::Split) || self.pending || self.switch_pending || self.decision.is_some() || !self.current(window, cx) { return; }
+        let mut failure = None;
+        self.body.update(cx, |body, cx| {
+            if body.marked_text_range(window, cx).is_some() { return; }
+            let source = body.value().to_string();
+            let selection = body.selected_range();
+            let reversed = body.is_selection_reversed();
+            match inline_selection_edit(&source, selection, format) {
+                Ok(Some((edit, inner))) => {
+                    if edit.expected_source() != body.value().as_str() { return; }
+                    body.set_selected_range_with_direction(edit.range(), reversed, cx);
+                    body.replace(edit.replacement().to_owned(), window, cx);
+                    body.set_selected_range_with_direction(inner, reversed, cx);
+                    body.focus_handle(cx).focus(window, cx);
+                }
+                Ok(None) => {}
+                Err(error) => failure = Some(error.to_string()),
+            }
+        });
+        if let Some(error) = failure { self.message = Some(error); cx.notify(); }
+    }
     fn focus_content(&self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.mode, NoteViewMode::Edit | NoteViewMode::Split) {
             self.body.focus_handle(cx).focus(window, cx);
@@ -214,6 +247,7 @@ impl NoteEditor {
             identity,
             baseline,
             mode,
+            presentation_epoch: 1,
             settings,
             save_on_close,
             confirm_discard,
@@ -297,6 +331,7 @@ impl NoteEditor {
             })
     }
     fn install(&mut self, destination: Destination, window: &mut Window, cx: &mut Context<Self>) {
+        self.presentation_epoch = self.presentation_epoch.wrapping_add(1).max(1);
         let Destination { note, identity, .. } = destination;
         self.baseline = note.content.clone();
         self.note = note;
@@ -580,6 +615,9 @@ impl NoteEditor {
                     };
                     if let Some(note) = note {
                         view.baseline = saved_input;
+                        if !same_identity(&view.identity, &view.note, &Identity::Existing, &note) {
+                            view.presentation_epoch = view.presentation_epoch.wrapping_add(1).max(1);
+                        }
                         view.note = note;
                         view.identity = Identity::Existing;
                         cx.notify();
@@ -664,6 +702,7 @@ impl Render for NoteEditor {
                     .label(label)
                     .on_click(cx.listener(move |view, _, window, cx| {
                         if view.current(window, cx) && !view.pending && view.decision.is_none() {
+                            if view.mode != mode { view.presentation_epoch = view.presentation_epoch.wrapping_add(1).max(1); }
                             view.mode = mode;
                             view.focus_content(window, cx);
                             cx.notify();
@@ -672,6 +711,23 @@ impl Render for NoteEditor {
             );
         }
         panel = panel.child(modes);
+        if matches!(self.mode, NoteViewMode::Edit | NoteViewMode::Split) {
+            let mut tools = div().flex().gap_2();
+            for (label, format) in [("Bold Selection", MarkdownInlineFormat::Strong), ("Italic Selection", MarkdownInlineFormat::Emphasis)] {
+                let receipt = self.mount.clone();
+                let mode = self.mode;
+                let presentation_epoch = self.presentation_epoch;
+                tools = tools.child(Button::new(SharedString::from(format!("note-format-{label}-{presentation_epoch}")))
+                    .label(label)
+                    .disabled(self.pending || self.switch_pending || self.decision.is_some())
+                    .on_click(cx.listener(move |view, _, window, cx| {
+                        if receipt.is_current() && receipt.matches(&view.mount) && view.presentation_epoch == presentation_epoch && view.mode == mode {
+                            view.format_selection(format.clone(), window, cx);
+                        }
+                    })));
+            }
+            panel = panel.child(tools);
+        }
         let mut content = div().flex().gap_2().w_full();
         if matches!(self.mode, NoteViewMode::Edit | NoteViewMode::Split) {
             content = content.child(
@@ -1078,8 +1134,24 @@ impl RootWindow {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClosePolicy, Destination, Identity, close_policy, decision_receipt_current, issued_receipt_current, open_attempt_current, preview_source, same_destination, same_identity, same_note, same_source,
+        ClosePolicy, Destination, Identity, close_policy, decision_receipt_current, inline_selection_edit, issued_receipt_current, open_attempt_current, preview_source, same_destination, same_identity, same_note, same_source,
     };
+    #[test]
+    fn inline_selection_adapter_preserves_unicode_crlf_and_exact_source() {
+        use multi_launcher::notes_markdown::MarkdownInlineFormat;
+        let source = "a\r\né🙂z";
+        let (edit, inner) = inline_selection_edit(source, 3..9, MarkdownInlineFormat::Strong).unwrap().unwrap();
+        let applied = edit.apply(source).unwrap();
+        assert_eq!(applied.source, "a\r\n**é🙂**z");
+        assert_eq!(&applied.source[inner], "é🙂");
+        assert!(edit.apply("changed").is_err());
+        let (italic, inner) = inline_selection_edit(source, 3..5, MarkdownInlineFormat::Emphasis).unwrap().unwrap();
+        let applied = italic.apply(source).unwrap();
+        assert_eq!(applied.source, "a\r\n*é*🙂z");
+        assert_eq!(&applied.source[inner], "é");
+        assert!(inline_selection_edit(source, 3..3, MarkdownInlineFormat::Strong).unwrap().is_none());
+        assert!(inline_selection_edit(source, 4..5, MarkdownInlineFormat::Strong).is_err());
+    }
     use multi_launcher::plugins::note::Note;
 
     fn note(slug: &str, path: &str) -> Note {
