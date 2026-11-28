@@ -658,18 +658,7 @@ impl<'a> SourcePositions<'a> {
     }
 
     pub fn line_range(&self, one_based: usize) -> Option<Range<usize>> {
-        if one_based == 0 {
-            return None;
-        }
-        let mut start = 0;
-        for (index, line) in self.source.split('\n').enumerate() {
-            let end = start + line.strip_suffix('\r').unwrap_or(line).len();
-            if index + 1 == one_based {
-                return Some(start..end);
-            }
-            start += line.len() + 1;
-        }
-        None
+        crate::calculation_pad::line_content_range(self.source, one_based.checked_sub(1)?)
     }
 
     pub fn line_at(&self, byte: usize) -> Option<usize> {

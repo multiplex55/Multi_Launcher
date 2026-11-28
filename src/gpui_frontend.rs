@@ -2038,6 +2038,7 @@ enum GpuiBoundAction {
     OpenActionSheet,
     ToggleCoordinateHudProbe,
     OpenHashGenerator,
+    CalculationPadGoToLine,
     FocusDockedHashResize,
     RestartWithEgui,
     SearchHistoryOlder,
@@ -2059,6 +2060,12 @@ struct GpuiBoundKey {
 // Keep the shortcut shown in Quick Help and optional process-level shortcut
 // collision checks tied to the exact strings registered by GPUI below.
 const GPUI_BOUND_KEYS: &[GpuiBoundKey] = &[
+    GpuiBoundKey {
+        chord: "ctrl-g",
+        context: "CalculationPad",
+        label: "Go to line",
+        action: GpuiBoundAction::CalculationPadGoToLine,
+    },
     GpuiBoundKey {
         chord: "ctrl-enter",
         context: "LauncherSearch",
@@ -2142,6 +2149,9 @@ fn gpui_key_bindings() -> Vec<KeyBinding> {
             GpuiBoundAction::OpenHashGenerator => {
                 KeyBinding::new(binding.chord, OpenHashGenerator, Some(binding.context))
             }
+            GpuiBoundAction::CalculationPadGoToLine => {
+                KeyBinding::new(binding.chord, CalculationPadGoToLine, Some(binding.context))
+            }
             GpuiBoundAction::FocusDockedHashResize => KeyBinding::new(
                 binding.chord,
                 FocusDockedHashResize,
@@ -2170,6 +2180,17 @@ fn gpui_key_bindings() -> Vec<KeyBinding> {
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod calculation_pad_shortcut_tests {
+    use super::{GPUI_BOUND_KEYS, GpuiBoundAction};
+
+    #[test]
+    fn calculation_pad_and_root_ctrl_g_have_distinct_contexts() {
+        assert!(GPUI_BOUND_KEYS.iter().any(|key| key.chord == "ctrl-g" && key.context == "CalculationPad" && matches!(key.action, GpuiBoundAction::CalculationPadGoToLine)));
+        assert!(GPUI_BOUND_KEYS.iter().any(|key| key.chord == "ctrl-g" && key.context == "RootWindow" && matches!(key.action, GpuiBoundAction::OpenHashGenerator)));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2308,6 +2329,7 @@ gpui_kit::actions!([
     OpenToastLog,
     ViewToastLog,
     OpenHashGenerator,
+    CalculationPadGoToLine,
     SearchHistoryOlder,
     SearchHistoryNewer,
     FocusDockedHashResize,

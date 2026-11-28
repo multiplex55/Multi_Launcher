@@ -1,5 +1,6 @@
 //! Retained Calculation Pad editor, backed by the shared session.
 use super::*;
+use gpui_kit::EntityInputHandler;
 #[path = "calculation_pad_find.rs"]
 mod find;
 #[path = "calculation_pad_format.rs"]
@@ -84,6 +85,15 @@ fn copy_basis_is_current(session: Option<&CalculationPadSession>, basis: Evaluat
     session.is_some_and(|session| session.pending_transition().is_none() && session.evaluation_basis() == Some(basis))
 }
 
+fn navigation_source_is_current(session: Option<&CalculationPadSession>, basis: EvaluationBasis, editor: &str, composing: bool) -> bool {
+    !composing && session.is_some_and(|session| session.pending_transition().is_none()
+        && session.evaluation_basis() == Some(basis) && session.source() == Some(editor))
+}
+
+fn result_context_current(context: Option<(EvaluationBasis, LineId, u64, u64)>, basis: EvaluationBasis, line: LineId, revision: u64, serial: u64) -> bool {
+    context == Some((basis, line, revision, serial))
+}
+
 pub(super) fn current_provider(
     query: &str,
     action: &Action,
@@ -132,6 +142,10 @@ pub(super) struct CalculationPadView {
     focus_guard: Option<Subscription>,
     active_guard: Option<Subscription>,
     message: Option<String>,
+    result_context: Option<(EvaluationBasis, LineId, u64, u64)>,
+    result_context_serial: u64,
+    result_focus: HashMap<LineId, FocusHandle>,
+    result_context_focus: FocusHandle,
 }
 
 impl CalculationPadView {
@@ -223,6 +237,10 @@ impl CalculationPadView {
             focus_guard: None,
             active_guard: None,
             message: None,
+            result_context: None,
+            result_context_serial: 0,
+            result_focus: HashMap::new(),
+            result_context_focus: cx.focus_handle(),
         }
     }
     pub(super) fn blocks_close(&self) -> bool {
@@ -243,6 +261,11 @@ impl CalculationPadView {
         if self.pending_copy || self.format.busy || (matches!(command, DocumentCommand::Close) && self.format.dirty() && !self.format.uncertain) || !self.current(window, cx)
             || !document_receipt_current(self.session.as_ref(), expected, expected_pending, self.document_revision, revision) { return; }
         let Some(permit) = self.admission.admit() else { return; };
+        if matches!(command, DocumentCommand::New | DocumentCommand::Open(_) | DocumentCommand::Close | DocumentCommand::Resolve(_)) {
+            self.reset_find(window, cx);
+            self.result_context = None;
+            self.result_focus.clear();
+        }
         self.editor.focus_handle(cx).focus(window, cx);
         let Some(mut session) = self.session.take() else { return; };
         let was_dirty = session.is_dirty();
@@ -316,6 +339,8 @@ impl CalculationPadView {
                 if view.session.as_ref().is_some_and(|session| session.source().is_none()) {
                     view.reset_find(window, cx);
                     view.open = false;
+                    view.result_context = None;
+                    view.result_focus.clear();
                     view.owner.retire();
                     if lease.load(Ordering::Acquire) && view.focus.contains_focused(window, cx) && window.is_window_active() && let Some(root) = view.root.upgrade() {
                         root.update(cx, |root, cx| root.query.focus_handle(cx).focus(window, cx));
@@ -356,6 +381,63 @@ impl CalculationPadView {
                 root.read(cx)
                     .external_owner_is_current(window.focused(cx).as_ref(), window, cx)
             })
+    }
+    fn navigation_current(&self, basis: EvaluationBasis, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.current(window, cx) { return false; }
+        let composing = self.editor.update(cx, |editor, cx| editor.marked_text_range(window, cx).is_some());
+        navigation_source_is_current(self.session.as_ref(), basis, self.editor.read(cx).value().as_str(), composing)
+    }
+    fn reveal_source(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let root = self.root.clone();
+        let entity = cx.entity_id();
+        let mount = self.mount.clone();
+        let host = window.window_handle().window_id();
+        let revision = self.visibility.request_revision.load(Ordering::Acquire);
+        let Some(focused) = window.focused(cx) else { return; };
+        window.defer(cx, move |window, cx| {
+            let _ = root.update(cx, |root, cx| {
+                if mount.is_current() && window.is_window_active()
+                    && focused.is_focused(window)
+                    && root.root_visibility.request_revision.load(Ordering::Acquire) == revision
+                    && root.native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity))
+                    && root.calculation_pad_view.as_ref().is_some_and(|view| {
+                        view.entity_id() == entity && view.read(cx).mount.matches(&mount)
+                    }) && root.root_window.is_some_and(|window| window.window_id() == host) {
+                    root.reveal_calculation_pad(host, cx);
+                }
+            });
+        });
+    }
+
+    fn navigate_result(&mut self, basis: EvaluationBasis, line: LineId, mount: &utility_mount::MountReceipt, revision: u64, serial: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if !mount.is_current() || !mount.matches(&self.mount)
+            || self.visibility.request_revision.load(Ordering::Acquire) != revision
+            || !result_context_current(self.result_context, basis, line, revision, serial)
+            || !self.navigation_current(basis, window, cx) { return; }
+        let Some(session) = self.session.as_ref() else { return; };
+        if session.displayed_evaluation().is_none_or(|evaluation| evaluation.basis != basis) { return; }
+        let Some(location) = session.resolve_dependency_line(basis.document, basis.incarnation, line) else { return; };
+        let offset = location.source_range.start;
+        self.editor.update(cx, |editor, cx| editor.set_selected_range(offset..offset, cx));
+        self.editor.focus_handle(cx).focus(window, cx);
+        self.reveal_source(window, cx);
+        self.result_context = None;
+        cx.notify();
+    }
+    fn dismiss_result_context(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some((basis, line, revision, _)) = self.result_context.take() else { return false; };
+        let Some(row_focus) = self.result_focus.get(&line).cloned() else { return false; };
+        let owned_focus = row_focus.is_focused(window) || self.result_context_focus.is_focused(window);
+        if owned_focus && self.visibility.request_revision.load(Ordering::Acquire) == revision
+            && self.navigation_current(basis, window, cx)
+            && self.session.as_ref().is_some_and(|session| session.resolve_dependency_line(basis.document, basis.incarnation, line).is_some()) {
+            row_focus.focus(window, cx);
+            cx.notify();
+            true
+        } else {
+            cx.notify();
+            false
+        }
     }
     fn copy(
         &mut self,
@@ -541,7 +623,9 @@ impl Drop for CalculationPadView {
 impl Render for CalculationPadView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(session) = self.session.as_mut() else {
-            return div().id("calculation-pad-busy").track_focus(&self.focus).flex().flex_col().gap_2()
+            return div().id("calculation-pad-busy").key_context("CalculationPad").track_focus(&self.focus)
+                .capture_action(cx.listener(|_, _: &CalculationPadGoToLine, _, cx| cx.stop_propagation()))
+                .flex().flex_col().gap_2()
                 .child(Label::new("Calculation Pad"))
                 .child(Textarea::new(&self.editor).readonly(true).aria_label("Calculation Pad source"))
                 .child(Label::new("Working with the saved Pad…")).into_any_element();
@@ -575,6 +659,10 @@ impl Render for CalculationPadView {
             .id("calculation-pad")
             .key_context("CalculationPad")
             .track_focus(&self.focus)
+            .capture_action(cx.listener(|view, _: &CalculationPadGoToLine, window, cx| {
+                view.open_goto(window, cx);
+                cx.stop_propagation();
+            }))
             .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Search, window, cx| {
                 if view.open_find(false, window, cx) { cx.stop_propagation(); }
             }))
@@ -582,12 +670,14 @@ impl Render for CalculationPadView {
                 if view.open_find(true, window, cx) { cx.stop_propagation(); }
             }))
             .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Escape, window, cx| {
-                if view.close_find(window, cx) { cx.stop_propagation(); }
+                if view.dismiss_result_context(window, cx) || view.close_find(window, cx) { cx.stop_propagation(); }
             }))
             .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.key == "escape" && event.keystroke.modifiers == Modifiers::default()
-                    && !event.is_held && view.close_find(window, cx) {
-                    window.prevent_default(); cx.stop_propagation();
+                    && !event.is_held {
+                    if view.dismiss_result_context(window, cx) || view.close_find(window, cx) {
+                        window.prevent_default(); cx.stop_propagation();
+                    }
                 }
             }))
             .capture_action(cx.listener(|view, _: &gpui_kit::base::input::Undo, window, cx| {
@@ -616,9 +706,10 @@ impl Render for CalculationPadView {
             .p_3()
             .child(Label::new("Calculation Pad"))
             .child(Label::new(format!("{name}{}", if dirty { " · Unsaved" } else { "" })))
-            .child(Textarea::new(&self.editor).readonly(pending.is_some()).aria_label("Calculation Pad source"))
-            .child(Label::new(format!("Calculation: {status}")));
+            ;
         if let Some(find) = self.find_panel(cx) { panel = panel.child(find); }
+        panel = panel.child(Textarea::new(&self.editor).readonly(pending.is_some()).aria_label("Calculation Pad source"))
+            .child(Label::new(format!("Calculation: {status}")));
         panel = panel.child(self.format_panel(basis, has_precision, has_percent, pending.is_some(), cx));
         let mut controls = div().flex().gap_2();
         for (name, kind) in [
@@ -732,7 +823,10 @@ impl Render for CalculationPadView {
         if stale {
             panel = panel.child(Label::new("Results are out of date."));
         }
+        if displayed.is_none() { self.result_focus.clear(); self.result_context = None; }
         if let Some(evaluation) = displayed {
+            let current_lines = evaluation.lines.iter().map(|row| row.id).collect::<HashSet<_>>();
+            self.result_focus.retain(|id, _| current_lines.contains(id));
             if let Some(diagnostic) = &evaluation.diagnostic {
                 panel = panel.child(Label::new(format!("Document error: {diagnostic}")));
             }
@@ -754,6 +848,15 @@ impl Render for CalculationPadView {
                 };
                 let id = row.id;
                 let row_basis = evaluation.basis;
+                let row_mount = self.mount.clone();
+                let open_mount = row_mount.clone();
+                let key_mount = row_mount.clone();
+                let row_focus = self.result_focus.entry(id).or_insert_with(|| cx.focus_handle()).clone();
+                let context_focus = self.result_context_focus.clone();
+                let key_focus = row_focus.clone();
+                let row_visibility_revision = self.visibility.request_revision.load(Ordering::Acquire);
+                let context_serial = self.result_context.and_then(|(basis, line, revision, serial)|
+                    (basis == row_basis && line == id && revision == row_visibility_revision).then_some(serial));
                 rows = rows.child(
                     div()
                         .id(SharedString::from(format!(
@@ -763,7 +866,39 @@ impl Render for CalculationPadView {
                         )))
                         .flex()
                         .gap_2()
-                        .child(Label::new(format!("{}  {value}", row.line_index + 1)))
+                        .capture_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| {
+                            let modifiers = event.keystroke.modifiers;
+                            if !event.is_held && event.keystroke.key == "f10" && modifiers.shift
+                                && !modifiers.control && !modifiers.alt && !modifiers.platform
+                                && key_focus.is_focused(window) {
+                                window.prevent_default(); cx.stop_propagation();
+                                if key_mount.is_current() && key_mount.matches(&view.mount)
+                                    && view.visibility.request_revision.load(Ordering::Acquire) == row_visibility_revision
+                                    && view.navigation_current(row_basis, window, cx) {
+                                    view.result_context_serial = view.result_context_serial.wrapping_add(1);
+                                    view.result_context = Some((row_basis, id, row_visibility_revision, view.result_context_serial));
+                                    cx.notify();
+                                }
+                            }
+                        }))
+                        .on_mouse_down(MouseButton::Right, cx.listener(move |view, _, window, cx| {
+                            if open_mount.is_current() && open_mount.matches(&view.mount)
+                                && view.visibility.request_revision.load(Ordering::Acquire) == row_visibility_revision
+                                && view.navigation_current(row_basis, window, cx) {
+                                view.result_context_serial = view.result_context_serial.wrapping_add(1);
+                                view.result_context = Some((row_basis, id, row_visibility_revision, view.result_context_serial));
+                                cx.notify();
+                            }
+                        }))
+                        .child(Button::new(SharedString::from(format!("calculation-pad-row-focus-{:?}-{}", row_basis, id.get())))
+                            .label(format!("{}  {value}", row.line_index + 1)).tab_stop(true).track_focus(&row_focus))
+                        .when_some(context_serial, |row, serial| row.child(
+                            Button::new(SharedString::from(format!("calculation-pad-go-source-{:?}-{}", row_basis, id.get())))
+                                .label("Go to source")
+                                .track_focus(&context_focus)
+                                .disabled(pending.is_some() || !current_evaluation || stale)
+                                .on_click(cx.listener(move |view, _, window, cx| view.navigate_result(row_basis, id, &row_mount, row_visibility_revision, serial, window, cx)))
+                        ))
                         .child(
                             Button::new(SharedString::from(format!(
                                 "calculation-pad-copy-{:?}-{}",
@@ -862,7 +997,10 @@ impl RootWindow {
                 }
             });
         });
-        let id = window.window_handle().window_id();
+        self.reveal_calculation_pad(window.window_handle().window_id(), cx);
+    }
+
+    fn reveal_calculation_pad(&mut self, id: WindowId, cx: &mut Context<Self>) {
         let index = self.clipboard_scroll_item(id, cx)
             + usize::from(self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
             + usize::from(self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
@@ -884,6 +1022,36 @@ impl RootWindow {
 #[cfg(test)]
 mod tests {
     use super::{CopyTarget, copy_basis_is_current, copy_payload, current_provider, document_receipt_current};
+
+    #[test]
+    fn source_navigation_rejects_stale_basis_queued_edit_and_composition() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = multi_launcher::platform::app_data::AppDataRoot::from_settings_path(dir.path().join("settings.json")).unwrap();
+        let mut session = multi_launcher::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("雪\r\nnext\n").unwrap();
+        let basis = session.evaluation_basis().unwrap();
+        assert!(super::navigation_source_is_current(Some(&session), basis, "雪\r\nnext\n", false));
+        assert!(!super::navigation_source_is_current(Some(&session), basis, "雪\r\nchanged\n", false));
+        assert!(!super::navigation_source_is_current(Some(&session), basis, "雪\r\nnext\n", true));
+        session.replace_source("new").unwrap();
+        assert!(!super::navigation_source_is_current(Some(&session), basis, "new", false));
+    }
+
+    #[test]
+    fn result_navigation_context_rejects_superseded_and_reopened_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = multi_launcher::platform::app_data::AppDataRoot::from_settings_path(dir.path().join("settings.json")).unwrap();
+        let mut session = multi_launcher::calculation_pad::CalculationPadSession::new(&root);
+        session.replace_source("1\n2").unwrap();
+        let basis = session.evaluation_basis().unwrap();
+        let lines = session.line_ids().unwrap();
+        let first = lines[0]; let second = lines[1];
+        let context = Some((basis, first, 5, 7));
+        assert!(super::result_context_current(context, basis, first, 5, 7));
+        assert!(!super::result_context_current(context, basis, second, 5, 7));
+        assert!(!super::result_context_current(context, basis, first, 5, 8));
+        assert!(!super::result_context_current(context, basis, first, 6, 7));
+    }
     use multi_launcher::calculation_pad::CalculationPadSession;
     use multi_launcher::plugin::Plugin;
     use std::collections::HashSet;

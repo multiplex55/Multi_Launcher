@@ -580,7 +580,9 @@ impl CalculationDocument {
     }
 }
 
-fn line_content_range(source: &str, requested_line: usize) -> Option<Range<usize>> {
+/// Return a zero-based physical line as UTF-8 byte offsets, excluding CRLF.
+/// A trailing line break creates a final empty line.
+pub fn line_content_range(source: &str, requested_line: usize) -> Option<Range<usize>> {
     let mut offset = 0;
     for (line_index, line) in source.split('\n').enumerate() {
         let end = offset + line.len();
@@ -3299,6 +3301,15 @@ fn quantity_bindings(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn physical_line_ranges_preserve_utf8_crlf_and_final_empty_line() {
+        let source = "雪a\r\nβ\r\n";
+        assert_eq!(super::line_content_range(source, 0), Some(0..4));
+        assert_eq!(super::line_content_range(source, 1), Some(6..8));
+        assert_eq!(super::line_content_range(source, 2), Some(10..10));
+        assert_eq!(super::line_content_range(source, 3), None);
+        assert_eq!(super::line_content_range("", 0), Some(0..0));
+    }
     use super::{
         CalculationDocument, CalculationEvaluation, CalculationValue, DiagnosticKind, LineOutcome,
         MAX_DEPENDENCIES, MAX_DEPENDENCIES_PER_LINE, MAX_DOCUMENT_BYTES, MAX_EXPRESSION_BYTES,

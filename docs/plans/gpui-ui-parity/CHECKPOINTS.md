@@ -2428,3 +2428,15 @@ The scoped locked `fast-dev` shared check passed in 26.74s and the integrated ch
 Stage 2. Paired Windows replay at 1516 × 937 remains open with both Paste Sequences shortcuts disabled. In each owned Bookmark profile, save on, add an owned URL and check for `bm add `. Save off, add a second owned URL and check that the query clears. Read back both saved states and keep the profiles separate.
 
 Continue P0.11 Calculation Pad Go to line and result-to-source navigation.
+
+### P0.11 Calculation Pad source navigation
+
+Use Ctrl+G with focus in the retained Pad to open Go to line. Enter or Go moves the caret to a one-based physical line. The shared UTF-8 range helper handles CRLF and the final blank line, and the egui editor uses the same helper. Invalid numbers show feedback beside the field. Opening a source tool retires a prior result context. The root Ctrl+G binding still opens Hash Generator outside the Pad.
+
+Right-click an evaluated row or use Shift+F10 while the row is focused to expose Go to source. Value and error rows resolve the exact line from the current shared evaluation. A stale result, superseded row action, queued source edit, active composition, pending document transition or retired host cannot move the caret. Both routes focus the source and request the Pad’s existing launcher scroll reveal. The toolkit scrolls its inner editor to the caret. Copy and document ownership continue through their existing routes.
+
+The locked `fast-dev` library check passed in 1m 12s, the integrated check in 1m 01s and the scoped launcher correction check in 8.32s. The grouped link took 7m 18s. Review found one remaining first-open focus-tree race while that link ran. The exact deferred focus handle now remains authoritative before the toolbar first paints. The launcher-only follow-up link took 15.99s. Library run `5f5248c8-a188-49ca-ba4a-685b4fe4bf8c` passed six focused cases in 1.649s. Final launcher run `e10253b7-59a2-4afd-83c0-7db6c8fe73ef` passed six in 2.685s.
+
+Stage 2. Paired Windows replay remains open at 1516 × 937 with matching scaling and both Paste Sequences shortcuts disabled. Use the owned manual CRLF document with 82 physical lines and an error on line 80 after Calculate. Verify offscreen Go before evaluation, invalid and final blank line handling, fresh Go after editing, right-click and Shift+F10 source navigation, Escape ownership and root Ctrl+G after closing the Pad. Compact reachability remains supplemental.
+
+Continue P0.02 stock `check missing` and checked Edit App from exact missing saved application rows.

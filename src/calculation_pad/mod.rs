@@ -32,6 +32,7 @@ mod statistics;
 mod vector;
 mod worker;
 pub use worker::EvaluationBasis;
+pub use document::line_content_range;
 pub use limits::{ABSOLUTE_BYTES as MAX_ADMITTED_DOCUMENT_BYTES, ABSOLUTE_LINES as MAX_ADMITTED_SOURCE_LINES};
 pub(crate) use limits::profile_limits;
 pub(crate) use document::{MAX_WORK, MAX_SEQUENCE_ELEMENTS, MAX_LOOP_ITERATIONS, MAX_LOOP_DEPTH, MAX_BLOCK_DEPTH, MAX_VECTOR_COMPONENT_WORK, MAX_VECTOR_EXPRESSION_BYTES};
