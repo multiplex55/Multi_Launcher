@@ -1728,9 +1728,76 @@ pub enum CheckedNewNote {
     Draft(Note),
 }
 
+/// A pathless stock draft and its lookup slug, frozen before a deferred open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedNewNote {
+    slug: String,
+    draft: Note,
+}
+
+impl PreparedNewNote {
+    pub fn slug(&self) -> &str {
+        &self.slug
+    }
+    pub fn draft(&self) -> &Note {
+        &self.draft
+    }
+    pub fn into_draft(self) -> Note {
+        self.draft
+    }
+}
+
+/// Construct the same unsaved note used by the stock editor; no file is read or written.
+pub fn prepare_new_note<Tz: chrono::TimeZone>(
+    slug: &str,
+    template: Option<&str>,
+    now: chrono::DateTime<Tz>,
+) -> PreparedNewNote
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let title = slug.replace('-', " ");
+    let content = match template {
+        Some(template) => {
+            let filled = expand_template_variables(template, &title, slug, now);
+            if filled.starts_with("# ") {
+                filled
+            } else {
+                format!("# {title}\n\n{filled}")
+            }
+        }
+        None => format!("# {title}\n\n"),
+    };
+    let aliases = extract_aliases(&content);
+    let draft = Note {
+        title,
+        path: PathBuf::new(),
+        content,
+        tags: Vec::new(),
+        links: Vec::new(),
+        slug: String::new(),
+        alias: aliases.first().cloned(),
+        aliases,
+        entity_refs: Vec::new(),
+    };
+    PreparedNewNote {
+        slug: slug.to_owned(),
+        draft,
+    }
+}
+
 /// Resolve the stock plain-New slug without creating a Markdown file.
 /// Ambiguous slugs or primary aliases are never silently assigned an owner.
 pub fn resolve_plain_new_note_if(slug: &str, is_current: impl Fn() -> bool) -> anyhow::Result<CheckedNewNote> {
+    resolve_prepared_new_note_if(&prepare_new_note(slug, None, chrono::Local::now()), is_current)
+}
+
+/// Resolve an immutable prepared draft against the current exact primary identity.
+pub fn resolve_prepared_new_note_if(
+    prepared: &PreparedNewNote,
+    is_current: impl Fn() -> bool,
+) -> anyhow::Result<CheckedNewNote> {
+    let slug = prepared.slug();
     anyhow::ensure!(!slug.is_empty() && slugify(slug) == slug, "Invalid note slug");
     let _mutation = NOTE_MUTATION_LOCK.lock().map_err(|_| anyhow::anyhow!("note mutation lock poisoned"))?;
     anyhow::ensure!(is_current(), "Note read superseded");
@@ -1743,13 +1810,8 @@ pub fn resolve_plain_new_note_if(slug: &str, is_current: impl Fn() -> bool) -> a
         anyhow::ensure!(is_current(), "Note read superseded");
         return Ok(CheckedNewNote::Existing(note));
     }
-    let title = slug.replace('-', " ");
-    let content = format!("# {title}\n\n");
     anyhow::ensure!(is_current(), "Note read superseded");
-    Ok(CheckedNewNote::Draft(Note {
-        title, path: PathBuf::new(), content, tags: Vec::new(), links: Vec::new(),
-        slug: String::new(), alias: None, aliases: Vec::new(), entity_refs: Vec::new(),
-    }))
+    Ok(CheckedNewNote::Draft(prepared.draft.clone()))
 }
 
 /// Save a pathless full-editor draft without replacing an independently created note.
@@ -5680,6 +5742,55 @@ Body",
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Alpha\nAlias: old\n\nplain body");
         assert_eq!(saved.alias.as_deref(), Some("old"));
         assert!(write_quick_note_if(QuickNoteDraft::Editor { original: &original, content: "later" }, || true).is_err());
+    }
+
+    #[test]
+    fn prepared_note_uses_stock_heading_aliases_and_frozen_template_variables() {
+        let now = chrono::FixedOffset::east_opt(0)
+            .unwrap()
+            .with_ymd_and_hms(2026, 6, 24, 7, 8, 9)
+            .unwrap();
+        let prepared = prepare_new_note(
+            "2026-06-24",
+            Some("# {{title}}\nAlias: first\nAliases: second, FIRST\n\n{{date}} {{datetime}} {{time}}"),
+            now,
+        );
+        assert_eq!(prepared.slug(), "2026-06-24");
+        let draft = prepared.draft();
+        assert_eq!(draft.title, "2026 06 24");
+        assert_eq!(draft.content, "# 2026 06 24\nAlias: first\nAliases: second, FIRST\n\n2026-06-24 2026-06-24 07:08:09 07:08:09");
+        assert_eq!(draft.alias.as_deref(), Some("first"));
+        assert_eq!(draft.aliases, vec!["first".to_owned(), "second".to_owned()]);
+        assert!(draft.path.as_os_str().is_empty() && draft.slug.is_empty());
+
+        let no_heading = prepare_new_note("daily-note", Some("Body {{year}}"), now);
+        assert_eq!(no_heading.draft().content, "# daily note\n\nBody 2026");
+        let plain = prepare_new_note("daily-note", None, now);
+        assert_eq!(plain.draft().content, "# daily note\n\n");
+    }
+
+    #[test]
+    fn prepared_note_resolves_existing_before_frozen_draft_without_writing() {
+        let _lock = NOTES_ENV_LOCK.lock().expect("notes env lock poisoned");
+        let dir = tempfile::tempdir().unwrap();
+        let _env = NotesDirEnvGuard::set(dir.path());
+        let prepared = prepare_new_note("daily-note", Some("# Custom\n\n{{time}}"), chrono::Local::now());
+        let draft = match resolve_prepared_new_note_if(&prepared, || true).unwrap() {
+            CheckedNewNote::Draft(note) => note,
+            CheckedNewNote::Existing(_) => panic!("expected a draft"),
+        };
+        assert_eq!(&draft, prepared.draft());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+        std::fs::write(dir.path().join("other.md"), "# Other\nAlias: daily-note\n\nbody").unwrap();
+        let existing = match resolve_prepared_new_note_if(&prepared, || true).unwrap() {
+            CheckedNewNote::Existing(note) => note,
+            CheckedNewNote::Draft(_) => panic!("expected existing note"),
+        };
+        assert_eq!(existing.slug, "other");
+        std::fs::write(dir.path().join("daily-note.md"), "# Daily note\n\nbody").unwrap();
+        assert!(resolve_prepared_new_note_if(&prepared, || true).is_err());
+        assert!(resolve_prepared_new_note_if(&prepared, || false).is_err());
     }
 
     #[test]

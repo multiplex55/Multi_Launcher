@@ -2206,3 +2206,15 @@ Locked `fast-dev` library and launcher checks passed in 31.55s and 27.84s. Indep
 P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open with both Paste Sequence shortcuts disabled. Check checkbox keyboard focus, Cancel, Save and reopen, explicit egui readback and fresh startup with the option on and off. Compare unchanged Workspace and Bindings bytes in the GPUI profiles. Explicit Reload scheduling, remaining MultiManager settings and runtime retain their existing criteria.
 
 Continue P0.09 checked `note today` in the retained Note Editor.
+
+### P0.09 checked daily note
+
+Exact stock `note today` and `notes today` open the retained Note Editor from Search. The installed Notes owner selects the local date and the enabled `today` template, then `default`, then the standard heading. The activation checks the full result, effective query and note revision. Existing canonical notes win over a new draft. GPUI and egui share heading insertion, template variables and alias extraction.
+
+The accepted activation prepares the draft once and retains those bytes through a deferred dirty switch. The recheck still resolves canonical identity and refuses changed or ambiguous destinations. Reopening the same draft retains current edits. Opening writes no Markdown or template file. The existing first Save keeps its no-clobber behavior. Explicit arbitrary template arguments, template editing and other Note Editor criteria remain open.
+
+Locked `fast-dev` checks passed for the shared library in 1m 12s and for the final library and launcher in 12.30s. Independent review cleared exact result provenance, stock template precedence, frozen dirty-switch state and egui compatibility. The grouped link took 16m 58s. Nextest run `44d3b3f2-0f2e-4366-b3d2-962b9452697a` passed all nine selected cases across both binaries in 3.438s with 9594 skipped.
+
+P0.09 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use matched disposable profiles with both Paste Sequence shortcuts disabled, an owned notes directory and separate owned template directory. Check the heading, alias and frozen time expansion, same-day reopen, absence of a Markdown file before explicit Save, existing-day precedence and egui readback.
+
+Continue P0.17 typed Timer and Alarm creation from Search. Earlier P0 workflows with working source continue awaiting essential native replay.

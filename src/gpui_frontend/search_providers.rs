@@ -118,13 +118,15 @@ impl multi_launcher::plugin::Plugin for QuickNotesBare {
             vec![multi_launcher::plugins::note::quick_notes_action()]
         } else {
             let command = query.trim().split_whitespace().nth(1).unwrap_or("").to_ascii_lowercase();
-            if matches!(command.as_str(), "new" | "add" | "create") {
+            let today = query.trim().eq_ignore_ascii_case("note today")
+                || query.trim().eq_ignore_ascii_case("notes today");
+            if matches!(command.as_str(), "new" | "add" | "create") || today {
                 if query.to_ascii_lowercase().contains("--template") { return Vec::new(); }
                 return self.owner.lock().ok().and_then(|owner| owner.clone()).map_or_else(Vec::new, |plugin| {
                     let Some(snapshot) = self.snapshots.current() else { return Vec::new(); };
                     let rows: Vec<Action> = plugin.search(query).into_iter().filter(|action|
-                        action.action.starts_with("note:new:") && action.args.is_none()
-                        && matches!(multi_launcher::commands::parse_action(action), Ok(multi_launcher::commands::Command::Note(multi_launcher::commands::NoteCommand::New { template: None, .. })))
+                        action.action.starts_with("note:new:")
+                        && matches!(multi_launcher::commands::parse_action(action), Ok(multi_launcher::commands::Command::Note(multi_launcher::commands::NoteCommand::New { template, .. })) if today || (template.is_none() && action.args.is_none()))
                     ).collect();
                     if multi_launcher::plugins::note::note_version() != snapshot.version { return Vec::new(); }
                     if let Ok(mut slot) = self.new_projected.lock() { *slot = Some((query.to_owned(), snapshot.version, rows.clone())); }
@@ -753,6 +755,9 @@ mod tests {
         let old_templates = std::env::var_os("ML_NOTE_TEMPLATES_DIR");
         unsafe { std::env::set_var("ML_NOTES_DIR", dir.path()); std::env::set_var("ML_NOTE_TEMPLATES_DIR", dir.path().join("templates")); }
         std::fs::write(dir.path().join("alpha.md"), "# Alpha\n\nunique body needle").unwrap();
+        std::fs::create_dir(dir.path().join("templates")).unwrap();
+        std::fs::write(dir.path().join("templates/today.md"), "# Today\n\n{{date}}").unwrap();
+        std::fs::write(dir.path().join("templates/default.md"), "# Default").unwrap();
         let provider = super::QuickNotesBare::default();
         *provider.owner.lock().unwrap() = Some(std::sync::Arc::new(multi_launcher::plugins::note::NotePlugin::new()));
         let rows = provider.search("note search needle");
@@ -771,7 +776,30 @@ mod tests {
         }
         assert!(provider.search("note new alpha --template weekly").is_empty());
         assert!(provider.search("note new alpha --template").is_empty());
-        assert!(provider.search("note today").is_empty());
+        for query in ["note today", "notes today"] {
+            let rows = provider.search(query);
+            assert_eq!(rows.len(), 1);
+            assert!(matches!(multi_launcher::commands::parse_action(&rows[0]),
+                Ok(multi_launcher::commands::Command::Note(multi_launcher::commands::NoteCommand::New { template: Some(ref name), .. })) if name == "today"));
+            let projected = provider.new_projected.lock().unwrap();
+            assert_eq!(projected.as_ref().unwrap().2, rows);
+            let mut forged = rows[0].clone();
+            forged.args = Some(r#"{"template":"default"}"#.into());
+            assert!(!projected.as_ref().unwrap().2.contains(&forged));
+        }
+        assert!(provider.search("note today extra").is_empty());
+        multi_launcher::plugins::note::delete_template("today").unwrap();
+        let fallback = provider.search("note today");
+        assert!(matches!(multi_launcher::commands::parse_action(&fallback[0]),
+            Ok(multi_launcher::commands::Command::Note(multi_launcher::commands::NoteCommand::New { template: Some(ref name), .. })) if name == "default"));
+        multi_launcher::plugins::note::delete_template("default").unwrap();
+        assert!(provider.search("note today")[0].args.is_none());
+        multi_launcher::plugins::note::save_template("today", "# Today").unwrap();
+        let mut disabled = multi_launcher::plugins::note::NotePlugin::new();
+        let settings = multi_launcher::plugins::note::NotePluginSettings { templates_enabled: false, ..Default::default() };
+        disabled.apply_settings(&serde_json::to_value(settings).unwrap());
+        *provider.owner.lock().unwrap() = Some(std::sync::Arc::new(disabled));
+        assert!(provider.search("note today")[0].args.is_none());
         let stored = provider.projected.lock().unwrap();
         let (_, version, projection) = stored.as_ref().unwrap();
         assert_eq!(*version, multi_launcher::plugins::note::note_version());

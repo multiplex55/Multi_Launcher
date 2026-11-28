@@ -33,14 +33,26 @@ pub(super) enum OpenOrigin {
 enum Identity { Existing, New(String) }
 
 #[derive(Clone)]
-struct Destination { note: Note, identity: Identity, resolve_slug: Option<String>, omni: bool }
+struct Destination {
+    note: Note,
+    identity: Identity,
+    prepared: Option<Arc<note::PreparedNewNote>>,
+    omni: bool,
+}
 
 impl Destination {
-    fn existing(note: Note) -> Self { Self { note, identity: Identity::Existing, resolve_slug: None, omni: false } }
-    fn resolved(slug: String, result: CheckedNewNote) -> Self {
+    fn existing(note: Note) -> Self {
+        Self { note, identity: Identity::Existing, prepared: None, omni: false }
+    }
+    fn resolved(prepared: Arc<note::PreparedNewNote>, result: CheckedNewNote) -> Self {
+        let slug = prepared.slug().to_owned();
         match result {
-            CheckedNewNote::Existing(note) => Self { note, identity: Identity::Existing, resolve_slug: Some(slug), omni: false },
-            CheckedNewNote::Draft(note) => Self { note, identity: Identity::New(slug.clone()), resolve_slug: Some(slug), omni: false },
+            CheckedNewNote::Existing(note) => Self {
+                note, identity: Identity::Existing, prepared: Some(prepared), omni: false,
+            },
+            CheckedNewNote::Draft(note) => Self {
+                note, identity: Identity::New(slug), prepared: Some(prepared), omni: false,
+            },
         }
     }
 }
@@ -383,8 +395,9 @@ impl NoteEditor {
                         current_foreground_identity() == Some(native.identity)
                     })
             };
-            let result = if let Some(slug) = &expected.resolve_slug {
-                note::resolve_plain_new_note_if(slug, current).map(|resolved| Some(Destination::resolved(slug.clone(), resolved)))
+            let result = if let Some(prepared) = &expected.prepared {
+                note::resolve_prepared_new_note_if(prepared, current)
+                    .map(|resolved| Some(Destination::resolved(prepared.clone(), resolved)))
             } else {
                 note::read_note_exact_if(&expected.note.slug, Some(&expected.note.path), current).map(|note| note.map(Destination::existing))
             };
@@ -929,9 +942,11 @@ impl RootWindow {
         }
     }
     pub(super) fn open_checked_new_note(&mut self, version: u64, generation: u64, index: usize, query: String, action: Action, window: &mut Window, cx: &mut Context<Self>) {
-        let Ok(Command::Note(multi_launcher::commands::NoteCommand::New { slug, template: None })) = parse_action(&action) else { return; };
+        let Ok(Command::Note(multi_launcher::commands::NoteCommand::New { slug, template })) = parse_action(&action) else { return; };
         let effective = multi_launcher::common::query::split_action_filters(&query).0;
-        if !action.action.starts_with("note:new:") || action.args.is_some()
+        let today = effective.trim().eq_ignore_ascii_case("note today")
+            || effective.trim().eq_ignore_ascii_case("notes today");
+        if !action.action.starts_with("note:new:") || (!today && (template.is_some() || action.args.is_some()))
             || self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains("notes"))
             || !multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "notes")
             || self.search_catalog.providers.note_new_source(&effective, &action) != Some(version)
@@ -940,6 +955,10 @@ impl RootWindow {
         let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
         let Some(focus) = window.focused(cx) else { return; };
         let Some(permit) = self.restart_admission.admit() else { return; };
+        let template_body = template.as_deref().and_then(note::get_template);
+        let prepared = Arc::new(note::prepare_new_note(
+            &slug, template_body.as_deref(), chrono::Local::now(),
+        ));
         if let Some(view) = &self.note_editor_view { view.update(cx, |view, cx| view.revoke_switch(cx)); }
         let revision = self.root_visibility.request_revision.load(Ordering::Acquire);
         let lease = Arc::new(AtomicBool::new(true));
@@ -951,9 +970,10 @@ impl RootWindow {
         let attempt = open_epoch.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
         let worker_epoch = open_epoch.clone(); let worker_lease = lease.clone();
         let visibility = self.root_visibility.clone(); let admission = self.restart_admission.clone();
-        let worker_slug = slug.clone(); let host = window.window_handle();
+        let worker_prepared = prepared.clone();
+        let host = window.window_handle();
         let task = cx.background_executor().spawn(async move {
-            let result = note::resolve_plain_new_note_if(&worker_slug, || open_attempt_current(&worker_epoch, attempt)
+            let result = note::resolve_prepared_new_note_if(&worker_prepared, || open_attempt_current(&worker_epoch, attempt)
                 && worker_lease.load(Ordering::Acquire) && note::note_version() == version && !admission.is_fenced()
                 && json_utility::native_host_current(&visibility, revision, Some(native), false)
                 && current_foreground_identity() == Some(native.identity));
@@ -977,7 +997,7 @@ impl RootWindow {
                     || root.search_catalog.providers.note_new_source(&effective, &action) != Some(version)
                     || root.launcher_results.resolve_result(generation, index, &query).is_none_or(|row| row.action != action || row.origin != LauncherResultOrigin::NoteNew { version }) { return; }
                 match result {
-                    Ok(resolved) => { root.launcher_search_error = None; root.mount_note_destination(Destination::resolved(slug, resolved), native, window, cx); }
+                    Ok(resolved) => { root.launcher_search_error = None; root.mount_note_destination(Destination::resolved(prepared, resolved), native, window, cx); }
                     Err(error) => root.launcher_search_error = Some(format!("Could not open note: {error:#}")),
                 }
                 cx.notify();
@@ -1152,7 +1172,8 @@ mod tests {
         assert!(inline_selection_edit(source, 3..3, MarkdownInlineFormat::Strong).unwrap().is_none());
         assert!(inline_selection_edit(source, 4..5, MarkdownInlineFormat::Strong).is_err());
     }
-    use multi_launcher::plugins::note::Note;
+    use multi_launcher::plugins::note::{self, CheckedNewNote, Note};
+    use std::sync::Arc;
 
     fn note(slug: &str, path: &str) -> Note {
         Note {
@@ -1195,8 +1216,8 @@ mod tests {
         let draft = note("", "");
         assert!(same_identity(&Identity::New("alpha".into()), &draft, &Identity::New("alpha".into()), &draft));
         assert!(!same_identity(&Identity::New("alpha".into()), &draft, &Identity::New("beta".into()), &draft));
-        let destination = Destination { note: draft.clone(), identity: Identity::New("alpha".into()), resolve_slug: Some("alpha".into()), omni: false };
-        let existing = Destination { note: note("alpha", "alpha.md"), identity: Identity::Existing, resolve_slug: Some("alpha".into()), omni: false };
+        let destination = Destination { note: draft.clone(), identity: Identity::New("alpha".into()), prepared: None, omni: false };
+        let existing = Destination { note: note("alpha", "alpha.md"), identity: Identity::Existing, prepared: None, omni: false };
         assert!(!same_destination(&destination, &existing));
         assert!(same_destination(&destination, &destination.clone()));
     }
@@ -1223,6 +1244,26 @@ mod tests {
         assert!(!issued_receipt_current(&lease, 7, 8));
         lease.store(false, Ordering::Release);
         assert!(!issued_receipt_current(&lease, 7, 7));
+    }
+
+    #[test]
+    fn deferred_today_destination_retains_frozen_template_body() {
+        let prepared = Arc::new(note::prepare_new_note(
+            "2026-06-24", Some("# Daily\n\noriginal {{date}}"), chrono::Local::now(),
+        ));
+        let first = Destination::resolved(prepared.clone(), CheckedNewNote::Draft(prepared.draft().clone()));
+        let deferred = first.clone();
+        let resolved = Destination::resolved(
+            deferred.prepared.as_ref().unwrap().clone(),
+            CheckedNewNote::Draft(deferred.prepared.as_ref().unwrap().draft().clone()),
+        );
+        assert!(same_destination(&first, &resolved));
+        assert!(Arc::ptr_eq(first.prepared.as_ref().unwrap(), resolved.prepared.as_ref().unwrap()));
+        let newer = Arc::new(note::prepare_new_note(
+            "2026-06-24", Some("# Daily\n\nchanged"), chrono::Local::now(),
+        ));
+        let changed = Destination::resolved(newer.clone(), CheckedNewNote::Draft(newer.draft().clone()));
+        assert!(!same_destination(&first, &changed));
     }
 
     #[test]

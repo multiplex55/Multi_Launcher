@@ -7214,9 +7214,7 @@ impl LauncherApp {
         template: Option<&str>,
         origin: &utility_host::ChildOpenOrigin<S>,
     ) -> bool {
-        use crate::plugins::note::{
-            Note, expand_template_variables, extract_aliases, get_template, load_notes,
-        };
+        use crate::plugins::note::{get_template, load_notes, prepare_new_note};
         let note = load_notes()
             .unwrap_or_default()
             .into_iter()
@@ -7228,35 +7226,8 @@ impl LauncherApp {
                         .unwrap_or(false)
             })
             .unwrap_or_else(|| {
-                let title = slug.replace('-', " ");
-                let content = if let Some(tpl_name) = template {
-                    if let Some(tpl) = get_template(tpl_name) {
-                        let filled =
-                            expand_template_variables(&tpl, &title, slug, chrono::Local::now());
-                        if filled.starts_with("# ") {
-                            filled
-                        } else {
-                            format!("# {}\n\n{}", title, filled)
-                        }
-                    } else {
-                        format!("# {}\n\n", title)
-                    }
-                } else {
-                    format!("# {}\n\n", title)
-                };
-                let aliases = extract_aliases(&content);
-                let alias = aliases.first().cloned();
-                Note {
-                    title,
-                    path: std::path::PathBuf::new(),
-                    content,
-                    tags: Vec::new(),
-                    links: Vec::new(),
-                    slug: String::new(),
-                    alias,
-                    aliases,
-                    entity_refs: Vec::new(),
-                }
+                let template_body = template.and_then(get_template);
+                prepare_new_note(slug, template_body.as_deref(), chrono::Local::now()).into_draft()
             });
         self.focus_query = false;
         self.pending_show_query_focus = None;
