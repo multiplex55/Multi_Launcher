@@ -2,6 +2,7 @@
 use super::*;
 use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::timer_session::{TimerKind, TimerRow, TimerSession};
+mod picker;
 pub(super) const WAIT: &str = "Wait for the Timer or Alarm operation to finish.";
 
 pub(super) struct TypedTimerLane {
@@ -70,6 +71,14 @@ pub(super) struct TimerView {
     mount: utility_mount::MountReceipt,
     focus: FocusHandle,
     duration: Entity<InputState>,
+    _duration_sub: Subscription,
+    picker_hours: Entity<InputState>,
+    picker_minutes: Entity<InputState>,
+    picker_seconds: Entity<InputState>,
+    _picker_subs: Vec<Subscription>,
+    picker_parts: picker::Parts,
+    picker_projection: [String; 3],
+    observed_duration: Option<String>,
     label: Entity<InputState>,
     sound: usize,
     feedback: Option<String>,
@@ -90,6 +99,23 @@ impl TimerView {
     ) -> Self {
         let owner = utility_mount::MountOwner::default();
         let mount = owner.attach();
+        let duration = cx.new(|cx| InputState::new(window, cx).placeholder("Duration (for example 5m)"));
+        let duration_sub = cx.subscribe_in(&duration, window, |view: &mut Self, _, event: &InputEvent, window, cx| {
+            if matches!(event, InputEvent::Change) { view.sync_picker(window, cx); cx.notify(); }
+        });
+        let picker_hours = cx.new(|cx| InputState::new(window, cx).placeholder("Hours"));
+        let picker_minutes = cx.new(|cx| InputState::new(window, cx).placeholder("Minutes"));
+        let picker_seconds = cx.new(|cx| InputState::new(window, cx).placeholder("Seconds"));
+        let picker_subs = [&picker_hours, &picker_minutes, &picker_seconds].into_iter().enumerate().map(|(index, input)|
+            cx.subscribe_in(input, window, move |view: &mut Self, input, event: &InputEvent, window, cx| {
+                if !matches!(event, InputEvent::Change) { return; }
+                if (index != 2 || !view.alarm) && input.focus_handle(cx).is_focused(window)
+                    && view.picker_changed(cx) {
+                    view.sync_picker(window, cx);
+                    if view.picker_changed(cx) { view.apply_picker(window, cx, false); }
+                }
+                cx.notify();
+            })).collect();
         Self {
             open: true,
             session,
@@ -100,8 +126,15 @@ impl TimerView {
             owner,
             mount,
             focus: cx.focus_handle(),
-            duration: cx
-                .new(|cx| InputState::new(window, cx).placeholder("Duration (for example 5m)")),
+            duration,
+            _duration_sub: duration_sub,
+            picker_hours,
+            picker_minutes,
+            picker_seconds,
+            _picker_subs: picker_subs,
+            picker_parts: picker::Parts::default(),
+            picker_projection: Default::default(),
+            observed_duration: None,
             label: cx.new(|cx| InputState::new(window, cx).placeholder("Label (optional)")),
             sound: default_sound(),
             feedback: None,
@@ -110,6 +143,46 @@ impl TimerView {
             pause_active_guard: None,
             painted_rows: Vec::new(),
         }
+    }
+    fn sync_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.duration.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()) { return; }
+        let text = self.duration.read(cx).value().to_string();
+        if self.observed_duration.as_ref() == Some(&text) { return; }
+        self.observed_duration = Some(text.clone());
+        if self.alarm { self.picker_parts.observe_alarm(&text); }
+        else { self.picker_parts.observe_timer(&text); }
+        self.picker_projection = [self.picker_parts.hours.to_string(), self.picker_parts.minutes.to_string(), self.picker_parts.seconds.to_string()];
+        self.picker_hours.update(cx, |input, cx| input.set_value(self.picker_projection[0].clone(), window, cx));
+        self.picker_minutes.update(cx, |input, cx| input.set_value(self.picker_projection[1].clone(), window, cx));
+        self.picker_seconds.update(cx, |input, cx| input.set_value(self.picker_projection[2].clone(), window, cx));
+    }
+    fn apply_picker(&mut self, window: &mut Window, cx: &mut Context<Self>, report: bool) -> bool {
+        if self.busy.load(Ordering::Acquire) || !self.current(window, cx) || !window.is_window_active()
+            || window.has_active_dialog(cx) { return false; }
+        if self.duration.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
+            || self.picker_hours.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
+            || self.picker_minutes.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
+            || (!self.alarm && self.picker_seconds.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())) { return false; }
+        let hours = self.picker_hours.read(cx).value().to_string();
+        let minutes = self.picker_minutes.read(cx).value().to_string();
+        let seconds = self.picker_seconds.read(cx).value().to_string();
+        let Some(parts) = picker::parse_parts(&hours, &minutes, (!self.alarm).then_some(seconds.as_str()), self.alarm) else {
+            if report { self.feedback = Some("Enter whole numbers within the shown ranges.".into()); cx.notify(); } return false;
+        };
+        let current = self.duration.read(cx).value().to_string();
+        let text = if self.alarm { picker::alarm_text(parts, &current) } else { Some(picker::timer_text(parts)) };
+        let Some(text) = text else { if report { self.feedback = Some("Enter a valid alarm date and time first.".into()); cx.notify(); } return false; };
+        self.picker_parts = parts;
+        self.picker_projection = [hours, minutes, seconds];
+        self.observed_duration = Some(text.clone());
+        self.duration.update(cx, |input, cx| input.set_value(text, window, cx));
+        self.feedback = None;
+        cx.notify();
+        true
+    }
+    fn picker_changed(&self, cx: &App) -> bool {
+        picker::fields_changed(&self.picker_projection, [self.picker_hours.read(cx).value().as_str(),
+            self.picker_minutes.read(cx).value().as_str(), self.picker_seconds.read(cx).value().as_str()], self.alarm)
     }
     fn current(&self, window: &Window, cx: &App) -> bool {
         self.open
@@ -155,6 +228,17 @@ impl TimerView {
         if !self.current(window, cx) || !window.is_window_active() || window.has_active_dialog(cx) {
             return;
         }
+        if self.duration.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
+            || self.label.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
+            || self.picker_hours.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
+            || self.picker_minutes.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())
+            || (!self.alarm && self.picker_seconds.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())) {
+            self.feedback = Some("Finish composing the current field before starting.".into());
+            cx.notify();
+            return;
+        }
+        self.sync_picker(window, cx);
+        if self.picker_changed(cx) && !self.apply_picker(window, cx, true) { return; }
         let duration = self.duration.read(cx).value().to_string();
         let label = self.label.read(cx).value().to_string();
         let sound = multi_launcher::sound::SOUND_NAMES[self.sound].to_owned();
@@ -364,7 +448,8 @@ fn pause_button_id(id: u64) -> SharedString {
 }
 
 impl Render for TimerView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_picker(window, cx);
         let keys = self.mount.clone();
         let input_escape = self.mount.clone();
         let mut panel = div()
@@ -426,6 +511,10 @@ impl Render for TimerView {
             let close = self.mount.clone();
             let sound = self.mount.clone();
             let preview = self.mount.clone();
+            let picker_mount = self.mount.clone();
+            let current_text = self.duration.read(cx).value().to_string();
+            let picker_disabled = busy || (self.alarm && !current_text.trim().is_empty()
+                && multi_launcher::plugins::timer::parse_alarm_spec(&current_text).is_err());
             panel = panel
                 .child(Label::new(if self.alarm { "Alarm" } else { "Timer" }))
                 .children(
@@ -441,6 +530,21 @@ impl Render for TimerView {
                             "Duration"
                         }),
                 )
+                .child(div().flex().flex_wrap().gap_2()
+                    .child(Label::new(if self.alarm { "Hour (0–23)" } else { "Hours" }))
+                    .child(div().w(px(100.0)).child(Input::new(&self.picker_hours).readonly(picker_disabled).aria_label(if self.alarm { "Alarm hour" } else { "Timer hours" })))
+                    .child(Label::new("Minutes (0–59)"))
+                    .child(div().w(px(75.0)).child(Input::new(&self.picker_minutes).readonly(picker_disabled).aria_label(if self.alarm { "Alarm minute" } else { "Timer minutes" })))
+                    .children((!self.alarm).then(|| div().flex().gap_2().child(Label::new("Seconds (0–59)"))
+                        .child(div().w(px(75.0)).child(Input::new(&self.picker_seconds).readonly(picker_disabled).aria_label("Timer seconds")))))
+                    .child(Button::new("timer-apply-picker").label(if self.alarm { "Set time" } else { "Set duration" }).disabled(picker_disabled)
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            if picker_mount.is_current() && picker_mount.matches(&view.mount) { view.apply_picker(window, cx, true); }
+                        }))))
+                .children(self.alarm.then(|| {
+                    use chrono::TimeZone;
+                    Label::new(picker::alarm_preview(&current_text, chrono::Local::now(), |time| chrono::Local.from_local_datetime(&time)))
+                }))
                 .child(Input::new(&self.label).readonly(busy).aria_label("Label"))
                 .child(
                     Button::new("timer-sound")
@@ -619,6 +723,8 @@ impl RootWindow {
                 view.mount = view.owner.attach();
                 view.open = true;
                 view.alarm = alarm;
+                view.picker_parts = picker::Parts::default();
+                view.observed_duration = None;
                 view.duration
                     .update(cx, |input, cx| input.set_value("", window, cx));
                 view.label
