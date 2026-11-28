@@ -2392,3 +2392,17 @@ Reload uses the existing strict checked catalog reader and a shared reservation 
 Locked `fast-dev` launcher checks passed in 6.86s, 4.06s and 5.82s. Independent review checked two-way effect admission, exact catalog acknowledgement, child Preview retirement, the final Shell guard and status cleanup. The grouped link took 19.57s. Nextest run `ff1bcf46-3140-4a56-beff-359cc65ca25f` passed all ten selected cases in 4.398s across two binaries with 9651 skipped.
 
 P0.07 and P0.14 remain Stage 2. Paired 1516 × 937 Windows replay remains open with both Paste Sequence shortcuts disabled. Use the owned external editor variant, then Reload. Confirm new labels in Search and the existing utility, unchanged draft input, last-good behavior on malformed data and unchanged source bytes by Reload. Replay can use synthetic pane text without clipboard access. Native Shell handoff and the remaining settings retain their own gates.
+
+### P0.16 checked Temporary directory Open
+
+Stock `tmp open` exposes the exact Open temp directory result and cached completion. Search admits the exact provider row under current membership and capability without scanning. The checked worker resolves the configured `ML_TMP_DIR` or executable-sibling default and validates the ordinary local Shell path before preparation.
+
+The worker holds the relative directory chain, creates only missing components and rechecks the source immediately before each native create. It revalidates the configured path and directory identity through the final Shell callback and claims the association once. An already created empty directory can remain after a later revocation or Shell failure. The selected-file `tmp list` and typed Create routes retain their own receipts.
+
+Successful Open uses the stock raw query, source, History, Usage and configured clear/hide policy. An entered Explorer handoff can settle against the current launcher stamp. Search refocus requires the exact launcher foreground.
+
+The locked `fast-dev` library check passed in 57.26s and the integrated library and launcher check in 33.18s. Independent review checked local volume and relative create authority, final configured-path and Shell identity, exact projection and late foreground handoff. The grouped link took 8m 00s. Nextest run `2c90da6a-b139-43df-b086-d8836b432224` passed 11 focused cases in 3.576s across two binaries with 9654 skipped. The native fixture test used held Windows directories and a simulated Shell callback.
+
+P0.16 remains Stage 2. Paired 1516 × 937 Windows replay remains open with both Paste Sequence shortcuts disabled. Use the existing and missing owned Unicode storage paths. Verify exact Explorer address, ordinary selected-file Open, foreground and configured visibility, success accounting and preserved witness bytes. Bulk Clear and remaining management retain their own gates.
+
+Continue P0.01 checked Launcher History Clear.

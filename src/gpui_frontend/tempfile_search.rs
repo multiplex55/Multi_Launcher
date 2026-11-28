@@ -51,10 +51,14 @@ pub(super) fn current_create(query: &str, action: &Action, plugins: Option<&Hash
     enabled(plugins, caps) && search_providers::tempfile_rows(query, plugins, caps).iter().any(|candidate| candidate == action)
         && matches!(parse_action(action), Ok(Command::Storage(StorageCommand::TempfileNew(_))))
 }
+pub(super) fn current_open(query: &str, action: &Action, plugins: Option<&HashSet<String>>, caps: Option<&HashMap<String, Vec<String>>>) -> bool {
+    enabled(plugins, caps) && search_providers::tempfile_rows(query, plugins, caps).iter().any(|candidate| candidate == action)
+        && multi_launcher::plugins::tempfile::open_directory_action("tmp open").as_ref() == Some(action)
+}
 pub(super) fn publication_allows(query: &str, action: &Action, scanned: bool,
     plugins: Option<&HashSet<String>>, caps: Option<&HashMap<String, Vec<String>>>) -> bool {
     super::tempfile_view::current_provider(query, action, plugins, caps)
-        || scanned || current_create(query, action, plugins, caps)
+        || scanned || current_create(query, action, plugins, caps) || current_open(query, action, plugins, caps)
 }
 pub(super) fn list_query(query: &str) -> bool {
     let (query, _) = multi_launcher::common::query::split_action_filters(query);
@@ -140,6 +144,20 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn immediate_open_requires_exact_provider_row_and_capability() {
+        let enabled = std::collections::HashSet::from(["tempfile".to_owned()]);
+        let row = super::super::search_providers::tempfile_rows("tmp open", Some(&enabled), None).remove(0);
+        assert!(super::current_open("tmp open", &row, Some(&enabled), None));
+        assert!(super::publication_allows("tmp open", &row, false, Some(&enabled), None));
+        assert!(!super::current_open("tmp open extra", &row, Some(&enabled), None));
+        assert!(!super::current_open("tmp open", &row, Some(&std::collections::HashSet::new()), None));
+        let caps = std::collections::HashMap::from([("tempfile".to_owned(), Vec::new())]);
+        assert!(!super::current_open("tmp open", &row, Some(&enabled), Some(&caps)));
+        let mut forged = row.clone(); forged.desc.push('!');
+        assert!(!super::current_open("tmp open", &forged, Some(&enabled), None));
+    }
+
     #[test]
     fn immediate_create_requires_exact_live_provider_row() {
         let enabled = std::collections::HashSet::from(["tempfile".to_owned()]);

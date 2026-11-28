@@ -55,6 +55,16 @@ impl CommandBus {
         };
         super::handlers::checked_timer_start_outcome(&invocation, raw_query, preserve_command, preferences, result)
     }
+    /// Complete the exact checked stock temp directory open without repeating its effect.
+    pub fn complete_checked_tempfile_open(&self, action: &Action, source: ActivationSource,
+        preferences: LauncherRunPreferences, result: anyhow::Result<()>) -> Result<CommandOutcome, CommandError> {
+        if *action != crate::plugins::tempfile::open_directory_action("tmp open").unwrap()
+            || super::parse_action(action).ok() != Some(Command::Storage(super::StorageCommand::TempfileOpen)) {
+            return Err(CommandError::new("launcher", "Invalid checked temporary directory open"));
+        }
+        let invocation = CommandInvocation { command: Command::Storage(super::StorageCommand::TempfileOpen), original_action: action.clone(), query_override: None, source };
+        handle_checked_headless_effect(preferences, &invocation, result)
+    }
     /// Complete an already opened checked temporary file without repeating its effect.
     pub fn complete_checked_tempfile_new(&self, command: super::StorageCommand, action: &Action,
         source: ActivationSource, preserve_command: bool, preferences: LauncherRunPreferences,
@@ -325,6 +335,20 @@ impl CommandBus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_tempfile_open_requires_exact_stock_row_and_success() {
+        use super::{CommandBus, LauncherRunPreferences};
+        use crate::commands::{ActivationSource, HistoryPolicy, VisibilityPolicy};
+        let action = crate::plugins::tempfile::open_directory_action("tmp open").unwrap();
+        let prefs = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: true };
+        let outcome = CommandBus.complete_checked_tempfile_open(&action, ActivationSource::Enter, prefs, Ok(())).unwrap();
+        assert_eq!(outcome.history, HistoryPolicy::Record);
+        assert_eq!(outcome.visibility, VisibilityPolicy::Hide);
+        assert!(CommandBus.complete_checked_tempfile_open(&action, ActivationSource::Enter, prefs, Err(anyhow::anyhow!("cancelled"))).is_err());
+        let mut changed = action.clone(); changed.label.push('!');
+        assert!(CommandBus.complete_checked_tempfile_open(&changed, ActivationSource::Enter, prefs, Ok(())).is_err());
+    }
+
     #[test]
     fn checked_tempfile_new_uses_stock_success_policy_only_after_open() {
         use super::{CommandBus, LauncherRunPreferences};

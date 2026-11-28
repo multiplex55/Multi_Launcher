@@ -19,6 +19,77 @@ fn file_identity(file: &std::fs::File) -> Option<FileIdentity> {
     { let _ = file; None }
 }
 
+fn prepare_directory_chain<N, E>(root: N, parts: &[std::ffi::OsString], current: &dyn Fn() -> bool,
+    mut open: impl FnMut(&N, &std::ffi::OsStr) -> Result<N, E>,
+    missing: impl Fn(&E) -> bool,
+    mut create: impl FnMut(&[N], usize, &std::ffi::OsStr) -> anyhow::Result<N>,
+) -> anyhow::Result<Vec<N>> {
+    let mut held = vec![root];
+    for (index, part) in parts.iter().enumerate() {
+        anyhow::ensure!(current(), "Temp directory open superseded");
+        let child = match open(held.last().unwrap(), part) {
+            Ok(child) => child,
+            Err(error) if missing(&error) => {
+                anyhow::ensure!(current(), "Temp directory open superseded");
+                create(&held, index, part)?
+            }
+            Err(_) => anyhow::bail!("Temp directory unavailable"),
+        };
+        held.push(child);
+    }
+    Ok(held)
+}
+
+/// Open the configured temp directory using held, no-reparse relative directory handles.
+/// Missing directories may remain after a later cancellation or Shell failure.
+#[cfg(windows)]
+pub fn open_directory_checked(current: impl Fn() -> bool, before_effect: impl Fn() -> bool) -> anyhow::Result<()> {
+    open_directory_checked_with(&crate::plugins::tempfile::storage_dir(), &crate::plugins::tempfile::storage_dir, &current, &before_effect,
+        |path, guard| crate::actions::exec::launch_association_if_current(path.as_os_str(), guard))
+}
+
+#[cfg(windows)]
+fn open_directory_checked_with(configured: &Path, configured_now: &dyn Fn() -> PathBuf, current: &dyn Fn() -> bool, before_effect: &dyn Fn() -> bool,
+    launch: impl FnOnce(&Path, &dyn Fn() -> bool) -> anyhow::Result<()>) -> anyhow::Result<()> {
+    use crate::archive::transfer_native::{split_local_absolute_path, is_missing_relative_leaf, TransferDirectory};
+    let absolute = std::path::absolute(configured)?;
+    anyhow::ensure!(crate::actions::exec::ordinary_local_path_is_admissible(&absolute), "Temp directory path is not an ordinary local path");
+    let (root_path, parts) = split_local_absolute_path(&absolute).map_err(|e| anyhow::anyhow!("Invalid temp directory: {e:?}"))?;
+    anyhow::ensure!(current(), "Temp directory open superseded");
+    let root = TransferDirectory::open_root(&root_path).map_err(|e| anyhow::anyhow!("Temp directory unavailable: {e:?}"))?;
+    let source_current = || current() && std::path::absolute(configured_now()).ok().as_deref() == Some(absolute.as_path());
+    let held = prepare_directory_chain(root, &parts, &source_current, |parent, part| parent.open_child(part), is_missing_relative_leaf,
+        |held, index, part| {
+            let parent = held.last().unwrap();
+            let writable = if index == 0 {
+                TransferDirectory::open_create_directory_root(&root_path)
+            } else {
+                held[index - 1].open_create_directory_child(&parts[index - 1])
+            }.map_err(|e| anyhow::anyhow!("Temp directory cannot be prepared: {e:?}"))?;
+            anyhow::ensure!(writable.identity() == parent.identity() && writable.verify_identity().is_ok(), "Temp directory changed");
+            anyhow::ensure!(source_current(), "Temp directory open superseded");
+            writable.create_directory_if(part, &source_current).map_err(|e| anyhow::anyhow!("Temp directory cannot be created: {:?}", e.error))
+        })?;
+    let guard = || {
+        if !source_current() { return false; }
+        let Ok(mut observed) = TransferDirectory::open_root(&root_path) else { return false; };
+        if observed.identity() != held[0].identity() || held[0].verify_identity().is_err() { return false; }
+        for (index, part) in parts.iter().enumerate() {
+            let Ok(next) = observed.open_child(part) else { return false; };
+            if next.identity() != held[index + 1].identity() || held[index + 1].verify_identity().is_err() { return false; }
+            observed = next;
+        }
+        crate::actions::exec::checked_local_directory(&absolute).is_ok() && source_current()
+    };
+    anyhow::ensure!(guard(), "Temp directory changed or was superseded");
+    launch(&absolute, &|| guard() && before_effect())
+}
+
+#[cfg(not(windows))]
+pub fn open_directory_checked(_current: impl Fn() -> bool, _before_effect: impl Fn() -> bool) -> anyhow::Result<()> {
+    anyhow::bail!("Checked temp directory open requires Windows")
+}
+
 /// A stock list row bound to the exact file observed during the background scan.
 #[derive(Clone)]
 pub struct ListedTempFile {
@@ -791,5 +862,52 @@ mod checked_creation_tests {
         }
         #[cfg(windows)]
         assert!(matches!(outcome, CreateAndOpenOutcome::Published { reason: PublishedReason::OpenFailed, .. }));
+    }
+}
+
+#[cfg(test)]
+mod checked_directory_open_tests {
+    #[test]
+    fn checked_directory_chain_creates_only_missing_and_rejects_stale_or_unsafe() {
+        use std::{cell::Cell, ffi::OsString};
+        let parts = vec![OsString::from("existing"), OsString::from("missing")];
+        let creates = Cell::new(0);
+        let held = super::prepare_directory_chain(0, &parts, &|| true,
+            |parent, _| if *parent == 0 { Ok(1) } else { Err("missing") },
+            |error| *error == "missing", |_, _, _| { creates.set(creates.get() + 1); Ok(2) }).unwrap();
+        assert_eq!(held, vec![0, 1, 2]); assert_eq!(creates.get(), 1);
+        for unsafe_kind in ["reparse", "wrong type"] {
+            assert!(super::prepare_directory_chain(0, &parts, &|| true,
+                |_, _| Err::<i32, _>(unsafe_kind), |error| *error == "missing",
+                |_, _, _| panic!("unsafe entry created")).is_err());
+        }
+        assert!(super::prepare_directory_chain(0, &parts, &|| false,
+            |_, _| Ok::<_, &str>(1), |_| false, |_, _, _| panic!("stale entry created")).is_err());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod checked_open_directory_windows_tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[test]
+    fn checked_open_directory_owns_nested_and_rejects_changed_path() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("Unicode-é").join("child");
+        let claims = AtomicUsize::new(0);
+        for _ in 0..2 {
+            super::open_directory_checked_with(&path, &|| path.clone(), &|| true,
+                &|| { claims.fetch_add(1, Ordering::SeqCst); true },
+                |actual, guard| { assert_eq!(actual, std::path::absolute(&path).unwrap()); assert!(guard()); Ok(()) }).unwrap();
+        }
+        assert_eq!(claims.load(Ordering::SeqCst), 2);
+        let occupied = root.path().join("file"); std::fs::write(&occupied, "x").unwrap();
+        assert!(super::open_directory_checked_with(&occupied.join("child"), &|| occupied.join("child"), &|| true, &|| true, |_, _| panic!("file launched")).is_err());
+        let stale = root.path().join("other");
+        assert!(super::open_directory_checked_with(&path, &|| stale.clone(), &|| true, &|| true, |_, _| panic!("stale launched")).is_err());
+        let live = AtomicBool::new(true);
+        super::open_directory_checked_with(&path, &|| path.clone(), &|| live.load(Ordering::Acquire),
+            &|| { claims.fetch_add(1, Ordering::SeqCst); true },
+            |_, guard| { live.store(false, Ordering::Release); assert!(!guard()); Ok(()) }).unwrap();
+        assert_eq!(claims.load(Ordering::SeqCst), 2);
     }
 }

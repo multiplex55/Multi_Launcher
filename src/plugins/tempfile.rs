@@ -256,6 +256,13 @@ pub fn alias_action(path: &Path, name: &str, alias: &str) -> Action {
 }
 
 /// Stock immediate New/Create projection; invalid and incomplete aliases produce no row.
+/// Stock exact `tmp open` row, shared with checked frontend admission.
+pub fn open_directory_action(query: &str) -> Option<Action> {
+    let rest = crate::common::strip_prefix_ci(query.trim(), "tmp open")?;
+    if !rest.is_empty() { return None; }
+    Some(Action { label: "Open temp directory".into(), desc: "Tempfile".into(), action: "tempfile:open".into(), args: None })
+}
+
 pub fn immediate_create_action(query: &str) -> Option<Action> {
     let trimmed = query.trim();
     if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new ")
@@ -288,16 +295,7 @@ impl Plugin for TempfilePlugin {
             }];
         }
         if let Some(action) = immediate_create_action(trimmed) { return vec![action]; }
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp open")
-            && rest.is_empty()
-        {
-            return vec![Action {
-                label: "Open temp directory".into(),
-                desc: "Tempfile".into(),
-                action: "tempfile:open".into(),
-                args: None,
-            }];
-        }
+        if let Some(action) = open_directory_action(trimmed) { return vec![action]; }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp clear")
             && rest.is_empty()
         {

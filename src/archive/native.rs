@@ -431,6 +431,12 @@ impl HeldDirectory {
         component: &OsStr,
         on_created: impl FnOnce(),
     ) -> Result<Arc<Self>, NativeArchiveError> {
+        self.create_child_observed_if(component, on_created, || true)
+    }
+
+    fn create_child_observed_if(
+        self: &Arc<Self>, component: &OsStr, on_created: impl FnOnce(), current: impl FnOnce() -> bool,
+    ) -> Result<Arc<Self>, NativeArchiveError> {
         validate_single_component(component, "relative directory component")?;
         self.verify_identity()?;
         let (file, information) = open_relative(
@@ -448,7 +454,7 @@ impl HeldDirectory {
                 | windows::Wdk::Storage::FileSystem::FILE_SYNCHRONOUS_IO_NONALERT,
             windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY,
             "NtCreateFile(FILE_CREATE output directory)",
-            || Ok(()),
+            || if current() { Ok(()) } else { Err(NativeArchiveError::validation("directory creation superseded", io::ErrorKind::Interrupted, None)) },
         )?;
         if information != 2 {
             return Err(NativeArchiveError::validation(
@@ -3821,9 +3827,14 @@ pub(crate) mod transfer_native {
             &self,
             name: &OsStr,
         ) -> Result<Self, TransferDirectoryCreateFailure> {
+            self.create_directory_if(name, || true)
+        }
+        pub(crate) fn create_directory_if(
+            &self, name: &OsStr, current: impl FnOnce() -> bool,
+        ) -> Result<Self, TransferDirectoryCreateFailure> {
             let mut observed = false;
             self.0
-                .create_child_observed(name, || observed = true)
+                .create_child_observed_if(name, || observed = true, current)
                 .map(Self)
                 .map_err(|error| {
                     let outcome = if observed {

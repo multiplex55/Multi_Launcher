@@ -260,11 +260,11 @@ impl multi_launcher::plugin::Plugin for TempfileBare {
     fn search(&self, query: &str) -> Vec<Action> {
         if query.trim().eq_ignore_ascii_case("tmp") {
             multi_launcher::plugin::Plugin::search(&multi_launcher::plugins::tempfile::TempfilePlugin, query)
-        } else { multi_launcher::plugins::tempfile::immediate_create_action(query).into_iter().collect() }
+        } else { multi_launcher::plugins::tempfile::immediate_create_action(query).or_else(|| multi_launcher::plugins::tempfile::open_directory_action(query)).into_iter().collect() }
     }
     fn commands(&self) -> Vec<Action> {
         multi_launcher::plugin::Plugin::commands(&multi_launcher::plugins::tempfile::TempfilePlugin)
-            .into_iter().filter(|action| matches!(action.action.as_str(), "query:tmp" | "query:tmp new " | "query:tmp create " | "query:tmp list" | "query:tmp rm ")).collect()
+            .into_iter().filter(|action| matches!(action.action.as_str(), "query:tmp" | "query:tmp new " | "query:tmp create " | "query:tmp open" | "query:tmp list" | "query:tmp rm ")).collect()
     }
 }
 

@@ -8332,6 +8332,19 @@ impl RootWindow {
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "tempfile")
+            && tempfile_search::current_open(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+            if self.restart_admission.is_fenced() || window.has_active_dialog(cx)
+                || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
+            let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+            let guard = external_launch::OmniGuard {
+                catalog: Arc::new(AtomicBool::new(true)), lease: Arc::new(AtomicBool::new(true)),
+                effect_gate: Arc::new(external_launch::EffectGate::default()), visibility: self.root_visibility.clone(),
+                revision: self.root_visibility.request_revision.load(Ordering::Acquire), native, admission: self.restart_admission.clone(),
+            };
+            self.start_tempfile_open(result.action, guard, query, source, window, cx);
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "tempfile")
             && tempfile_search::current_create(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
             if self.restart_admission.is_fenced() || window.has_active_dialog(cx)
                 || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }

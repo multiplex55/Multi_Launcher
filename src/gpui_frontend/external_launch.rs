@@ -570,6 +570,7 @@ pub(super) enum RunCommand {
     Indexed { command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority },
     Favorite(ExternalCommand),
     TempfileCreate { command: multi_launcher::commands::StorageCommand, guard: OmniGuard },
+    TempfileOpen { guard: OmniGuard },
     TempfileMutation { command: multi_launcher::commands::StorageCommand, row: multi_launcher::actions::tempfiles::ListedTempFile, guard: OmniGuard },
     Todo { owner: Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, receipt: multi_launcher::plugins::todo::CheckedTodoReceipt, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard },
     CalendarJump { owner: Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, snapshot: Arc<multi_launcher::plugins::calendar::CheckedCalendarSnapshot>, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard, day: chrono::NaiveDate },
@@ -850,11 +851,11 @@ impl ExternalLaunch {
             clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
-            omni_lease: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_lease: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
             omni_category_effect: match &request.command { RunCommand::Omni { target, .. } => !matches!(target, OmniTarget::Tempfile(_)), RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } => true, _ => false },
-            omni_gate: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
-            query_retire_lease: matches!(&request.command, RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. }),
-            shell_handoff: matches!(&request.command, RunCommand::TempfileCreate { .. })
+            omni_gate: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
+            query_retire_lease: matches!(&request.command, RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. }),
+            shell_handoff: matches!(&request.command, RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. })
                 || matches!(&request.command, RunCommand::HistoryReplay { receipt, .. } if receipt.kind != super::history_search::SavedKind::Executable),
             history_effect: matches!(&request.command, RunCommand::HistoryReplay { .. }),
         });
@@ -1167,6 +1168,14 @@ fn execute_request(
                 &mut IndexedHost { host, authority })
         }
         RunCommand::Favorite(command) => CommandBus.dispatch_external(command, &request.action, request.source, None, &mut FavoriteHost { host }),
+        RunCommand::TempfileOpen { guard } => {
+            let effect = multi_launcher::actions::tempfiles::open_directory_checked(|| guard.current(), || guard.effect_current());
+            CommandBus.complete_checked_tempfile_open(&request.action, request.source,
+                multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run, refocus: true,
+                }, effect)
+        }
         RunCommand::TempfileCreate { command, guard } => {
             let effect = match command {
                 multi_launcher::commands::StorageCommand::TempfileNew(alias) => {
@@ -1345,7 +1354,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::GestureExternal { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::GestureExternal { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1844,6 +1853,10 @@ impl RootWindow {
         self.start_run(action, RunCommand::Omni { command, target, guard }, query, source, None, window, cx);
     }
 
+    pub(super) fn start_tempfile_open(&mut self, action: Action, guard: OmniGuard, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_run(action, RunCommand::TempfileOpen { guard }, query, source, None, window, cx);
+    }
+
     pub(super) fn start_tempfile_create(&mut self, action: Action, command: multi_launcher::commands::StorageCommand,
         guard: OmniGuard, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
         self.start_run(action, RunCommand::TempfileCreate { command, guard }, query, source, None, window, cx);
@@ -1911,12 +1924,12 @@ impl RootWindow {
                 lease.store(false, Ordering::Release);
             }
         }
-        if let RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
+        if let RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
             if let Some(focus) = window.focused(cx) {
                 let lease = guard.lease.clone();
                 let effect_gate = guard.effect_gate.clone();
                 let strict_focus = matches!(&request.command, RunCommand::CalendarJump { .. } | RunCommand::TimerCreate { .. });
-                let shell_focus = matches!(&request.command, RunCommand::TempfileCreate { .. })
+                let shell_focus = matches!(&request.command, RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. })
                     || matches!(&request.command, RunCommand::HistoryReplay { receipt, .. } if receipt.kind != super::history_search::SavedKind::Executable);
                 let native = guard.native;
                 let subscription = cx.on_blur(&focus, window, move |_, _, _| {
@@ -1935,7 +1948,7 @@ impl RootWindow {
         } else {
             self.query_history.reset();
         }
-        if matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. }) {
+        if matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. }) {
             let root = cx.entity().downgrade();
             window.defer(cx, move |window, app| {
                 let _ = root.update(app, |root, cx| {
@@ -1946,6 +1959,8 @@ impl RootWindow {
                             let guard_current = match &request.command {
                                 RunCommand::HistoryReplay { receipt, epoch, guard } => guard.current()
                                     && epoch.load(Ordering::Acquire) == receipt.canonical_revision,
+                                RunCommand::TempfileOpen { guard } => guard.current()
+                                    && super::tempfile_search::current_open(&request.query, &request.action, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()),
                                 RunCommand::TempfileCreate { guard, .. } => guard.current()
                                     && super::tempfile_search::current_create(&request.query, &request.action, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()),
                                 RunCommand::TimerCreate { guard, .. } => guard.current()
@@ -1985,7 +2000,7 @@ impl RootWindow {
         window_handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let checked_delivery = matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. } | RunCommand::GestureExternal { .. });
+        let checked_delivery = matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileOpen { .. } | RunCommand::GestureExternal { .. });
         let task = cx.background_executor().spawn(async move {
             let result = run(&request);
             if let RunCommand::TimerCreate { lane, .. } = &request.command { lane.release(); }
@@ -2116,7 +2131,7 @@ impl RootWindow {
             RunCommand::ClipboardExecute { current, .. } => current() && window.is_window_active(),
             RunCommand::SnippetRun { current, .. } => current() && window.is_window_active(),
             RunCommand::TimerCreate { guard, .. } => guard.current() && window.is_window_active(),
-            RunCommand::TempfileCreate { guard, .. } => {
+            RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileOpen { guard } => {
                 receipt.result.outcome.is_ok()
                     && guard.effect_gate.0.load(Ordering::Acquire) == EFFECT_ENTERED
                     && guard.receipt_current()
@@ -2163,7 +2178,7 @@ impl RootWindow {
             .stamp
             .may_refocus(root.window_id(), window.is_window_active())
             && local_focus_owned
-            && (!matches!(&receipt.request.command, RunCommand::HistoryReplay { .. })
+            && (!matches!(&receipt.request.command, RunCommand::HistoryReplay { .. } | RunCommand::TempfileOpen { .. })
                 || self.native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity)));
         let settings = &receipt.request.settings;
         let mut changed_query = None;
