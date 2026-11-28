@@ -50,7 +50,7 @@ enum Root {
     Positional(Vec<Box<serde_json::value::RawValue>>),
 }
 
-fn unique_object(text: &str) -> anyhow::Result<RawSettingsObject> {
+pub(super) fn unique_object(text: &str) -> anyhow::Result<RawSettingsObject> {
     use serde::de::{Deserialize, Deserializer, Error, MapAccess, Visitor};
     struct Unique(RawSettingsObject);
     impl<'de> Deserialize<'de> for Unique {
@@ -79,7 +79,7 @@ fn unique_object(text: &str) -> anyhow::Result<RawSettingsObject> {
     Ok(serde_json::from_str::<Unique>(text)?.0)
 }
 
-fn ordered_fields(
+pub(super) fn ordered_fields(
     settings: &Settings,
 ) -> anyhow::Result<Vec<(String, Box<serde_json::value::RawValue>)>> {
     use serde::de::{Deserialize, Deserializer, MapAccess, Visitor};

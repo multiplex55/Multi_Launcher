@@ -898,6 +898,30 @@ impl Default for SettingsSaveWorkerRegistry {
 }
 
 impl SettingsSaveWorkerRegistry {
+    /// Read checked stateless plugin membership on the registered worker.
+    pub fn begin_plugin_membership_read(&self, settings_path: String) -> Result<Receiver<Result<crate::settings::PluginMembershipSnapshot, crate::settings::PluginMembershipError>>, String> {
+        let (sender, receiver) = mpsc::channel();
+        self.spawn(move || { let _ = sender.send(Settings::plugin_membership_snapshot(settings_path)); })
+            .map_err(|error| format!("could not start plugin membership reader: {error}"))?;
+        Ok(receiver)
+    }
+
+    /// Save one reviewed stateless membership change on the registered worker.
+    pub fn begin_plugin_membership_save(&self, settings_path: String, baseline: crate::settings::PluginMembershipSnapshot, request: crate::settings::PluginMembershipRequest, current: Arc<dyn Fn() -> bool + Send + Sync>)
+        -> Result<(Receiver<Result<crate::settings::PluginMembershipAcknowledgement, crate::settings::PluginMembershipError>>, SettingsBooleanSaveToken), String> {
+        let token = self.reserve_preference_token()?;
+        let worker_token = token.clone(); let registry = self.clone(); let (sender, receiver) = mpsc::channel();
+        if let Err(error) = self.spawn(move || {
+            let result = Settings::save_plugin_membership_cancellable(std::path::Path::new(&settings_path), &baseline, request, &worker_token, || current());
+            let failure = result.as_ref().err().filter(|error| !matches!(error, crate::settings::PluginMembershipError::Canceled)).map(ToString::to_string);
+            registry.complete_preference_token(worker_token.id(), failure);
+            let _ = sender.send(result);
+        }) {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).boolean_preference_pending.remove(&token.id());
+            return Err(format!("could not start plugin membership writer: {error}"));
+        }
+        Ok((receiver, token))
+    }
     /// Read a Dashboard draft on the registered worker without changing the file.
     pub fn begin_dashboard_editor_read(&self, path: std::path::PathBuf) -> Result<Receiver<anyhow::Result<crate::dashboard::checked_editor::DashboardDraft>>, String> {
         let (sender, receiver) = mpsc::channel();
@@ -2820,6 +2844,20 @@ mod tests {
     use std::time::Instant;
 
     type TestSaveResult = (Result<SettingsSaveCompletion, String>, bool);
+
+    #[test]
+    fn retired_membership_authority_does_not_poison_worker_drain() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let baseline = Settings::plugin_membership_snapshot(&path).unwrap();
+        let registry = SettingsSaveWorkerRegistry::default();
+        let (receiver, _) = registry.begin_plugin_membership_save(path.to_string_lossy().into_owned(), baseline,
+            crate::settings::PluginMembershipRequest { plugin: crate::settings::StatelessPlugin::DateArithmetic, enabled: false, reviewed_all_to_explicit: true }, Arc::new(|| false)).unwrap();
+        assert_eq!(receiver.recv().unwrap(), Err(crate::settings::PluginMembershipError::Canceled));
+        registry.begin_shutdown();
+        registry.join_all_checked().ensure_clean().unwrap();
+        assert!(!path.exists());
+    }
 
     #[test]
     fn launcher_hotkey_producer_closes_before_wake_even_on_unwind() {

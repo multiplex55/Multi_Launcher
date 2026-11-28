@@ -7,6 +7,9 @@ pub use launcher_hotkey::LauncherHotkeySnapshot;
 #[path = "omni_preferences.rs"]
 mod omni_preferences;
 pub use omni_preferences::{OmniPreferencesSnapshot, OmniPreferencesAcknowledgement, OmniCommittedUnverified};
+#[path = "plugin_membership.rs"]
+mod plugin_membership;
+pub use plugin_membership::{StatelessPlugin, PluginMembershipSnapshot, PluginMembershipRequest, PluginMembershipError, PluginMembershipAcknowledgement};
 
 use super::Settings;
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};

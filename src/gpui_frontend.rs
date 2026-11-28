@@ -2465,6 +2465,9 @@ struct RootWindow {
     external_drop: external_drop::State,
     bookmark_authoring: bookmark_authoring::State,
     plugin_editor: Option<Entity<plugin_editor::PluginEditorView>>,
+    plugin_membership_pending: Option<multi_launcher::settings::StatelessPlugin>,
+    plugin_membership_startup_safe: bool,
+    plugin_membership_uncertain: bool,
     command_help: CommandHelpState,
     command_help_filter: Entity<InputState>,
     quick_help: QuickHelpState,
@@ -5056,6 +5059,7 @@ impl RootWindow {
     }
 
     fn revoke_focus_bound_utility_operations(&mut self, cx: &mut Context<Self>) {
+        if let Some(view) = &self.plugin_editor { view.update(cx, |view, _| view.revoke_membership()); }
         if let Some(view) = &self.dashboard_editor { view.update(cx, |view, _| view.revoke()); }
         self.dashboard_epoch = self.dashboard_epoch.wrapping_add(1);
         if let Some(view) = &self.gesture_editor {
@@ -5807,8 +5811,9 @@ impl RootWindow {
             return Err(calculator_search::SEARCH_PENDING_STATUS.to_owned());
         }
         if self.plugin_editor.as_ref().is_some_and(|view| view.read(cx).pending) {
-            return Err("A plugin Search capability save is still pending.".to_owned());
+            return Err(self.plugin_editor.as_ref().unwrap().read(cx).pending_message().to_owned());
         }
+        if self.plugin_membership_uncertain { return Err("Plugin membership needs reconciliation. Close and manually relaunch from Settings.".into()); }
         if self.external_drop.busy() { return Err(external_drop::WAIT.into()); }
         if self.folder_authoring.busy() { return Err(folder_authoring::WAIT.into()); }
         if self.bookmark_authoring.busy() { return Err(bookmark_authoring::WAIT.into()); }
@@ -7269,6 +7274,16 @@ impl RootWindow {
         self.refresh_launcher_results_with_viewport(query, true, cx);
     }
 
+    fn renew_plugin_membership_projection(&mut self, cx: &mut Context<Self>) {
+        let effective = plugin_editor::effective_membership(self.enabled_plugins.as_ref(), self.plugin_membership_pending);
+        self.search_catalog.commands = self.search_catalog.providers.cached_commands(effective.as_deref());
+        self.search_catalog.command_cached_entries = self.search_catalog.commands.iter().map(CachedSearchEntry::from_action).collect();
+        self.search_catalog.completion_index = multi_launcher::completion::build_index(&self.search_catalog.commands, &self.search_catalog.actions[..self.search_catalog.saved_count]);
+        let query = self.query.read(cx).value().to_string();
+        self.search_completion.reset_for_query(&self.search_catalog, &query);
+        self.refresh_launcher_results_with_viewport(query, false, cx);
+    }
+
     fn refresh_launcher_results_with_viewport(&mut self, query: String, scroll_to_search: bool, cx: &mut Context<Self>) {
         self.refresh_launcher_results_inner(query, scroll_to_search, false, cx);
     }
@@ -7308,10 +7323,11 @@ impl RootWindow {
             self.publish_launcher_provider_results(query, Vec::new(), scroll_to_search);
             return;
         }
+        let effective = plugin_editor::effective_membership(self.enabled_plugins.as_ref(), self.plugin_membership_pending);
         let raw_provider_actions = search_providers::search_routed(
             self.search_catalog.providers.plugins(),
             &query,
-            self.enabled_plugins.as_ref(),
+            effective.as_deref(),
             self.enabled_capabilities.as_ref(),
         );
         if omni_search::is_omni_query(&query) {
@@ -7366,6 +7382,7 @@ impl RootWindow {
         let provider_actions = raw_provider_actions
             .into_iter()
             .filter(|(provider, action)| {
+                if self.plugin_membership_pending.is_some_and(|plugin| plugin.id() == provider) { return false; }
                 if provider == "windows" {
                     window_search::action_is_operation(provider, action)
                 } else if provider == "calculator" {
@@ -8142,6 +8159,8 @@ impl RootWindow {
             let session = view.session();
             view.focus_filter(session, window, cx);
         });
+        let weak = view.downgrade();
+        window.defer(cx, move |window, cx| { let _ = weak.update(cx, |view, cx| view.load_membership(window, cx)); });
         let index = self.file_search_scroll_item()
             + usize::from(self.file_search.as_ref().is_some_and(|view| view.read(cx).root_slot_occupied()))
             + usize::from(self.downloads_triage_open(cx));
@@ -8201,6 +8220,7 @@ impl RootWindow {
         else {
             return;
         };
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if self.plugin_membership_pending.is_some_and(|plugin| plugin.id() == name)) { return; }
         if !self.launcher_result_activation_is_live(origin, window, cx) {
             return;
         }
@@ -10731,7 +10751,7 @@ impl RootWindow {
                 self.restart_status = Some(calculator_search::SEARCH_PENDING_STATUS.to_owned());
             }
             Some(RootCloseBlocker::PluginPreferenceSave) => {
-                self.restart_status = Some("Wait for the plugin Search capability save.".to_owned());
+                self.restart_status = Some(self.plugin_editor.as_ref().map(|view| view.read(cx).pending_message()).unwrap_or("Wait for the plugin operation.").to_owned());
             }
             Some(RootCloseBlocker::BooleanPreferenceSave) => {
                 if !self.prepare_boolean_preference_close(cx) {
@@ -13412,6 +13432,7 @@ pub(crate) fn run_foundation_window(
     root_placement: root_placement::RootPlacement,
     file_search_settings: multi_launcher::file_search::settings::FileSearchSettings,
     mouse_gesture_settings: Result<multi_launcher::plugins::mouse_gestures::MouseGestureSettings, String>,
+    initial_plugin_dirs: Option<Vec<String>>,
     dashboard_settings: multi_launcher::settings::DashboardSettings,
     app_data_root: multi_launcher::platform::app_data::AppDataRoot,
     external_launch_preferences: ExternalLaunchPreferences,
@@ -13802,6 +13823,9 @@ pub(crate) fn run_foundation_window(
                 external_drop: external_drop::State::default(),
                 bookmark_authoring: bookmark_authoring::State::default(),
                 plugin_editor: None,
+                plugin_membership_pending: None,
+                plugin_membership_startup_safe: initial_plugin_dirs.as_ref().is_none_or(Vec::is_empty),
+                plugin_membership_uncertain: false,
                 command_help: command_help_for_root,
                 command_help_filter,
                 quick_help: QuickHelpState::default(),
@@ -14367,7 +14391,7 @@ pub(crate) fn run_foundation_window(
                     }
                     Some(RootCloseBlocker::PluginPreferenceSave) => {
                         let _ = root_for_window_close.update(app, |root, cx| {
-                            root.restart_status = Some("Wait for the plugin Search capability save.".to_owned());
+                            root.restart_status = Some(root.plugin_editor.as_ref().map(|view| view.read(cx).pending_message()).unwrap_or("Wait for the plugin operation.").to_owned());
                             cx.notify();
                         });
                         false

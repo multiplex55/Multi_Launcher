@@ -26,6 +26,7 @@ pub use store::{
     SearchCapabilitySnapshot, provider_capability_enabled, provider_search_capability_enabled,
     SettingsBooleanPreference, SettingsBooleanSaveAcknowledgement, SettingsBooleanSaveError,
     SettingsBooleanSaveRequest, SettingsBooleanSaveToken,
+    StatelessPlugin, PluginMembershipSnapshot, PluginMembershipRequest, PluginMembershipError, PluginMembershipAcknowledgement,
 };
 pub use utility_dialog_sizes::{
     AppliedWindowSize, NativeWindowGeometry, ObservedWindowSize, PreferredWindowSize,

@@ -4844,6 +4844,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_default(),
             settings.plugin_settings.get("mouse_gestures")
                 .map_or_else(|| Ok(Default::default()), |value| serde_json::from_value(value.clone()).map_err(|error| error.to_string())),
+            settings.plugin_dirs.clone(),
             settings.dashboard.clone(),
             app_data_root.clone(),
             gpui_frontend::ExternalLaunchPreferences {
