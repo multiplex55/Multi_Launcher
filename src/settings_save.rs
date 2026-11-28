@@ -1090,12 +1090,33 @@ impl SettingsSaveWorkerRegistry {
         Ok((receiver, token))
     }
 
-    pub fn begin_multi_manager_paths_save(&self, settings_path: String, baseline: crate::settings::MultiManagerPathsSnapshot, desired: crate::settings::MultiManagerPaths, current: Arc<dyn Fn() -> bool + Send + Sync>) -> Result<(Receiver<Result<crate::settings::MultiManagerPathsAcknowledgement, crate::settings::MultiManagerPathsError>>, SettingsBooleanSaveToken), String> {
+    pub fn begin_multi_manager_paths_save(
+        &self, settings_path: String, baseline: crate::settings::MultiManagerPathsSnapshot,
+        desired: crate::settings::MultiManagerPaths, current: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(Receiver<Result<crate::settings::MultiManagerPathsAcknowledgement, crate::settings::MultiManagerPathsError>>, SettingsBooleanSaveToken), String> {
+        self.begin_multi_manager_save_scoped(settings_path, baseline, desired, None, current)
+    }
+
+    pub fn begin_multi_manager_settings_save(
+        &self, settings_path: String, baseline: crate::settings::MultiManagerPathsSnapshot,
+        desired: crate::settings::MultiManagerPaths, auto_reconnect_on_load: bool,
+        current: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(Receiver<Result<crate::settings::MultiManagerPathsAcknowledgement, crate::settings::MultiManagerPathsError>>, SettingsBooleanSaveToken), String> {
+        self.begin_multi_manager_save_scoped(
+            settings_path, baseline, desired, Some(auto_reconnect_on_load), current,
+        )
+    }
+
+    fn begin_multi_manager_save_scoped(
+        &self, settings_path: String, baseline: crate::settings::MultiManagerPathsSnapshot,
+        desired: crate::settings::MultiManagerPaths, auto_reconnect_on_load: Option<bool>,
+        current: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> Result<(Receiver<Result<crate::settings::MultiManagerPathsAcknowledgement, crate::settings::MultiManagerPathsError>>, SettingsBooleanSaveToken), String> {
         let token = self.reserve_preference_token()?;
         let (sender, receiver) = mpsc::channel();
         let registry = self.clone(); let worker_token = token.clone();
         if let Err(error) = self.spawn(move || {
-            let result = Settings::save_multi_manager_paths_cancellable(std::path::Path::new(&settings_path), &baseline, &desired, &worker_token, || current());
+            let result = Settings::save_multi_manager_paths_cancellable(std::path::Path::new(&settings_path), &baseline, &desired, auto_reconnect_on_load, &worker_token, || current());
             let failure = result.as_ref().err().filter(|error| !matches!(error, crate::settings::MultiManagerPathsError::Canceled)).map(ToString::to_string);
             registry.complete_preference_token(worker_token.id(), failure); let _ = sender.send(result);
         }) {

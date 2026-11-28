@@ -11,8 +11,9 @@ pub struct MultiManagerPaths {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MultiManagerPathsSnapshot {
     pub paths: MultiManagerPaths,
+    pub auto_reconnect_on_load: bool,
     path: PathBuf,
-    owned: [Option<String>; 2],
+    owned: [Option<String>; 3],
     positional: bool,
     group_positional: bool,
 }
@@ -182,12 +183,13 @@ fn inspect(
         Root::Positional(a) => a.get(position),
     };
     let owned = match raw {
-        None => [None, None],
+        None => [None, None, None],
         Some(raw) if raw.get().trim_start().starts_with('[') => {
             let a: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(raw.get())?;
             [
                 a.get(1).map(|v| v.get().to_owned()),
                 a.get(2).map(|v| v.get().to_owned()),
+                a.get(8).map(|v| v.get().to_owned()),
             ]
         }
         Some(raw) => {
@@ -195,6 +197,7 @@ fn inspect(
             [
                 o.get("workspaces_path").map(|v| v.get().to_owned()),
                 o.get("bindings_path").map(|v| v.get().to_owned()),
+                o.get("auto_reconnect_on_load").map(|v| v.get().to_owned()),
             ]
         }
     };
@@ -204,6 +207,7 @@ fn inspect(
                 workspaces: settings.multi_manager.workspaces_path,
                 bindings: settings.multi_manager.bindings_path,
             },
+            auto_reconnect_on_load: settings.multi_manager.auto_reconnect_on_load,
             path: path.to_owned(),
             owned,
             positional: matches!(root, Root::Positional(_)),
@@ -232,25 +236,36 @@ impl Settings {
         desired: &MultiManagerPaths,
         current: impl Fn() -> bool,
     ) -> Result<MultiManagerPathsAcknowledgement, MultiManagerPathsError> {
-        save(path.as_ref(), baseline, desired, None, current)
+        save(path.as_ref(), baseline, desired, None, None, current)
+    }
+    pub fn save_multi_manager_settings_checked(
+        path: impl AsRef<Path>,
+        baseline: &MultiManagerPathsSnapshot,
+        desired: &MultiManagerPaths,
+        auto_reconnect_on_load: bool,
+        current: impl Fn() -> bool,
+    ) -> Result<MultiManagerPathsAcknowledgement, MultiManagerPathsError> {
+        save(path.as_ref(), baseline, desired, Some(auto_reconnect_on_load), None, current)
     }
     pub(crate) fn save_multi_manager_paths_cancellable(
         path: &Path,
         baseline: &MultiManagerPathsSnapshot,
         desired: &MultiManagerPaths,
+        auto_reconnect_on_load: Option<bool>,
         token: &SettingsBooleanSaveToken,
         current: impl Fn() -> bool,
     ) -> Result<MultiManagerPathsAcknowledgement, MultiManagerPathsError> {
         if !token.mark_waiting_for_settings() {
             return Err(MultiManagerPathsError::Canceled);
         }
-        save(path, baseline, desired, Some(token), current)
+        save(path, baseline, desired, auto_reconnect_on_load, Some(token), current)
     }
 }
 fn save(
     path: &Path,
     baseline: &MultiManagerPathsSnapshot,
     desired: &MultiManagerPaths,
+    auto_reconnect_on_load: Option<bool>,
     token: Option<&SettingsBooleanSaveToken>,
     current: impl Fn() -> bool,
 ) -> Result<MultiManagerPathsAcknowledgement, MultiManagerPathsError> {
@@ -264,38 +279,46 @@ fn save(
         root(bytes.as_deref()).map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
     let (actual, position, fields) = inspect(path, bytes.as_deref(), &parsed)
         .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
-    if actual != *baseline {
+    let paths_match = actual.path == baseline.path
+        && actual.paths == baseline.paths
+        && actual.owned[..2] == baseline.owned[..2]
+        && actual.positional == baseline.positional
+        && actual.group_positional == baseline.group_positional;
+    if !paths_match || (auto_reconnect_on_load.is_some() && actual != *baseline) {
         return Err(MultiManagerPathsError::Conflict);
     }
+    let auto_reconnect_on_load = auto_reconnect_on_load.unwrap_or(actual.auto_reconnect_on_load);
     let base = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     let workspace = crate::multi_manager::state::resolve_relative_to(base, &desired.workspaces);
     let bindings = crate::multi_manager::state::resolve_relative_to(base, &desired.bindings);
-    if desired.workspaces.trim().is_empty() || desired.bindings.trim().is_empty() {
-        return Err(MultiManagerPathsError::Store(
-            "Source paths cannot be empty".into(),
-        ));
-    }
-    let _workspace_permit = crate::common::repair_watch::require_path_read(&workspace)
-        .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
-    let _bindings_permit = crate::common::repair_watch::require_path_read(&bindings)
-        .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
-    distinct_paths(path, &workspace, &bindings)
-        .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
-    let (workspace_basis, binding_basis) =
-        crate::multi_manager::checked::load_editor_source_basis(&workspace, &bindings, &active)
-            .map_err(|e| {
-                if !active() {
-                    MultiManagerPathsError::Canceled
-                } else {
-                    MultiManagerPathsError::Store(format!("MultiManager source: {e:#}"))
-                }
-            })?;
+    let paths_changed = actual.paths != *desired;
+    let bool_changed = actual.auto_reconnect_on_load != auto_reconnect_on_load;
+    let source_basis = if paths_changed || !bool_changed {
+        if desired.workspaces.trim().is_empty() || desired.bindings.trim().is_empty() {
+            return Err(MultiManagerPathsError::Store("Source paths cannot be empty".into()));
+        }
+        let workspace_permit = crate::common::repair_watch::require_path_read(&workspace)
+            .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
+        let bindings_permit = crate::common::repair_watch::require_path_read(&bindings)
+            .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
+        distinct_paths(path, &workspace, &bindings)
+            .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
+        let (workspace_basis, binding_basis) =
+            crate::multi_manager::checked::load_editor_source_basis(&workspace, &bindings, &active)
+                .map_err(|e| if !active() { MultiManagerPathsError::Canceled }
+                    else { MultiManagerPathsError::Store(format!("MultiManager source: {e:#}")) })?;
+        Some((workspace_permit, bindings_permit, workspace_basis, binding_basis))
+    } else {
+        None
+    };
     let sources_current = || {
-        crate::multi_manager::store::checked_workspace_source_is_current(&workspace_basis)
-            && source(&bindings).ok().as_ref() == Some(&binding_basis)
+        source_basis.as_ref().is_none_or(|(_, _, workspace_basis, binding_basis)| {
+            crate::multi_manager::store::checked_workspace_source_is_current(workspace_basis)
+                && source(&bindings).ok().as_ref() == Some(binding_basis)
+        })
     };
     if !active() {
         return Err(MultiManagerPathsError::Canceled);
@@ -303,12 +326,15 @@ fn save(
     if source(path).ok().as_ref() != Some(&bytes) {
         return Err(MultiManagerPathsError::Conflict);
     }
-    if actual.paths == *desired {
+    if !paths_changed && !bool_changed {
         if !active() {
             return Err(MultiManagerPathsError::Canceled);
         }
         if !sources_current() {
             return Err(MultiManagerPathsError::SourceChanged);
+        }
+        if !active() {
+            return Err(MultiManagerPathsError::Canceled);
         }
         if source(path).ok().as_ref() != Some(&bytes) {
             return Err(MultiManagerPathsError::Conflict);
@@ -326,10 +352,14 @@ fn save(
         .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
     let bindings_raw = serde_json::value::to_raw_value(&desired.bindings)
         .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
+    let auto_raw = serde_json::value::to_raw_value(&auto_reconnect_on_load)
+        .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
     let new_group = if old.is_some_and(|v| v.get().trim_start().starts_with('[')) {
         let mut a: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(old.unwrap().get())
             .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
-        let required = if desired.bindings != actual.paths.bindings {
+        let required = if bool_changed {
+            9
+        } else if desired.bindings != actual.paths.bindings {
             3
         } else {
             2
@@ -338,7 +368,11 @@ fn save(
             let value = match a.len() {
                 0 => serde_json::value::to_raw_value(&true),
                 1 => serde_json::value::to_raw_value(&actual.paths.workspaces),
-                _ => serde_json::value::to_raw_value(&actual.paths.bindings),
+                2 => serde_json::value::to_raw_value(&actual.paths.bindings),
+                3 | 4 => serde_json::value::to_raw_value(&true),
+                5 | 6 => serde_json::value::to_raw_value(&false),
+                7 => serde_json::value::to_raw_value(&crate::settings::MultiManagerSettings::default().hotkey_poll_ms),
+                _ => serde_json::value::to_raw_value(&actual.auto_reconnect_on_load),
             }
             .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
             a.push(value);
@@ -348,6 +382,9 @@ fn save(
         }
         if desired.bindings != actual.paths.bindings {
             a[2] = bindings_raw;
+        }
+        if bool_changed {
+            a[8] = auto_raw;
         }
         serde_json::value::to_raw_value(&a)
     } else {
@@ -361,6 +398,9 @@ fn save(
         }
         if desired.bindings != actual.paths.bindings {
             o.insert("bindings_path".into(), bindings_raw);
+        }
+        if bool_changed {
+            o.insert("auto_reconnect_on_load".into(), auto_raw);
         }
         serde_json::value::to_raw_value(&o)
     }
@@ -383,7 +423,7 @@ fn save(
     .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
     let (expected, _, _) = inspect(path, Some(&candidate), &parsed)
         .map_err(|e| MultiManagerPathsError::Store(e.to_string()))?;
-    if expected.paths != *desired {
+    if expected.paths != *desired || expected.auto_reconnect_on_load != auto_reconnect_on_load {
         return Err(MultiManagerPathsError::Store(
             "MultiManager paths failed round trip".into(),
         ));
@@ -406,9 +446,15 @@ fn save(
             source_changed.set(true);
             return false;
         }
-        if distinct_paths(path, &workspace, &bindings).is_err()
-            || source(path).ok().as_ref() != Some(&bytes)
-        {
+        if source_basis.is_some() && distinct_paths(path, &workspace, &bindings).is_err() {
+            conflict.set(true);
+            return false;
+        }
+        if !active() {
+            canceled.set(true);
+            return false;
+        }
+        if source(path).ok().as_ref() != Some(&bytes) {
             conflict.set(true);
             return false;
         }
@@ -453,6 +499,112 @@ fn save(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn path_only_save_preserves_external_auto_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, br#"{"multi_manager":{"workspaces_path":"old.json","bindings_path":"bindings.json","auto_reconnect_on_load":true,"opaque":7}}"#).unwrap();
+        let baseline = Settings::multi_manager_paths_snapshot(&path).unwrap();
+        std::fs::write(&path, br#"{"multi_manager":{"workspaces_path":"old.json","bindings_path":"bindings.json","auto_reconnect_on_load":false,"opaque":7}}"#).unwrap();
+        let desired = MultiManagerPaths {
+            workspaces: "new.json".into(),
+            bindings: "bindings.json".into(),
+        };
+        let ack = Settings::save_multi_manager_paths_checked(&path, &baseline, &desired, || true).unwrap();
+        assert_eq!(ack.snapshot.paths, desired);
+        assert!(!ack.snapshot.auto_reconnect_on_load);
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(saved["multi_manager"]["auto_reconnect_on_load"], false);
+        assert_eq!(saved["multi_manager"]["opaque"], 7);
+    }
+
+    #[test]
+    fn path_save_rechecks_authority_after_source_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, b"{}").unwrap();
+        let baseline = Settings::multi_manager_paths_snapshot(&path).unwrap();
+        let desired = MultiManagerPaths {
+            workspaces: "new.json".into(),
+            bindings: "bindings.json".into(),
+        };
+        let calls = std::cell::Cell::new(0);
+        let result = Settings::save_multi_manager_paths_checked(&path, &baseline, &desired, || {
+            calls.set(calls.get() + 1);
+            calls.get() < 8
+        });
+        assert!(matches!(result, Err(MultiManagerPathsError::Canceled)));
+        assert_eq!(calls.get(), 8);
+        assert_eq!(std::fs::read(path).unwrap(), b"{}");
+    }
+    #[test]
+    fn bool_only_preserves_paths_and_opaque_fields_without_reading_stores() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let original = br#"{"opaque":{"x":1},"multi_manager":{"workspaces_path":"bad.json","bindings_path":"also-bad.json","extra":7}}"#;
+        std::fs::write(&path, original).unwrap();
+        std::fs::write(dir.path().join("bad.json"), b"broken").unwrap();
+        std::fs::create_dir(dir.path().join("also-bad.json")).unwrap();
+        let baseline = Settings::multi_manager_paths_snapshot(&path).unwrap();
+        assert!(baseline.auto_reconnect_on_load);
+        let ack = Settings::save_multi_manager_settings_checked(&path, &baseline, &baseline.paths, false, || true).unwrap();
+        assert!(!ack.snapshot.auto_reconnect_on_load);
+        assert_eq!(ack.snapshot.paths, baseline.paths);
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(value["multi_manager"]["extra"], 7);
+        assert_eq!(value["multi_manager"]["workspaces_path"], "bad.json");
+        assert_eq!(value["opaque"]["x"], 1);
+        assert!(matches!(Settings::save_multi_manager_settings_checked(&path, &baseline, &baseline.paths, false, || true), Err(MultiManagerPathsError::Conflict)));
+        assert_eq!(std::fs::read(dir.path().join("bad.json")).unwrap(), b"broken");
+    }
+
+    #[test]
+    fn positional_group_updates_only_auto_reconnect_slot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let defaults = crate::settings::MultiManagerSettings::default();
+        let group = serde_json::json!([true, "broken.json", "missing.json", true, true, false, false, defaults.hotkey_poll_ms, true, false, true]);
+        std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"multi_manager": group.clone(), "opaque": 9})).unwrap()).unwrap();
+        std::fs::write(dir.path().join("broken.json"), b"broken").unwrap();
+        let baseline = Settings::multi_manager_paths_snapshot(&path).unwrap();
+        let ack = Settings::save_multi_manager_settings_checked(&path, &baseline, &baseline.paths, false, || true).unwrap();
+        assert!(!ack.snapshot.auto_reconnect_on_load);
+        let result: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        for index in 0..11 {
+            if index == 8 { assert_eq!(result["multi_manager"][index], false); }
+            else { assert_eq!(result["multi_manager"][index], group[index]); }
+        }
+        assert_eq!(result["opaque"], 9);
+    }
+
+    #[test]
+    fn bool_only_late_settings_change_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, b"{}").unwrap();
+        let baseline = Settings::multi_manager_paths_snapshot(&path).unwrap();
+        let calls = std::cell::Cell::new(0);
+        let result = Settings::save_multi_manager_settings_checked(&path, &baseline, &baseline.paths, false, || {
+            calls.set(calls.get() + 1);
+            if calls.get() == 4 { std::fs::write(&path, br#"{"opaque":7}"#).unwrap(); }
+            true
+        });
+        assert!(matches!(result, Err(MultiManagerPathsError::Conflict)));
+        assert_eq!(std::fs::read(path).unwrap(), br#"{"opaque":7}"#);
+    }
+
+    #[test]
+    fn combined_paths_and_auto_reconnect_acknowledge_together() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let baseline = Settings::multi_manager_paths_snapshot(&path).unwrap();
+        let desired = MultiManagerPaths { workspaces: "new-workspaces.json".into(), bindings: "new-bindings.json".into() };
+        let ack = Settings::save_multi_manager_settings_checked(&path, &baseline, &desired, false, || true).unwrap();
+        assert_eq!(ack.snapshot.paths, desired);
+        assert!(!ack.snapshot.auto_reconnect_on_load);
+        assert!(!dir.path().join("new-workspaces.json").exists());
+        assert!(!dir.path().join("new-bindings.json").exists());
+    }
     #[test]
     fn saves_relative_paths_preserving_opaque_fields_and_rejects_stale() {
         let dir = tempfile::tempdir().unwrap();

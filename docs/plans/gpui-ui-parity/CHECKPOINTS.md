@@ -2194,3 +2194,15 @@ Locked `fast-dev` library and launcher checks passed in 1m 44s and 28.76s. Indep
 P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open. The owned on/off profiles have the same workspace data and both Paste Sequence shortcuts disabled. Start both owned target windows before starting the launcher. Check that matches are available on the first pane open after startup, with unchanged geometry and GPUI store bytes. Then invoke one explicit Home or Target. Check manual Reconnect with startup disabled. Stock egui binding persistence, explicit Reload scheduling and the remaining G24 runtime retain their criteria.
 
 Continue P0.10 Auto-reconnect windows on load in `mm settings`.
+
+### P0.10 MultiManager Auto-reconnect windows on load setting
+
+The retained `mm settings` pane exposes the stock **Auto-reconnect windows on load** checkbox. Its draft shares the existing Save, Cancel, pending worker and close rules. Save and checkbox events carry the painted draft revision and current mount. The acknowledged option takes effect on the next launcher load.
+
+The checked Settings write patches the owned Boolean and any edited paths in one transaction. It preserves missing-as-enabled defaults, raw siblings and legacy positional settings. A checkbox-only Save skips both source stores and leaves the existing startup run and path binding intact. The path-only API preserves independently saved option edits. Combined saves retain exact paired source validation, live authority and the final Settings-byte comparison.
+
+Locked `fast-dev` library and launcher checks passed in 31.55s and 27.84s. Independent review cleared the versioned Save, selective acknowledgement and path-only compatibility. The grouped library and launcher link took 6m 15s. Nextest run `3a3725ba-456d-4490-adba-c960b73f471d` passed all nine selected tests in 2.727s with 9591 skipped.
+
+P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open with both Paste Sequence shortcuts disabled. Check checkbox keyboard focus, Cancel, Save and reopen, explicit egui readback and fresh startup with the option on and off. Compare unchanged Workspace and Bindings bytes in the GPUI profiles. Explicit Reload scheduling, remaining MultiManager settings and runtime retain their existing criteria.
+
+Continue P0.09 checked `note today` in the retained Note Editor.

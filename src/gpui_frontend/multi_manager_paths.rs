@@ -4,7 +4,7 @@ use multi_launcher::settings::{
     MultiManagerPaths, MultiManagerPathsError, MultiManagerPathsSnapshot,
 };
 
-pub(super) const WAIT: &str = "Save or Cancel MultiManager paths before closing.";
+pub(super) const WAIT: &str = "Save or Cancel MultiManager settings before closing.";
 
 pub(super) struct PathsView {
     pub open: bool,
@@ -17,6 +17,10 @@ pub(super) struct PathsView {
     native: NativeWindow,
     visibility: RootVisibility,
     focus: FocusHandle,
+    auto_focus: FocusHandle,
+    save_focus: FocusHandle,
+    auto_reconnect_on_load: bool,
+    revision: u64,
     workspace: Entity<InputState>,
     bindings: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
@@ -42,8 +46,9 @@ impl PathsView {
         let subscriptions = [&workspace, &bindings]
             .into_iter()
             .map(|input| {
-                cx.subscribe(input, |_: &mut Self, _, event: &InputEvent, cx| {
+                cx.subscribe(input, |view: &mut Self, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
+                        view.revision = view.revision.wrapping_add(1);
                         cx.notify();
                     }
                 })
@@ -60,6 +65,10 @@ impl PathsView {
             native,
             visibility,
             focus: cx.focus_handle(),
+            auto_focus: cx.focus_handle(),
+            save_focus: cx.focus_handle(),
+            auto_reconnect_on_load: true,
+            revision: 0,
             workspace,
             bindings,
             _subscriptions: subscriptions,
@@ -84,7 +93,8 @@ impl PathsView {
                     && self
                         .baseline
                         .as_ref()
-                        .is_some_and(|v| v.paths != self.draft(cx))))
+                        .is_some_and(|v| v.paths != self.draft(cx)
+                            || v.auto_reconnect_on_load != self.auto_reconnect_on_load)))
     }
     pub(super) fn retire_for_workspace(&mut self, cx: &App) -> bool {
         if !self.open {
@@ -173,6 +183,8 @@ impl PathsView {
                         view.bindings.update(cx, |input, cx| {
                             input.set_value(snapshot.paths.bindings.clone(), window, cx)
                         });
+                        view.auto_reconnect_on_load = snapshot.auto_reconnect_on_load;
+                        view.revision = view.revision.wrapping_add(1);
                         view.baseline = Some(snapshot);
                         view.status = None;
                     }
@@ -257,6 +269,8 @@ impl PathsView {
             return;
         };
         let desired = self.draft(cx);
+        let auto_reconnect_on_load = self.auto_reconnect_on_load;
+        let paths_changed = baseline.paths != desired;
         let Some(root) = self.root.upgrade() else {
             return;
         };
@@ -265,7 +279,7 @@ impl PathsView {
         };
         let (permit, workers, path, admission) = {
             let root = root.read(cx);
-            if root
+            if paths_changed && root
                 .multi_manager_view
                 .as_ref()
                 .is_some_and(|view| view.read(cx).open || view.read(cx).blocks_close())
@@ -308,11 +322,11 @@ impl PathsView {
         let host = self.host;
         let weak = cx.entity().downgrade();
         window.defer(cx, move |window, cx| { let _ = weak.update(cx, |view, cx| {
-            let allowed = view.pending && view.attempt == attempt && mount.is_current() && mount.matches(&view.mount) && view.baseline.as_ref() == Some(&baseline) && view.draft(cx) == desired && lease.load(Ordering::Acquire) && focus.is_focused(window) && view.current(window, cx) && view.visibility.request_revision.load(Ordering::Acquire) == revision;
+            let allowed = view.pending && view.attempt == attempt && mount.is_current() && mount.matches(&view.mount) && view.baseline.as_ref() == Some(&baseline) && view.draft(cx) == desired && view.auto_reconnect_on_load == auto_reconnect_on_load && lease.load(Ordering::Acquire) && focus.is_focused(window) && view.current(window, cx) && view.visibility.request_revision.load(Ordering::Acquire) == revision;
             if !allowed { view.pending = false; view.lease = None; view.blur = None; view.active = None; view.status = Some("Save was superseded; try again.".into()); view.clear_wait(cx); cx.notify(); return; }
             let worker_mount = mount.clone(); let worker_lease = lease.clone(); let worker_visibility = visibility.clone();
             let current: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || worker_mount.is_current() && worker_lease.load(Ordering::Acquire) && !admission.is_fenced() && current_foreground_identity() == Some(native.identity) && json_utility::native_host_current(&worker_visibility, revision, Some(native), false));
-            let (receiver, token) = match workers.begin_multi_manager_paths_save(path.clone(), baseline.clone(), desired.clone(), current) { Ok(v) => v, Err(error) => { view.pending = false; view.lease = None; view.blur = None; view.active = None; view.status = Some(error); view.clear_wait(cx); cx.notify(); return; } };
+            let (receiver, token) = match workers.begin_multi_manager_settings_save(path.clone(), baseline.clone(), desired.clone(), auto_reconnect_on_load, current) { Ok(v) => v, Err(error) => { view.pending = false; view.lease = None; view.blur = None; view.active = None; view.status = Some(error); view.clear_wait(cx); cx.notify(); return; } };
             let task = cx.background_executor().spawn(async move { receiver.recv() });
             cx.spawn(async move |weak, cx| { let _permit = permit; let result = task.await; workers.acknowledge_boolean_preference_save(token.id()); let Some(entity) = weak.upgrade() else { return; };
                 let fallback = mount.clone();
@@ -320,31 +334,43 @@ impl PathsView {
                     if !mount.is_current() || !mount.matches(&view.mount) || !view.pending || view.attempt != attempt { return; }
                     view.pending = false; view.lease = None; view.blur = None; view.active = None;
                     match result {
-                        Ok(Ok(ack)) if ack.snapshot.paths == desired => {
+                        Ok(Ok(ack)) if ack.snapshot.paths == desired && ack.snapshot.auto_reconnect_on_load == auto_reconnect_on_load => {
                             let adopted = root.update(cx, |root, cx| {
-                                if root.settings_path != path || !root.multi_manager_paths.as_ref().is_some_and(|v| v.entity_id() == entity.entity_id()) || root.multi_manager_view.as_ref().is_some_and(|v| v.read(cx).open || v.read(cx).blocks_close()) { return false; }
-                                root.multi_manager_auto.retire();
-                                root.search_catalog.multi_manager_settings.workspaces_path = desired.workspaces.clone(); root.search_catalog.multi_manager_settings.bindings_path = desired.bindings.clone(); root.multi_manager_view = None; cx.notify(); true
+                                if root.settings_path != path || !root.multi_manager_paths.as_ref().is_some_and(|v| v.entity_id() == entity.entity_id()) || (paths_changed && root.multi_manager_view.as_ref().is_some_and(|v| v.read(cx).open || v.read(cx).blocks_close())) { return false; }
+                                if paths_changed {
+                                    root.multi_manager_auto.retire();
+                                    root.search_catalog.multi_manager_settings.workspaces_path = desired.workspaces.clone();
+                                    root.search_catalog.multi_manager_settings.bindings_path = desired.bindings.clone();
+                                    root.multi_manager_view = None;
+                                }
+                                root.search_catalog.multi_manager_settings.auto_reconnect_on_load = auto_reconnect_on_load;
+                                cx.notify(); true
                             }).unwrap_or(false);
-                            if adopted { view.baseline = Some(ack.snapshot); view.status = Some("MultiManager paths saved.".into()); } else { view.uncertain = true; view.status = Some("Paths saved; close and relaunch to apply them.".into()); }
+                            if adopted { view.baseline = Some(ack.snapshot); view.revision = view.revision.wrapping_add(1); view.status = Some("MultiManager settings saved.".into()); } else { view.uncertain = true; view.status = Some("Settings saved; close and relaunch to apply them.".into()); }
                         }
-                        Ok(Err(MultiManagerPathsError::CommittedUnverified(error))) => { view.uncertain = true; view.status = Some(format!("Paths may have been saved: {error}. Cancel and relaunch.")); }
+                        Ok(Err(MultiManagerPathsError::CommittedUnverified(error))) => { view.uncertain = true; view.status = Some(format!("MultiManager settings may have been saved: {error}. Cancel and relaunch.")); }
                         Ok(Err(error)) => view.status = Some(error.to_string()),
                         Ok(Ok(_)) | Err(_) => { view.uncertain = true; view.status = Some("Save acknowledgement is uncertain. Cancel and relaunch.".into()); }
                     }
-                    if view.uncertain { let _ = root.update(cx, |root, _| { root.multi_manager_auto.retire(); root.multi_manager_paths_uncertain = true; }); }
+                    if view.uncertain && paths_changed { let _ = root.update(cx, |root, _| { root.multi_manager_auto.retire(); root.multi_manager_paths_uncertain = true; }); }
                     view.clear_wait(cx); cx.notify();
                 });
-                if delivered.is_err() { let _ = entity.update(cx, |view, cx| { if fallback.is_current() && fallback.matches(&view.mount) && view.pending && view.attempt == attempt { view.pending = false; view.uncertain = true; view.lease = None; view.blur = None; view.active = None; view.status = Some("Save settled after window delivery failed. Cancel and relaunch to reconcile.".into()); let _ = view.root.update(cx, |root, _| { root.multi_manager_auto.retire(); root.multi_manager_paths_uncertain = true; }); view.clear_wait(cx); cx.notify(); } }); }
+                if delivered.is_err() { let _ = entity.update(cx, |view, cx| { if fallback.is_current() && fallback.matches(&view.mount) && view.pending && view.attempt == attempt { view.pending = false; view.uncertain = true; view.lease = None; view.blur = None; view.active = None; view.status = Some("MultiManager settings settled after window delivery failed. Cancel and relaunch to reconcile.".into()); if paths_changed { let _ = view.root.update(cx, |root, _| { root.multi_manager_auto.retire(); root.multi_manager_paths_uncertain = true; }); } view.clear_wait(cx); cx.notify(); } }); }
             }).detach();
         }); });
         cx.notify();
     }
 }
 impl Render for PathsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let save = self.mount.clone();
         let cancel = self.mount.clone();
+        let checkbox_mount = self.mount.clone();
+        let revision = self.revision;
+        let checked = self.auto_reconnect_on_load;
+        let focused = self.auto_focus.is_focused(window);
+        let palette = appearance::current(cx).palette;
+        let weak = cx.entity().downgrade();
         div()
             .id("multi-manager-paths")
             .key_context("MultiManagerPathsPane")
@@ -375,17 +401,44 @@ impl Render for PathsView {
                     .aria_label("Bindings path")
                     .readonly(self.pending || self.uncertain || self.baseline.is_none()),
             )
+            .child(
+                Checkbox::new(SharedString::from(format!("mm-auto-reconnect-{:?}-{revision}", cx.entity_id())))
+                    .checked(checked)
+                    .disabled(self.pending || self.uncertain || self.baseline.is_none())
+                    .accessibility_label("Auto-reconnect windows on load")
+                    .track_focus(&self.auto_focus)
+                    .on_change(move |state, _, window, app| {
+                        let _ = weak.update(app, |view, cx| {
+                            if !checkbox_mount.is_current() || !checkbox_mount.matches(&view.mount)
+                                || view.revision != revision || view.pending || view.uncertain
+                                || view.baseline.is_none() || !view.current(window, cx) { return; }
+                            view.auto_reconnect_on_load = state == CheckboxState::Checked;
+                            view.revision = view.revision.wrapping_add(1);
+                            cx.notify();
+                        });
+                    })
+                    .child(div().flex().items_center().gap_2()
+                        .child(CheckboxIndicator::new().checked(checked).size(px(18.0))
+                            .rounded(px(3.0)).border_1()
+                            .border_color(appearance::to_hsla(if focused { palette.focus } else { palette.control_border }))
+                            .when(checked, |indicator| indicator.bg(appearance::to_hsla(palette.accent))
+                                .text_color(appearance::to_hsla(palette.primary_text)))
+                            .items_center().justify_center().child(if checked { "✓" } else { "" }))
+                        .child(Label::new("Auto-reconnect windows on load"))),
+            )
             .children(self.status.clone().map(Label::new))
             .child(
                 div()
                     .flex()
                     .gap_2()
                     .child(
-                        Button::new("mm-paths-save")
+                        Button::new(SharedString::from(format!("mm-paths-save-{:?}-{revision}", cx.entity_id())))
                             .label("Save")
+                            .track_focus(&self.save_focus)
+                            .tab_stop(true)
                             .disabled(self.pending || self.uncertain || self.baseline.is_none())
                             .on_click(cx.listener(move |view, _, window, cx| {
-                                if save.is_current() && save.matches(&view.mount) {
+                                if save.is_current() && save.matches(&view.mount) && view.revision == revision {
                                     view.save(window, cx);
                                 }
                             })),
