@@ -2098,3 +2098,15 @@ Pending or uncertain membership excludes the affected provider before stock Sear
 Locked `fast-dev` library and launcher check passed in 1m 37s. Independent source review found no blocker in provider membership, the Google exception or launch provenance. Grouped link took 5m 37s. Nextest run `178cacbd-7cce-4d38-9502-5ea5080c99cc` passed 10 of 10 in 3.078 s with 9543 skips.
 
 P0.14 remains Stage 2 and the previously verified P0.15 web searching stays Stage 3. Paired 1516 × 937 replay remains open with owned no-directory profiles and both Paste Sequence shortcuts disabled. Verify Wikipedia disable and re-enable, Google cached shortcut removal and explicit Search gating, and egui readback. Keep dynamic membership and active service owner changes tracked. Continue P0.10 MultiManager Workspace and Bindings file paths while essential native replay is paused.
+
+### P0.10 checked MultiManager source paths
+
+The exact stock `mm settings` Search row opens a separate retained editor for Workspace and Bindings file paths. Save uses the canonical Settings file and resolves relative paths with the stock resolver. A failed read leaves the fields read-only. Another `mm` or Restore retires a clean settled paths form and uses the acknowledged pair. Dirty, pending or uncertain editing blocks the handoff with feedback.
+
+The shared transaction validates the existing candidate stores without writing them. Missing files are valid. Malformed or unreadable sources and aliases with either store or Settings are refused. It retains both Repair permits, checks exact source bytes after the final authority check, and updates only the changed path fields. Unrelated and positional Settings values are preserved. Cancellation and rejected changes preserve the prior pair. Exact readback authorizes the new pair and retires the prior closed workspace view. Save triggers no placement, reconnect, capture or runtime transition.
+
+Scoped locked `fast-dev` checks passed for the shared and corrected shared changes in 59.47s and 25.11s, and for the mounted and corrected launcher in 39.32s and 6.46s. Independent source review covered stale candidate data, aliases, exact Search, deferred save admission, current workspace handoff, and pane focus. The grouped library, launcher, and stock integration link took 12m 39s. Nextest run `7374d236-3ba7-4a0a-b8e0-0cea6f96b993` passed 13 of 13 in 3.710 s with 9555 skips.
+
+P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open with two owned source pairs and both Paste Sequence shortcuts disabled. Verify the exact form, Cancel and Escape, dirty refusal, Save preserving the four data files, and a fresh `mm` reading the new pair. Check egui readback after relaunch. Other Settings controls, the runtime and hotkeys stay open.
+
+Continue P0.10 checked whole-catalog Reconnect while essential Windows replay is paused. Reuse the existing matcher and checked workspace owner.

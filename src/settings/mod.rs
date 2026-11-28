@@ -27,6 +27,7 @@ pub use store::{
     SettingsBooleanPreference, SettingsBooleanSaveAcknowledgement, SettingsBooleanSaveError,
     SettingsBooleanSaveRequest, SettingsBooleanSaveToken,
     StatelessPlugin, PluginMembershipSnapshot, PluginMembershipRequest, PluginMembershipError, PluginMembershipAcknowledgement,
+    MultiManagerPaths, MultiManagerPathsSnapshot, MultiManagerPathsAcknowledgement, MultiManagerPathsError,
 };
 pub use utility_dialog_sizes::{
     AppliedWindowSize, NativeWindowGeometry, ObservedWindowSize, PreferredWindowSize,

@@ -10,6 +10,9 @@ pub use omni_preferences::{OmniPreferencesSnapshot, OmniPreferencesAcknowledgeme
 #[path = "plugin_membership.rs"]
 mod plugin_membership;
 pub use plugin_membership::{StatelessPlugin, PluginMembershipSnapshot, PluginMembershipRequest, PluginMembershipError, PluginMembershipAcknowledgement};
+#[path = "multi_manager_paths.rs"]
+mod multi_manager_paths;
+pub use multi_manager_paths::{MultiManagerPaths, MultiManagerPathsSnapshot, MultiManagerPathsAcknowledgement, MultiManagerPathsError};
 
 use super::Settings;
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};

@@ -95,7 +95,7 @@ fn focus_out_revokes(started: bool, launcher_foreground: bool) -> bool {
     !started || launcher_foreground
 }
 
-pub(super) const WAIT: &str = "Save or discard the MultiManager workspace draft before closing.";
+pub(super) const WAIT: &str = "Save or discard the MultiManager workspace or paths draft before closing.";
 
 pub(super) fn current_provider(
     query: &str,
@@ -114,6 +114,7 @@ pub(super) fn current_provider(
             Ok(Command::MultiManager(
                 multi_launcher::commands::MultiManagerCommand::Open
                     | multi_launcher::commands::MultiManagerCommand::RestoreBindings
+                    | multi_launcher::commands::MultiManagerCommand::Settings
             ))
         )
         && super::search_providers::search_routed(
@@ -1929,6 +1930,7 @@ impl RootWindow {
         {
             return;
         }
+        if !self.retire_clean_multi_manager_paths(cx) { return; }
         if let Some(view) = &self.multi_manager_view {
             let view_state = view.read(cx);
             if restore_busy(
@@ -1965,6 +1967,7 @@ impl RootWindow {
         {
             return;
         }
+        if !self.retire_clean_multi_manager_paths(cx) { return; }
         let view = if let Some(view) = &self.multi_manager_view {
             let view = view.clone();
             view.update(cx, |view, cx| {
@@ -2005,7 +2008,13 @@ impl RootWindow {
             self.multi_manager_view = Some(view.clone());
             view
         };
-        let id = window.window_handle().window_id();
+        let _ = view;
+        let index = self.multi_manager_scroll_item(window.window_handle().window_id(), cx);
+        self.root_scroll.scroll_to_top_of_item(index);
+        cx.notify();
+    }
+
+    pub(super) fn multi_manager_scroll_item(&self, id: WindowId, cx: &App) -> usize {
         let history = self
             .clipboard_history
             .as_ref()
@@ -2046,9 +2055,7 @@ impl RootWindow {
             .note_editor_view
             .as_ref()
             .is_some_and(|view| view.read(cx).open);
-        let _ = view;
-        self.root_scroll.scroll_to_top_of_item(
-            self.clipboard_scroll_item(id, cx)
+        self.clipboard_scroll_item(id, cx)
                 + usize::from(history)
                 + usize::from(modify)
                 + usize::from(snippets)
@@ -2058,9 +2065,16 @@ impl RootWindow {
                 + usize::from(lock)
                 + usize::from(duplicates)
                 + usize::from(notes)
-                + usize::from(editor),
-        );
-        cx.notify();
+                + usize::from(editor)
+    }
+
+    fn retire_clean_multi_manager_paths(&mut self, cx: &mut Context<Self>) -> bool {
+        let ready = !self.multi_manager_paths_uncertain && self.multi_manager_paths.as_ref().is_none_or(|view| view.update(cx, |view, cx| view.retire_for_workspace(cx)));
+        if !ready {
+            self.launcher_search_error = Some("Save or Cancel MultiManager paths before opening a workspace; relaunch if reconciliation is required.".into());
+            cx.notify();
+        }
+        ready
     }
 }
 
@@ -2116,6 +2130,14 @@ mod tests {
             None,
             None
         ));
+    }
+
+    #[test]
+    fn settings_provider_requires_exact_stock_action() {
+        let action = multi_launcher::multi_manager::commands::search_mm_commands("mm settings").into_iter().find(|row| row.action == "mm:settings").unwrap();
+        assert!(current_provider("mm settings", &action, None, None));
+        assert!(!current_provider("mm", &action, None, None));
+        assert!(!current_provider("mm settings", &action, Some(&HashSet::new()), None));
     }
     #[test]
     fn duplicate_id_rows_require_exact_ordinal_revision_and_record() {

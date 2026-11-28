@@ -104,6 +104,14 @@ pub fn load_bindings_if_exists(path: &Path) -> Result<Option<Vec<WorkspaceBindin
     }
 }
 
+/// Decode the exact bytes retained by a checked paired-source transaction.
+pub(crate) fn decode_binding_source(path: &Path, bytes: Option<&[u8]>) -> Result<Option<Vec<WorkspaceBindingSnapshot>>> {
+    bytes.map(|bytes| {
+        let text = std::str::from_utf8(bytes).with_context(|| format!("read {} as UTF-8", path.display()))?;
+        serde_json::from_str(text).with_context(|| format!("parse {}", path.display()))
+    }).transpose()
+}
+
 pub fn restore_bindings(workspaces: &mut [MmWorkspace], snapshots: &[WorkspaceBindingSnapshot]) {
     restore_bindings_with_query(workspaces, snapshots, win::query_hwnd_identity);
 }

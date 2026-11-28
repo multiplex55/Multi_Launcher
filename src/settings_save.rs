@@ -1043,6 +1043,28 @@ impl SettingsSaveWorkerRegistry {
     }
 
     /// Register the complete Omni Search category transaction under the Settings owner.
+    pub fn begin_multi_manager_paths_read(&self, settings_path: String) -> Result<Receiver<Result<crate::settings::MultiManagerPathsSnapshot, crate::settings::MultiManagerPathsError>>, String> {
+        let (sender, receiver) = mpsc::channel();
+        self.spawn(move || { let _ = sender.send(Settings::multi_manager_paths_snapshot(&settings_path)); })
+            .map_err(|error| format!("could not start the MultiManager paths reader: {error}"))?;
+        Ok(receiver)
+    }
+
+    pub fn begin_multi_manager_paths_save(&self, settings_path: String, baseline: crate::settings::MultiManagerPathsSnapshot, desired: crate::settings::MultiManagerPaths, current: Arc<dyn Fn() -> bool + Send + Sync>) -> Result<(Receiver<Result<crate::settings::MultiManagerPathsAcknowledgement, crate::settings::MultiManagerPathsError>>, SettingsBooleanSaveToken), String> {
+        let token = self.reserve_preference_token()?;
+        let (sender, receiver) = mpsc::channel();
+        let registry = self.clone(); let worker_token = token.clone();
+        if let Err(error) = self.spawn(move || {
+            let result = Settings::save_multi_manager_paths_cancellable(std::path::Path::new(&settings_path), &baseline, &desired, &worker_token, || current());
+            let failure = result.as_ref().err().filter(|error| !matches!(error, crate::settings::MultiManagerPathsError::Canceled)).map(ToString::to_string);
+            registry.complete_preference_token(worker_token.id(), failure); let _ = sender.send(result);
+        }) {
+            self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).boolean_preference_pending.remove(&token.id());
+            return Err(format!("could not start the MultiManager paths writer: {error}"));
+        }
+        Ok((receiver, token))
+    }
+
     pub fn begin_omni_preferences_save(&self, settings_path: String, baseline: crate::settings::OmniPreferencesSnapshot, desired: crate::plugins::omni_search::OmniSearchSettings)
         -> Result<(Receiver<anyhow::Result<crate::settings::OmniPreferencesAcknowledgement>>, SettingsBooleanSaveToken), String> {
         let token = self.reserve_preference_token()?;

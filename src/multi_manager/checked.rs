@@ -76,6 +76,19 @@ pub fn load_editor_sources_checked(workspace_path: &Path, bindings_path: &Path, 
     (workspace, bindings)
 }
 
+/// Caller holds both Repair read permits for the lifetime of the returned basis.
+pub(crate) fn load_editor_source_basis(workspace_path: &Path, bindings_path: &Path, current: impl Fn() -> bool) -> Result<(CheckedWorkspaceSnapshot, Option<Vec<u8>>)> {
+    let workspace = store::load_checked_workspaces(workspace_path, &current)?;
+    let bytes = match std::fs::read(bindings_path) {
+        Ok(bytes) => Some(bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("read {}", bindings_path.display())),
+    };
+    bindings::decode_binding_source(bindings_path, bytes.as_deref())?;
+    anyhow::ensure!(current(), "MultiManager source read superseded");
+    Ok((workspace, bytes))
+}
+
 /// Observes exactly one saved HWND, never enumerating the desktop.
 pub trait RestoreObserver {
     fn observe(&self, hwnd: usize) -> Option<(EnumeratedWindow, WindowSwitchIdentity)>;

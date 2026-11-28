@@ -17,6 +17,7 @@ mod duplicate_finder;
 mod quick_notes;
 mod note_editor;
 mod multi_manager;
+mod multi_manager_paths;
 mod file_search_handoff;
 mod file_search_preview;
 mod settings_actions;
@@ -2569,6 +2570,8 @@ struct RootWindow {
     quick_notes_view: Option<Entity<quick_notes::QuickNotesView>>,
     note_editor_view: Option<Entity<note_editor::NoteEditor>>,
     multi_manager_view: Option<Entity<multi_manager::MultiManagerView>>,
+    multi_manager_paths: Option<Entity<multi_manager_paths::PathsView>>,
+    multi_manager_paths_uncertain: bool,
     calculation_pad_view: Option<Entity<calculation_pad::CalculationPadView>>,
     timer_view: Option<Entity<timer_view::TimerView>>,
     todo_view: Option<Entity<todo_view::TodoView>>,
@@ -3497,10 +3500,11 @@ fn intercept_root_pane_escape(
     let quick_notes = context_stack_has_primary(&event.context_stack, "QuickNotesPane");
     let note_editor = context_stack_has_primary(&event.context_stack, "NoteEditorPane");
     let multi_manager = context_stack_has_primary(&event.context_stack, "MultiManagerPane");
+    let multi_manager_paths = context_stack_has_primary(&event.context_stack, "MultiManagerPathsPane");
     if event.keystroke.key != "escape"
         || receipt.virtual_key != 0x1b
         || receipt.modifiers.modified()
-        || (!plugin_editor && !folder_size && !file_lock && !duplicate_finder && !quick_notes && !note_editor && !multi_manager && !context_stack_has_primary(&event.context_stack, "FileSearchPane"))
+        || (!plugin_editor && !folder_size && !file_lock && !duplicate_finder && !quick_notes && !note_editor && !multi_manager && !multi_manager_paths && !context_stack_has_primary(&event.context_stack, "FileSearchPane"))
     {
         return false;
     }
@@ -3551,6 +3555,12 @@ fn intercept_root_pane_escape(
     }
     if multi_manager {
         let view = state.multi_manager_view.clone();
+        let handled = view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, receipt.held)));
+        if handled && !receipt.held { root.update(cx, |root, _| root.pane_escape_latched = true); }
+        return handled;
+    }
+    if multi_manager_paths {
+        let view = state.multi_manager_paths.clone();
         let handled = view.is_some_and(|view| view.update(cx, |view, cx| view.handle_escape(window, cx, receipt.held)));
         if handled && !receipt.held { root.update(cx, |root, _| root.pane_escape_latched = true); }
         return handled;
@@ -5071,6 +5081,7 @@ impl RootWindow {
         if let Some(view) = &self.multi_manager_view {
             view.update(cx, |view, _| view.revoke_operation());
         }
+        if let Some(view) = &self.multi_manager_paths { view.update(cx, |view, _| view.revoke()); }
         if let Some(view) = &self.calculation_pad_view {
             view.update(cx, |view, _| view.revoke_document());
         }
@@ -5806,6 +5817,8 @@ impl RootWindow {
         if self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(quick_notes::WAIT.into()); }
         if self.note_editor_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(note_editor::WAIT.into()); }
         if self.multi_manager_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Err(multi_manager::WAIT.into()); }
+        if self.multi_manager_paths.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(multi_manager_paths::WAIT.into()); }
+        if self.multi_manager_paths_uncertain { return Err("Cancel MultiManager paths, close and manually relaunch to reconcile.".into()); }
         if self.calculation_pad_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Err(calculation_pad::WAIT.into()); }
         if self.calculator_search.active {
             return Err(calculator_search::SEARCH_PENDING_STATUS.to_owned());
@@ -8372,7 +8385,9 @@ impl RootWindow {
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "MultiManager") {
             if multi_manager::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
-                if result.action.action == "mm:restore-bindings" {
+                if result.action.action == "mm:settings" {
+                    self.open_multi_manager_paths(window, cx);
+                } else if result.action.action == "mm:restore-bindings" {
                     self.restore_multi_manager(query, result.action.clone(), generation, index, window, cx);
                 } else {
                     self.open_multi_manager(window, cx);
@@ -10862,7 +10877,7 @@ impl RootWindow {
         if self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Some(RootCloseBlocker::DuplicateFinder); }
         if self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::QuickNotes); }
         if self.note_editor_view.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::NoteEditor); }
-        if self.multi_manager_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Some(RootCloseBlocker::MultiManager); }
+        if self.multi_manager_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) || self.multi_manager_paths.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Some(RootCloseBlocker::MultiManager); }
         if self.calculation_pad_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Some(RootCloseBlocker::CalculationPad); }
         if self.file_lock_retiring.iter().any(|window| window.native_window.is_none()) || self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Some(RootCloseBlocker::FileLock); }
         if self.folder_size_retiring.iter().any(|window| window.native_window.is_none())
@@ -11845,6 +11860,9 @@ impl Render for RootWindow {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.multi_manager_view.as_ref().filter(|view| view.read(cx).open) {
+            root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
+        }
+        if let Some(view) = self.multi_manager_paths.as_ref().filter(|view| view.read(cx).open) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.calculation_pad_view.as_ref().filter(|view| view.read(cx).open) {
@@ -13928,6 +13946,8 @@ pub(crate) fn run_foundation_window(
                 quick_notes_view: None,
                 note_editor_view: None,
                 multi_manager_view: None,
+                multi_manager_paths: None,
+                multi_manager_paths_uncertain: false,
                 calculation_pad_view: None,
                 timer_view: None,
                 todo_view: None,
@@ -16625,6 +16645,18 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].action, exact);
         assert_eq!(rows[0].origin, super::LauncherResultOrigin::Provider("reddit".into()));
+    }
+
+    #[test]
+    fn multi_manager_settings_projects_only_from_exact_stock_query() {
+        let enabled = HashSet::from(["MultiManager".to_owned()]);
+        let catalog = completion_catalog(Vec::new(), true, Some(&enabled));
+        let query = "mm settings";
+        let raw = super::search_providers::search_routed(catalog.providers.plugins(), query, Some(&enabled), None);
+        let rows = catalog.compose(query, raw, false);
+        assert!(rows.iter().any(|row| row.action.action == "mm:settings" && matches!(&row.origin, super::LauncherResultOrigin::Provider(name) if name == "MultiManager")));
+        let raw = super::search_providers::search_routed(catalog.providers.plugins(), "mm", Some(&enabled), None);
+        assert!(!raw.iter().any(|(_, action)| action.action == "mm:settings"));
     }
 
     #[test]
