@@ -15,8 +15,7 @@ use crate::gui::utility_dialog_size::UtilityDialogSizeWindowExt as _;
 use crate::platform::app_data::AppDataRoot;
 use eframe::egui;
 
-#[path = "calculation_pad_format.rs"]
-mod result_format;
+use crate::calculation_pad::result_format;
 
 #[path = "calculation_pad_editor.rs"]
 mod editor;

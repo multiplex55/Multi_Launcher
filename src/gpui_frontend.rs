@@ -5820,6 +5820,7 @@ impl RootWindow {
         if self.multi_manager_paths.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(multi_manager_paths::WAIT.into()); }
         if self.multi_manager_paths_uncertain { return Err("Cancel MultiManager paths, close and manually relaunch to reconcile.".into()); }
         if self.calculation_pad_view.as_ref().is_some_and(|view| view.read(cx).blocks_close()) { return Err(calculation_pad::WAIT.into()); }
+        if self.calculation_pad_view.as_ref().is_some_and(|view| view.read(cx).format_requires_relaunch()) { return Err("Close Multi Launcher and manually relaunch to reconcile Calculation Pad format.".into()); }
         if self.calculator_search.active {
             return Err(calculator_search::SEARCH_PENDING_STATUS.to_owned());
         }

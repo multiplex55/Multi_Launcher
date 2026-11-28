@@ -2,12 +2,67 @@
 use super::*;
 #[path = "calculation_pad_find.rs"]
 mod find;
+#[path = "calculation_pad_format.rs"]
+mod format;
 use multi_launcher::calculation_pad::{
     self, CalculationPadSession, CalculationPolicy, EvaluationBasis, LineId, LineOutcome,
 };
 use multi_launcher::plugin::Plugin;
 
-pub(super) const WAIT: &str = "Save the Calculation Pad document before closing.";
+pub(super) const WAIT: &str = "Finish the Calculation Pad operation, or save or discard its changes before closing.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyTarget {
+    CanonicalAll,
+    CanonicalLine(LineId),
+    FormattedLine { line: LineId, revision: u64 },
+}
+
+fn copy_payload(
+    evaluation: &calculation_pad::SessionEvaluation,
+    target: CopyTarget,
+    format_revision: u64,
+    uncertain: bool,
+    display: multi_launcher::settings::CalculationPadDisplayPreferences,
+) -> Option<String> {
+    match target {
+        CopyTarget::CanonicalAll => Some(calculation_pad::copy_all_results(
+            &evaluation.source,
+            evaluation,
+        )),
+        CopyTarget::CanonicalLine(id) | CopyTarget::FormattedLine { line: id, .. } => {
+            if matches!(target, CopyTarget::FormattedLine { revision, .. } if uncertain || revision != format_revision)
+            {
+                return None;
+            }
+            let row = evaluation.lines.iter().find(|row| row.id == id)?;
+            let LineOutcome::Value(value) = &row.outcome else {
+                return None;
+            };
+            match target {
+                CopyTarget::FormattedLine { .. } => {
+                    calculation_pad::result_format::display(value, display)
+                }
+                _ => value.canonical_result(),
+            }
+        }
+    }
+}
+
+fn settle_copy_effect(
+    root: &mut RootWindow,
+    lease: &Arc<AtomicBool>,
+    cx: &mut Context<RootWindow>,
+) {
+    root.external_launch.finish_auxiliary_effect(lease);
+    if let Some(view) = &root.clipboard_modify_view {
+        view.update(cx, |view, cx| view.launcher_effect_settled(cx));
+    }
+    if root.launcher_search_error.as_deref() == Some(clipboard_modify_view::LAUNCHER_EFFECT_WAIT) {
+        root.launcher_search_error = None;
+    }
+    cx.notify();
+}
 
 #[derive(Clone)]
 enum DocumentCommand {
@@ -60,6 +115,7 @@ pub(super) struct CalculationPadView {
     mount: utility_mount::MountReceipt,
     editor: Entity<TextareaState>,
     find: find::FindOwner,
+    format: format::FormatOwner,
     _editor_subscription: Subscription,
     session: Option<CalculationPadSession>,
     documents: Vec<calculation_pad::PadDocumentSummary>,
@@ -150,6 +206,7 @@ impl CalculationPadView {
             mount,
             editor,
             find,
+            format: format::FormatOwner::new(cx),
             _editor_subscription: subscription,
             session: Some(session),
             documents: Vec::new(),
@@ -169,8 +226,9 @@ impl CalculationPadView {
         }
     }
     pub(super) fn blocks_close(&self) -> bool {
-        self.open && (self.session.as_ref().is_none_or(|session| session.is_dirty() || session.pending_transition().is_some()) || self.pending_copy)
+        self.open && (self.session.as_ref().is_none_or(|session| session.is_dirty() || session.pending_transition().is_some()) || self.pending_copy || self.format.busy || (self.format.dirty() && !self.format.uncertain))
     }
+    pub(super) fn format_requires_relaunch(&self) -> bool { self.format.uncertain }
     fn revoke_copy(&mut self) {
         if let Some(lease) = &self.copy_lease {
             lease.store(false, Ordering::Release);
@@ -178,9 +236,11 @@ impl CalculationPadView {
     }
     pub(super) fn revoke_document(&mut self) {
         if let Some(lease) = &self.document_lease { lease.store(false, Ordering::Release); }
+        self.revoke_copy();
+        self.format.revoke();
     }
     fn document_command(&mut self, command: DocumentCommand, expected: Option<EvaluationBasis>, expected_pending: Option<calculation_pad::PendingTransition>, revision: u64, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending_copy || !self.current(window, cx)
+        if self.pending_copy || self.format.busy || (matches!(command, DocumentCommand::Close) && self.format.dirty() && !self.format.uncertain) || !self.current(window, cx)
             || !document_receipt_current(self.session.as_ref(), expected, expected_pending, self.document_revision, revision) { return; }
         let Some(permit) = self.admission.admit() else { return; };
         self.editor.focus_handle(cx).focus(window, cx);
@@ -299,34 +359,33 @@ impl CalculationPadView {
     }
     fn copy(
         &mut self,
-        line: Option<LineId>,
+        target: CopyTarget,
         basis: EvaluationBasis,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.pending_copy
+            || (matches!(target, CopyTarget::FormattedLine { .. })
+                && (self.format.busy || self.format.uncertain || self.format.baseline.is_none()))
             || !self.current(window, cx)
             || !copy_basis_is_current(self.session.as_ref(), basis)
         {
             return;
         }
-        let Some(evaluation) = self.session.as_mut().and_then(|session| session.shared_evaluation()) else {
+        let Some(evaluation) = self
+            .session
+            .as_mut()
+            .and_then(|session| session.shared_evaluation())
+        else {
             return;
         };
-        let text = if let Some(id) = line {
-            let Some(row) = evaluation.lines.iter().find(|row| row.id == id) else {
-                return;
-            };
-            match &row.outcome {
-                LineOutcome::Value(value) => value.canonical_result(),
-                _ => None,
-            }
-        } else {
-            Some(calculation_pad::copy_all_results(
-                &evaluation.source,
-                &evaluation,
-            ))
-        };
+        let text = copy_payload(
+            &evaluation,
+            target,
+            self.format.revision,
+            self.format.uncertain,
+            self.format.display(),
+        );
         let Some(text) = text else {
             return;
         };
@@ -390,6 +449,20 @@ impl CalculationPadView {
         let revision = visibility.request_revision.load(Ordering::Acquire);
         let admission = self.admission.clone();
         let worker_lease = lease.clone();
+        let weak_root = self.root.clone();
+        let weak = cx.entity().downgrade();
+        window.defer(cx, move |window, app| {
+          let fallback_root = weak_root.clone(); let fallback_lease = lease.clone();
+          let launched = weak.update(app, |view, cx| {
+            if !mount.is_current() || !mount.matches(&view.mount) || !view.pending_copy
+                || !lease.load(Ordering::Acquire) || !focus.is_focused(window) || !view.current(window, cx)
+                || view.visibility.request_revision.load(Ordering::Acquire) != revision
+                || !copy_basis_is_current(view.session.as_ref(), basis)
+                || matches!(target, CopyTarget::FormattedLine { revision, .. } if view.format.uncertain || view.format.busy || revision != view.format.revision) {
+                view.pending_copy = false; view.copy_lease = None; view.focus_guard = None; view.active_guard = None;
+                let _ = weak_root.update(cx, |root, cx| settle_copy_effect(root, &lease, cx));
+                view.message = Some("Copy was superseded; try again.".into()); view.settle_format_wait(cx); cx.notify(); return;
+            }
         let task = cx.background_executor().spawn(async move {
             let current = || {
                 worker_mount.is_current()
@@ -404,21 +477,9 @@ impl CalculationPadView {
                 &current,
             )
         });
-        let weak_root = self.root.clone();
         cx.spawn(async move |weak, cx| {
             let result = task.await;
-            let _ = weak_root.update(cx, |root, cx| {
-                root.external_launch.finish_auxiliary_effect(&lease);
-                if let Some(view) = &root.clipboard_modify_view {
-                    view.update(cx, |view, cx| view.launcher_effect_settled(cx));
-                }
-                if root.launcher_search_error.as_deref()
-                    == Some(clipboard_modify_view::LAUNCHER_EFFECT_WAIT)
-                {
-                    root.launcher_search_error = None;
-                }
-                cx.notify();
-            });
+            let _ = weak_root.update(cx, |root, cx| settle_copy_effect(root, &lease, cx));
             let _ = weak.update(cx, |view, cx| {
                 view.pending_copy = false;
                 view.copy_lease = None;
@@ -436,6 +497,7 @@ impl CalculationPadView {
                     && mount.matches(&view.mount)
                     && view.session.as_ref().and_then(|session| session.evaluation_basis()) == Some(basis)
                     && lease.load(Ordering::Acquire)
+                    && !matches!(target, CopyTarget::FormattedLine { revision, .. } if view.format.uncertain || revision != view.format.revision)
                 {
                     view.message = Some(match result {
                         Ok(()) => "Copied to clipboard.".into(),
@@ -447,6 +509,9 @@ impl CalculationPadView {
             drop(permit);
         })
         .detach();
+          });
+          if launched.is_err() { let _ = fallback_root.update(app, |root, cx| settle_copy_effect(root, &fallback_lease, cx)); }
+        });
     }
     fn set_editor_from_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.reset_find_if_document_changed(window, cx);
@@ -484,7 +549,11 @@ impl Render for CalculationPadView {
         session.advance_automatic();
         let basis = session.evaluation_basis();
         let displayed = session.displayed_evaluation();
-        let current_evaluation = session.shared_evaluation().is_some();
+        let current_result = session.shared_evaluation();
+        let current_evaluation = current_result.is_some();
+        let values = || current_result.iter().flat_map(|result| result.lines.iter()).filter_map(|row| if let LineOutcome::Value(value) = &row.outcome { Some(value) } else { None });
+        let has_precision = values().any(calculation_pad::result_format::supports_precision);
+        let has_percent = values().any(calculation_pad::result_format::supports_percent);
         let status = match session.evaluation_status() {
             calculation_pad::EvaluationStatus::Ready => "Ready".to_owned(),
             calculation_pad::EvaluationStatus::Pending => "Calculating…".to_owned(),
@@ -550,6 +619,7 @@ impl Render for CalculationPadView {
             .child(Textarea::new(&self.editor).readonly(pending.is_some()).aria_label("Calculation Pad source"))
             .child(Label::new(format!("Calculation: {status}")));
         if let Some(find) = self.find_panel(cx) { panel = panel.child(find); }
+        panel = panel.child(self.format_panel(basis, has_precision, has_percent, pending.is_some(), cx));
         let mut controls = div().flex().gap_2();
         for (name, kind) in [
             ("Calculate", 0),
@@ -561,9 +631,9 @@ impl Render for CalculationPadView {
             ("Close", 6),
         ] {
             controls = controls.child(
-                Button::new(SharedString::from(format!("calculation-pad-{kind}")))
+                Button::new(SharedString::from(if kind == 5 { format!("calculation-pad-{kind}-{:?}", basis) } else { format!("calculation-pad-{kind}") }))
                     .label(name)
-                    .disabled(pending.is_some() || (kind == 5 && (!current_evaluation || self.pending_copy)))
+                    .disabled(pending.is_some() || (kind == 5 && (!current_evaluation || self.pending_copy)) || (kind == 6 && (self.format.busy || (self.format.dirty() && !self.format.uncertain))))
                     .on_click(cx.listener(move |view, _, window, cx| {
                         if !view.current(window, cx) || view.session.as_ref().is_none_or(|session| session.pending_transition().is_some()) {
                             return;
@@ -605,7 +675,7 @@ impl Render for CalculationPadView {
                             }
                             5 => {
                                 if let Some(basis) = basis {
-                                    view.copy(None, basis, window, cx);
+                                    view.copy(CopyTarget::CanonicalAll, basis, window, cx);
                                 }
                             }
                             6 => {
@@ -623,14 +693,14 @@ impl Render for CalculationPadView {
         for (label, command) in [("Refresh", DocumentCommand::List), ("New", DocumentCommand::New), ("Save", DocumentCommand::Save)] {
             let receipt = self.mount.clone();
             document_controls = document_controls.child(Button::new(SharedString::from(format!("pad-doc-{label}")))
-                .label(label).disabled(pending.is_some()).on_click(cx.listener(move |view, _, window, cx| {
+                .label(label).disabled(pending.is_some() || self.format.busy).on_click(cx.listener(move |view, _, window, cx| {
                     if receipt.is_current() { view.document_command(command.clone(), basis, pending, document_revision, window, cx); }
                 })));
         }
         let save_receipt = self.mount.clone();
         documents = documents.child(document_controls)
-            .child(Input::new(&self.save_name).aria_label("Saved Pad name"))
-            .child(Button::new("pad-save-as").label("Save As").on_click(cx.listener(move |view, _, window, cx| {
+            .child(Input::new(&self.save_name).aria_label("Saved Pad name").readonly(self.format.busy))
+            .child(Button::new("pad-save-as").label("Save As").disabled(self.format.busy || pending.is_some()).on_click(cx.listener(move |view, _, window, cx| {
                 if save_receipt.is_current() {
                     let name = view.save_name.read(cx).value().to_string();
                     view.document_command(DocumentCommand::SaveAs(name), basis, pending, document_revision, window, cx);
@@ -640,7 +710,7 @@ impl Render for CalculationPadView {
             let id = document.id;
             let receipt = self.mount.clone();
             documents = documents.child(Button::new(SharedString::from(format!("pad-open-{id}")))
-                .label(format!("Open {}", document.name)).disabled(pending.is_some()).on_click(cx.listener(move |view, _, window, cx| {
+                .label(format!("Open {}", document.name)).disabled(pending.is_some() || self.format.busy).on_click(cx.listener(move |view, _, window, cx| {
                     if receipt.is_current() { view.document_command(DocumentCommand::Open(id), basis, pending, document_revision, window, cx); }
                 })));
         }
@@ -674,9 +744,10 @@ impl Render for CalculationPadView {
                 .overflow_y_scroll();
             for row in &evaluation.lines {
                 let value = match &row.outcome {
-                    LineOutcome::Value(value) => value
-                        .formatted_result()
-                        .unwrap_or_else(|| "unavailable".into()),
+                    LineOutcome::Value(value) => {
+                        calculation_pad::result_format::display(value, self.format.display())
+                            .unwrap_or_else(|| "unavailable".into())
+                    }
                     LineOutcome::Error(error) => format!("error: {error}"),
                     LineOutcome::Continuation { .. } => "continued".into(),
                     _ => String::new(),
@@ -685,23 +756,67 @@ impl Render for CalculationPadView {
                 let row_basis = evaluation.basis;
                 rows = rows.child(
                     div()
-                        .id(SharedString::from(format!("calculation-pad-result-{}", id.get())))
+                        .id(SharedString::from(format!(
+                            "calculation-pad-result-{:?}-{}",
+                            row_basis,
+                            id.get()
+                        )))
                         .flex()
                         .gap_2()
                         .child(Label::new(format!("{}  {value}", row.line_index + 1)))
                         .child(
                             Button::new(SharedString::from(format!(
-                                "calculation-pad-copy-{}",
-                                row.line_index
+                                "calculation-pad-copy-{:?}-{}",
+                                row_basis,
+                                id.get()
                             )))
                             .label("Copy Result")
-                            .disabled(pending.is_some() || self.pending_copy || !current_evaluation || stale || !matches!(row.outcome, LineOutcome::Value(_)))
+                            .disabled(
+                                pending.is_some()
+                                    || self.pending_copy
+                                    || !current_evaluation
+                                    || stale
+                                    || !matches!(row.outcome, LineOutcome::Value(_)),
+                            )
                             .on_click(cx.listener(
                                 move |view, _, window, cx| {
-                                    view.copy(Some(id), row_basis, window, cx)
+                                    view.copy(CopyTarget::CanonicalLine(id), row_basis, window, cx)
                                 },
                             )),
-                        ),
+                        )
+                        .child({
+                            let format_revision = self.format.revision;
+                            Button::new(SharedString::from(format!(
+                                "calculation-pad-copy-formatted-{:?}-{}-{}",
+                                row_basis,
+                                id.get(),
+                                format_revision
+                            )))
+                            .label("Copy Formatted Result")
+                            .disabled(
+                                pending.is_some()
+                                    || self.pending_copy
+                                    || self.format.busy
+                                    || self.format.uncertain
+                                    || self.format.baseline.is_none()
+                                    || !current_evaluation
+                                    || stale
+                                    || !matches!(row.outcome, LineOutcome::Value(_)),
+                            )
+                            .on_click(cx.listener(
+                                move |view, _, window, cx| {
+                                    view.copy(
+                                        CopyTarget::FormattedLine {
+                                            line: id,
+                                            revision: format_revision,
+                                        },
+                                        row_basis,
+                                        window,
+                                        cx,
+                                    )
+                                },
+                            ))
+                        }),
                 );
             }
             panel = panel.child(rows);
@@ -739,6 +854,14 @@ impl RootWindow {
             view.editor.focus_handle(cx).focus(window, cx);
             cx.notify();
         });
+        let format_view = view.clone();
+        window.defer(cx, move |_, cx| {
+            format_view.update(cx, |view, cx| {
+                if view.open && view.format.baseline.is_none() {
+                    view.load_format(cx);
+                }
+            });
+        });
         let id = window.window_handle().window_id();
         let index = self.clipboard_scroll_item(id, cx)
             + usize::from(self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
@@ -751,7 +874,8 @@ impl RootWindow {
             + usize::from(self.duplicate_finder_view.as_ref().is_some_and(|view| view.read(cx).open))
             + usize::from(self.quick_notes_view.as_ref().is_some_and(|view| view.read(cx).open))
             + usize::from(self.note_editor_view.as_ref().is_some_and(|view| view.read(cx).open))
-            + usize::from(self.multi_manager_view.as_ref().is_some_and(|view| view.read(cx).open));
+            + usize::from(self.multi_manager_view.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.multi_manager_paths.as_ref().is_some_and(|view| view.read(cx).open));
         self.root_scroll.scroll_to_top_of_item(index);
         cx.notify();
     }
@@ -759,7 +883,7 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_basis_is_current, current_provider, document_receipt_current};
+    use super::{CopyTarget, copy_basis_is_current, copy_payload, current_provider, document_receipt_current};
     use multi_launcher::calculation_pad::CalculationPadSession;
     use multi_launcher::plugin::Plugin;
     use std::collections::HashSet;
@@ -809,5 +933,26 @@ mod tests {
         let edited = session.evaluation_basis().unwrap();
         session.request_new().unwrap();
         assert!(!copy_basis_is_current(Some(&session), edited));
+    }
+
+    #[test]
+    fn copy_target_uses_current_line_and_keeps_canonical_payload() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = multi_launcher::platform::app_data::AppDataRoot::from_settings_path(temp.path().join("settings.json")).unwrap();
+        let mut session = CalculationPadSession::new(&root);
+        session.replace_source("1234.567\n2").unwrap();
+        let stale = session.line_id(1).unwrap();
+        session.replace_source("1234.567").unwrap();
+        session.request_calculate();
+        let evaluation = session.shared_evaluation().unwrap();
+        let line = evaluation.lines[0].id;
+        let prefs = multi_launcher::settings::CalculationPadDisplayPreferences { number_mode: multi_launcher::settings::CalculationPadNumberMode::Fixed, decimal_places: 2, group_digits: true, ..Default::default() };
+        let canonical = copy_payload(&evaluation, CopyTarget::CanonicalLine(line), 7, false, prefs).unwrap();
+        assert_eq!(copy_payload(&evaluation, CopyTarget::FormattedLine { line, revision: 7 }, 7, false, prefs).as_deref(), Some("1,234.57"));
+        assert_ne!(canonical, "1,234.57");
+        assert_eq!(copy_payload(&evaluation, CopyTarget::CanonicalLine(line), 8, true, prefs), Some(canonical));
+        assert!(copy_payload(&evaluation, CopyTarget::FormattedLine { line, revision: 7 }, 8, false, prefs).is_none());
+        assert!(copy_payload(&evaluation, CopyTarget::FormattedLine { line, revision: 7 }, 7, true, prefs).is_none());
+        assert!(copy_payload(&evaluation, CopyTarget::CanonicalLine(stale), 7, false, prefs).is_none());
     }
 }

@@ -58,7 +58,7 @@ fn scalar(value: f64, preferences: Preferences, percent: bool) -> Option<String>
     Some(text)
 }
 
-pub(super) fn supports_precision(value: &CalculationValue) -> bool {
+pub fn supports_precision(value: &CalculationValue) -> bool {
     matches!(
         value,
         CalculationValue::Scalar(_)
@@ -69,7 +69,7 @@ pub(super) fn supports_precision(value: &CalculationValue) -> bool {
     )
 }
 
-pub(super) fn supports_percent(value: &CalculationValue) -> bool {
+pub fn supports_percent(value: &CalculationValue) -> bool {
     match value {
         CalculationValue::Scalar(_) | CalculationValue::ApproximateScalar(_) => true,
         CalculationValue::DimensionalQuantity(value) => value
@@ -79,7 +79,7 @@ pub(super) fn supports_percent(value: &CalculationValue) -> bool {
     }
 }
 
-pub(super) fn display(value: &CalculationValue, preferences: Preferences) -> Option<String> {
+pub fn display(value: &CalculationValue, preferences: Preferences) -> Option<String> {
     if let CalculationValue::Exact(value) = value {
         return Some(match preferences.exact_mode {
             ExactMode::Exact => value.display(),

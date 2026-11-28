@@ -1,6 +1,6 @@
 # G15 — Calculation Pad and its complete companion tools
 
-**Status:** In implementation. **Owner:** G15 implementer with the calculation session/evaluation owner. The ordinary retained Pad, checked document workflows and focused evidence are recorded in the [P0.11 checkpoint](../CHECKPOINTS.md#p011-retained-calculation-pad-and-checked-documents). Matched native replay and the remaining G15 controls and companions stay open.
+**Status:** In implementation. **Owner:** G15 implementer with the calculation session/evaluation owner. The ordinary retained Pad and checked documents have focused evidence. Number format and formatted Copy use the shared stock formatter. Canonical Copy uses the existing canonical output. [P0.11 Pad checkpoint](../CHECKPOINTS.md#p011-retained-calculation-pad-and-checked-documents) [Pad result format checkpoint](../CHECKPOINTS.md#p011-calculation-pad-result-formatting-and-copy-formatted-result) Matched native replay and the remaining G15 controls and companions stay open.
 
 ## Objective and dependencies
 

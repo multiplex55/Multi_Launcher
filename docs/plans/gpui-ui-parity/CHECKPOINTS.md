@@ -2134,3 +2134,15 @@ The corrected and final locked launcher checks passed in 35.60s and 3.98s. Sourc
 Notes remains Stage 2. Paired 1516 × 937 Windows replay stays open for Unicode and reversed selection, Edit and Split preview, direct GPUI Undo and Redo, focus and cross-frontend Save readback. Use owned profiles with both Paste Sequence shortcuts disabled. Other editor actions retain their original G12 criteria.
 
 Continue P0.11 Calculation Pad result formatting and Copy Formatted Result. Use the stock display formatter and preserve canonical Copy and evaluation behavior.
+
+### P0.11 Calculation Pad result formatting and Copy Formatted Result
+
+The retained Pad exposes Auto, Fixed decimal, Scientific, Exact, Decimal, Mixed number, decimal places from 0 to 15, Group digits and Percent for scalars with stock eligibility. A dirty format draft offers Apply or Discard. The registered Settings worker compares the five exact format fields, preserves concurrent changes to unrelated display settings and verifies the final bytes. A verified acknowledgement redraws the same evaluation and leaves the source and document state intact. Conflicts require Discard and Reload before another attempt. An uncertain commit disables formatted copy and further format writes until a manual launcher relaunch.
+
+**Copy Formatted Result** uses the shared formatter for the exact painted line, evaluation basis and acknowledged format revision. Canonical **Copy** and **Copy All** keep their canonical payloads. Both use the existing checked clipboard lane. Focus, hide or an obsolete receipt can revoke a deferred effect.
+
+Locked `fast-dev` library checks passed in 2m 07s and 26.06s, the combined launcher and library check passed in 13.14s, and the final launcher checks passed in 11.44s and 5.63s. Independent review cleared the Settings merge, deferred effects, stale input receipts, keyboard focus ownership and recovery. The one grouped library and launcher test link took 26m 27s. Nextest run `9262b6e2-a6ad-4ea4-895c-6e850aa207c9` passed all 13 selected tests in 3.783s with 9562 skipped.
+
+P0.11 remains Stage 2. Paired 1516 × 937 Windows replay remains open with matching scaling, owned Settings and both Paste Sequence shortcuts disabled. Check visible and copied Fixed 2 output `333.33` for `x = 1000 / 3`, canonical Copy `333.333`, exact and percent eligibility, checked Save readback in egui, options focus after a repaint, and unchanged document bytes. Layout, advanced editor and companion criteria remain open.
+
+Continue P0.02 Edit App from an exact saved Search Action Sheet result through the existing checked App Editor.

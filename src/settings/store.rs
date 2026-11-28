@@ -13,6 +13,12 @@ pub use plugin_membership::{StatelessPlugin, PluginMembershipSnapshot, PluginMem
 #[path = "multi_manager_paths.rs"]
 mod multi_manager_paths;
 pub use multi_manager_paths::{MultiManagerPaths, MultiManagerPathsSnapshot, MultiManagerPathsAcknowledgement, MultiManagerPathsError};
+#[path = "calculation_pad_format.rs"]
+mod calculation_pad_format;
+pub use calculation_pad_format::{
+    CalculationPadFormatAcknowledgement, CalculationPadFormatError, CalculationPadFormatSnapshot,
+    CalculationPadResultFormat,
+};
 
 use super::Settings;
 use crate::common::persistence::{LoadState, PersistenceError, load_json, save_json_atomic};

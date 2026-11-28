@@ -23,6 +23,7 @@ mod limits;
 mod operators;
 mod persistence;
 mod programmer;
+pub mod result_format;
 mod quantity;
 pub(crate) mod reference;
 mod session;
