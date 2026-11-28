@@ -9,6 +9,12 @@ pub enum StatelessPlugin {
     DateArithmetic,
     BaseConvert,
     UnitConvert,
+    Google,
+    Wikipedia,
+    Youtube,
+    Reddit,
+    Runescape,
+    Weather,
 }
 
 impl StatelessPlugin {
@@ -23,7 +29,19 @@ impl StatelessPlugin {
             Self::UnitConvert => {
                 <crate::plugins::unit_convert::UnitConvertPlugin as BuiltinIdentity>::ID
             }
+            Self::Google => <crate::plugins_builtin::WebSearchPlugin as BuiltinIdentity>::ID,
+            Self::Wikipedia => <crate::plugins::wikipedia::WikipediaPlugin as BuiltinIdentity>::ID,
+            Self::Youtube => <crate::plugins::youtube::YoutubePlugin as BuiltinIdentity>::ID,
+            Self::Reddit => <crate::plugins::reddit::RedditPlugin as BuiltinIdentity>::ID,
+            Self::Runescape => <crate::plugins::runescape::RunescapeSearchPlugin as BuiltinIdentity>::ID,
+            Self::Weather => <crate::plugins::weather::WeatherPlugin as BuiltinIdentity>::ID,
         }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        [Self::DateArithmetic, Self::BaseConvert, Self::UnitConvert, Self::Google,
+         Self::Wikipedia, Self::Youtube, Self::Reddit, Self::Runescape, Self::Weather]
+            .into_iter().find(|plugin| plugin.id() == id)
     }
 }
 

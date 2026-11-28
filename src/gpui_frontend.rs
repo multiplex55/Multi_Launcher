@@ -7324,11 +7324,12 @@ impl RootWindow {
             return;
         }
         let effective = plugin_editor::effective_membership(self.enabled_plugins.as_ref(), self.plugin_membership_pending);
-        let raw_provider_actions = search_providers::search_routed(
+        let raw_provider_actions = search_providers::search_routed_excluding(
             self.search_catalog.providers.plugins(),
             &query,
             effective.as_deref(),
             self.enabled_capabilities.as_ref(),
+            self.plugin_membership_pending.map(|plugin| plugin.id()),
         );
         if omni_search::is_omni_query(&query) {
             let stamp = self.search_catalog.providers.omni.projection(&query).and_then(|projection| projection.calendar_stamp());

@@ -712,10 +712,20 @@ pub(super) fn search_routed<'a>(
     enabled: Option<&HashSet<String>>,
     caps: Option<&std::collections::HashMap<String, Vec<String>>>,
 ) -> Vec<(String, Action)> {
+    search_routed_excluding(plugins, query, enabled, caps, None)
+}
+
+pub(super) fn search_routed_excluding<'a>(
+    plugins: impl IntoIterator<Item = &'a dyn multi_launcher::plugin::Plugin>,
+    query: &str,
+    enabled: Option<&HashSet<String>>,
+    caps: Option<&std::collections::HashMap<String, Vec<String>>>,
+    excluded: Option<&str>,
+) -> Vec<(String, Action)> {
     let google_only = query.trim().to_lowercase().starts_with("g ")
         .then(|| HashSet::from(["web_search".to_owned()]));
     multi_launcher::plugin::search_filtered_plugins_with_origin(
-        plugins, query, google_only.as_ref().or(enabled), caps,
+        plugins.into_iter().filter(|plugin| Some(plugin.name()) != excluded), query, google_only.as_ref().or(enabled), caps,
     )
 }
 
@@ -1057,6 +1067,7 @@ mod tests {
         let rows = super::search_routed(providers, query, Some(&disabled), None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].0, "web_search");
+        assert!(super::search_routed_excluding(providers, query, Some(&disabled), None, Some("web_search")).is_empty());
         assert_eq!(rows[0].1.action, "https://www.google.com/search?q=Caf%C3%A9%2BTea");
         assert!(super::WebProvider::Google.is_current(query, &rows[0].1, Some(&disabled), None));
         let no_search = HashMap::from([("web_search".to_owned(), Vec::new())]);
@@ -1072,6 +1083,23 @@ mod tests {
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].1.action, "https://www.google.com/search?q=cat");
         assert!(super::search_routed(providers, "g ", Some(&enabled), None).is_empty());
+    }
+
+    #[test]
+    fn web_membership_fence_precedes_provider_search_and_google_exception() {
+        let providers = super::InstalledLauncherProviders::test_without_persisted_providers();
+        for (id, query) in [("web_search", "g cats"), ("wikipedia", "wiki cats"),
+            ("youtube", "yt cats"), ("reddit", "red cats"),
+            ("runescape_search", "rs cats"), ("weather", "weather London")] {
+            let enabled = HashSet::from([id.to_owned()]);
+            let rows = super::search_routed(providers.plugins(), query, Some(&enabled), None);
+            assert!(rows.iter().any(|(name, _)| name == id), "{id}");
+            assert!(super::search_routed_excluding(providers.plugins(), query, Some(&enabled), None, Some(id)).is_empty(), "{id}");
+        }
+        let disabled = HashSet::new();
+        assert!(!super::search_routed(providers.plugins(), "g cats", Some(&disabled), None).is_empty());
+        assert!(super::search_routed_excluding(providers.plugins(), "g cats", Some(&disabled), None, Some("web_search")).is_empty());
+        assert!(!providers.cached_commands(Some(&disabled)).iter().any(|action| action.action == "query:g "));
     }
 
     #[test]

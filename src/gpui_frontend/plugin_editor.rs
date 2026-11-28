@@ -20,12 +20,7 @@ fn receipt_is_current(
 }
 
 fn editable_membership(name: &str) -> Option<StatelessPlugin> {
-    match name {
-        "date_arithmetic" => Some(StatelessPlugin::DateArithmetic),
-        "base_convert" => Some(StatelessPlugin::BaseConvert),
-        "unit_convert" => Some(StatelessPlugin::UnitConvert),
-        _ => None,
-    }
+    StatelessPlugin::from_id(name)
 }
 
 pub(super) fn effective_membership(
@@ -883,6 +878,7 @@ impl Render for PluginEditorView {
                     .gap_2()
                     .when_some(membership_control, |row, control| row.child(control))
                     .child(search)
+                    .when(name == "web_search", |row| row.child(Label::new("Explicit g searches remain available when Enabled is off; Search controls them separately.")))
             })
             .collect::<Vec<_>>();
         div()
@@ -971,8 +967,8 @@ mod tests {
     }
 
     #[test]
-    fn membership_edit_admits_only_the_three_installed_stateless_ids() {
-        for name in ["date_arithmetic", "base_convert", "unit_convert"] {
+    fn membership_edit_admits_only_supported_installed_ids() {
+        for name in ["date_arithmetic", "base_convert", "unit_convert", "web_search", "wikipedia", "youtube", "reddit", "runescape_search", "weather"] {
             assert_eq!(editable_membership(name).unwrap().id(), name);
         }
         assert!(editable_membership("timer").is_none());
@@ -983,7 +979,7 @@ mod tests {
     fn disabled_membership_does_not_remove_installed_editor_rows() {
         let providers = super::super::search_providers::InstalledLauncherProviders::test_without_persisted_providers();
         let disabled = std::collections::HashSet::<String>::new();
-        for name in ["date_arithmetic", "base_convert", "unit_convert"] {
+        for name in ["date_arithmetic", "base_convert", "unit_convert", "web_search", "wikipedia", "youtube", "reddit", "runescape_search", "weather"] {
             assert!(!disabled.contains(name));
             assert!(providers.plugins().any(|provider| provider.name() == name));
             assert!(editable_membership(name).is_some());
