@@ -2254,3 +2254,15 @@ The locked `fast-dev` shared check passed in 2m 10s, the first integrated check 
 P0.18 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned foreground target, owned receipt executable and profiles with both Paste Sequence shortcuts disabled. Replay one release while the launcher is hidden and compare the exact quoted and empty Args, inherited working directory, History and Usage. Practice and the disabled gesture must produce no execution. General shell, other binding kinds and the separate host remain open.
 
 Continue P0.10 checked Send All Home in MultiManager.
+
+### P0.10 checked MultiManager Send All Home
+
+The retained MultiManager toolbar exposes **Send All Home**. It uses the exact clean workspace and its current per-row, catalog, startup or Restore bindings. A selected Restore contributes its own exact file basis. Reconnect-only placement works with an unavailable binding file. Legacy startup rows use the raw source and ordinal, so later reads with new synthesized IDs remain usable.
+
+The shared checked traversal rejects duplicates and stale sources before movement. It uses the member Home rectangle or the workspace fallback and carries the last exact authorized foreground window across workspace boundaries. An unrelated foreground or revoked source stops the batch. It uses the existing placement cleanup and reports moved and skipped eligible windows. The action performs no scan, store write or desktop switch.
+
+Locked `fast-dev` shared checks passed in 1m 13s and 23.34s. Integrated library and launcher checks passed in 18.44s and 30.55s. Independent review cleared legacy receipt identity, exact mixed Restore basis, skipped counts and the retained focus and placement lane. The grouped link took 10m 01s. Nextest run `8dd07794-2bc8-470c-85a3-a01402a9feec` passed eight of eight across two binaries in 2.548s with 9618 skipped.
+
+P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use matched owned profiles with both Paste Sequence shortcuts disabled and two live owned windows on the current desktop. Check both exact Home rectangles, the final authorized foreground, topmost cleanup, interruption with a newer foreground, and unchanged GPUI Workspace and Bindings bytes. Typed and broader runtime operations retain their criteria.
+
+Continue P0.07/P0.14 live Clipboard Modify named-Apply visibility Settings.

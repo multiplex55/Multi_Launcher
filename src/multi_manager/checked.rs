@@ -44,12 +44,17 @@ pub struct RestorePlan {
     workspaces: CheckedWorkspaceSnapshot,
     bindings_path: PathBuf,
     binding_bytes: Vec<u8>,
+    binding_summary: Vec<WorkspaceBindingSnapshot>,
     rows: Vec<RestoredWorkspace>,
     pub bound: usize,
     pub skipped: usize,
 }
 impl RestorePlan {
     pub fn rows(&self) -> &[RestoredWorkspace] { &self.rows }
+    /// Exact decoded binding basis captured by this Restore operation.
+    pub fn binding_source(&self) -> CheckedBindingSource {
+        CheckedBindingSource { path: self.bindings_path.clone(), bytes: Some(self.binding_bytes.clone()), summary: Some(self.binding_summary.clone()) }
+    }
     pub fn matches_binding_source(&self, source: &CheckedBindingSource) -> bool {
         self.bindings_path == source.path && source.bytes.as_ref() == Some(&self.binding_bytes)
     }
@@ -376,7 +381,7 @@ pub fn restore_checked(workspace_source: &CheckedWorkspaceSnapshot, bindings_pat
     }
     let mut rows: Vec<_> = rows.into_iter().map(|(index, overlay)| RestoredWorkspace { index, overlay }).collect();
     rows.sort_by_key(|row| row.index);
-    let plan = RestorePlan { workspaces: workspace_source.clone(), bindings_path: bindings_path.to_path_buf(), binding_bytes, rows, bound, skipped };
+    let plan = RestorePlan { workspaces: workspace_source.clone(), bindings_path: bindings_path.to_path_buf(), binding_bytes, binding_summary: snapshots, rows, bound, skipped };
     anyhow::ensure!(current() && plan.sources_match() && current(), "Restore sources changed or request superseded");
     Ok(plan)
 }
@@ -781,8 +786,12 @@ pub fn place_catalog_checked(plan: Arc<ReconnectCatalogPlan>, index: usize, issu
 }
 
 fn place_targets(workspace: &MmWorkspace, identities: &HashMap<usize, WindowSwitchIdentity>, issuer: WindowNativeIdentity, destination: Destination, current: Arc<dyn Fn() -> bool + Send + Sync>, backend: &mut impl PlacementBackend) -> PlacementReport {
+    let mut previous = None;
+    place_targets_with_previous(workspace, identities, issuer, destination, current, backend, &mut previous)
+}
+
+fn place_targets_with_previous(workspace: &MmWorkspace, identities: &HashMap<usize, WindowSwitchIdentity>, issuer: WindowNativeIdentity, destination: Destination, current: Arc<dyn Fn() -> bool + Send + Sync>, backend: &mut impl PlacementBackend, previous: &mut Option<WindowSwitchIdentity>) -> PlacementReport {
     let mut report = PlacementReport::default();
-    let mut previous = None::<WindowSwitchIdentity>;
     let required = if destination == Destination::Target {
         workspace
             .virtual_desktop
@@ -865,7 +874,63 @@ fn place_targets(workspace: &MmWorkspace, identities: &HashMap<usize, WindowSwit
                 break;
             }
         }
-        previous = Some(target.clone());
+        *previous = Some(target.clone());
+    }
+    report
+}
+
+/// Place exact checked rows at Home in canonical workspace and member order.
+/// No model HWND is admitted without an accompanying checked receipt.
+pub fn place_all_home_checked(
+    source: &CheckedWorkspaceSnapshot,
+    binding_source: Option<&CheckedBindingSource>,
+    rows: &[BindingRowReceipt],
+    issuer: WindowNativeIdentity,
+    current: Arc<dyn Fn() -> bool + Send + Sync>,
+    backend: &mut impl PlacementBackend,
+) -> PlacementReport {
+    let fail = |message: &str| PlacementReport { error: Some(message.into()), ..Default::default() };
+    let mut ordered: Vec<_> = rows.iter().collect();
+    ordered.sort_by_key(|row| row.index);
+    let mut seen_rows = HashSet::new();
+    let mut seen_hwnds = HashSet::new();
+    for row in &ordered {
+        if row.source.path() != source.path() || row.source.source() != source.source()
+            || !seen_rows.insert(row.index)
+            || source.workspaces().get(row.index).is_none_or(|original| original.disabled || !original.valid)
+            || row.source.workspaces().get(row.index).is_none_or(|original| original.disabled || !original.valid || !reconnect_row_matches_source(original, &row.workspace))
+            || row.identities.values().any(|identity| !seen_hwnds.insert(identity.native.hwnd))
+            || row.restore_binding.as_ref().is_some_and(|_| binding_source.is_none_or(|basis| !row.matches_binding_source(basis)))
+        {
+            return fail("Workspace or binding receipt is stale or duplicated");
+        }
+    }
+    if ordered.is_empty() { return fail("No checked live bindings to place"); }
+    let omitted = source.workspaces().iter().enumerate()
+        .filter(|(index, workspace)| !seen_rows.contains(index) && !workspace.disabled && workspace.valid)
+        .map(|(_, workspace)| workspace.windows.iter().filter(|window| !window.disabled).count())
+        .sum();
+    let source = source.clone();
+    let restore_basis = if ordered.iter().any(|row| row.restore_binding.is_some()) { binding_source.cloned() } else { None };
+    let checked: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+        if !current() { return false; }
+        let Ok(_workspace_permit) = crate::common::repair_watch::require_path_read(source.path()) else { return false; };
+        if !store::checked_workspace_source_is_current(&source) { return false; }
+        if let Some(basis) = &restore_basis {
+            let Ok(_permit) = crate::common::repair_watch::require_path_read(basis.path()) else { return false; };
+            if !bindings::read_binding_bytes(basis.path()).is_ok_and(|bytes| bytes == basis.bytes) { return false; }
+        }
+        current()
+    });
+    if !checked() { return fail("Workspace or binding source changed"); }
+    let mut report = PlacementReport::default();
+    report.skipped = omitted;
+    let mut previous = None;
+    for row in ordered {
+        let result = place_targets_with_previous(&row.workspace, &row.identities, issuer, Destination::Home, checked.clone(), backend, &mut previous);
+        report.moved += result.moved;
+        report.skipped += result.skipped;
+        if result.error.is_some() { report.error = result.error; break; }
     }
     report
 }
@@ -1750,6 +1815,86 @@ mod tests {
             })
         }
     }
+    #[test]
+    fn all_home_keeps_foreground_chain_and_rejects_duplicate_receipts() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        let mut first = workspace();
+        first.home_rect = Some(MmRect { x: 1, y: 2, w: 100, h: 80 });
+        let mut second = first.clone();
+        second.id = "two".into();
+        second.home_rect = Some(MmRect { x: 3, y: 4, w: 100, h: 80 });
+        let mut omitted = first.clone();
+        omitted.id = "three".into();
+        std::fs::write(&path, serde_json::to_vec(&[first, second, omitted]).unwrap()).unwrap();
+        let source = store::load_checked_workspaces(&path, || true).unwrap();
+        let receipt = |index, hwnd| BindingRowReceipt {
+            source: source.clone(), index, workspace: source.workspaces()[index].clone(),
+            identities: HashMap::from([(0, identity(hwnd, 22))]), restore_binding: None,
+        };
+        let issuer = WindowNativeIdentity { hwnd: 1, pid: 1, tid: 1 };
+        let fake = || FakePlacement { foreground: issuer, moved: Vec::new(), unrelated_after_first: false, cleanup_warning: false, foreign_target: false, change_target_at_activation: false };
+        let mut backend = fake();
+        let report = place_all_home_checked(&source, None, &[receipt(1, 11), receipt(0, 10)], issuer, Arc::new(|| true), &mut backend);
+        assert_eq!(report.moved, 2);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(backend.moved.iter().map(|(hwnd, _)| *hwnd).collect::<Vec<_>>(), vec![10, 11]);
+        assert!(report.error.is_none());
+        let mut backend = fake();
+        let report = place_all_home_checked(&source, None, &[receipt(0, 10), receipt(1, 10)], issuer, Arc::new(|| true), &mut backend);
+        assert!(report.error.is_some());
+        assert!(backend.moved.is_empty());
+        let mut backend = fake();
+        backend.unrelated_after_first = true;
+        let report = place_all_home_checked(&source, None, &[receipt(0, 10), receipt(1, 11)], issuer, Arc::new(|| true), &mut backend);
+        assert_eq!(report.moved, 1);
+        assert!(report.error.is_some());
+    }
+
+    #[test]
+    fn all_home_accepts_catalog_from_same_legacy_bytes_with_fresh_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("legacy.json");
+        let mut row = workspace();
+        row.id.clear();
+        row.home_rect = Some(MmRect { x: 1, y: 2, w: 100, h: 80 });
+        std::fs::write(&path, serde_json::to_vec(&[row]).unwrap()).unwrap();
+        let first = store::load_checked_workspaces(&path, || true).unwrap();
+        let plan = reconnect_catalog_checked(&first, || true, &FakeReconnect {
+            fail: false, rows: vec![(candidate(10), identity(10, 22))],
+        }).unwrap();
+        let reopened = store::load_checked_workspaces(&path, || true).unwrap();
+        assert_ne!(first.workspaces()[0].id, reopened.workspaces()[0].id);
+        let receipt = BindingRowReceipt::from_catalog(&plan, 0).unwrap();
+        let issuer = WindowNativeIdentity { hwnd: 1, pid: 1, tid: 1 };
+        let mut backend = FakePlacement { foreground: issuer, moved: Vec::new(), unrelated_after_first: false, cleanup_warning: false, foreign_target: false, change_target_at_activation: false };
+        let report = place_all_home_checked(&reopened, None, &[receipt], issuer, Arc::new(|| true), &mut backend);
+        assert_eq!(report.moved, 1);
+        assert!(report.error.is_none());
+    }
+
+    #[test]
+    fn all_home_rejects_stale_restore_basis_before_movement() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        let binding_path = dir.path().join("bindings.json");
+        let mut row = workspace();
+        row.home_rect = Some(MmRect { x: 1, y: 2, w: 100, h: 80 });
+        std::fs::write(&path, serde_json::to_vec(&[row]).unwrap()).unwrap();
+        std::fs::write(&binding_path, serde_json::to_vec(&[saved_binding("one", 10)]).unwrap()).unwrap();
+        let source = store::load_checked_workspaces(&path, || true).unwrap();
+        let basis = load_checked_binding_source(&binding_path, || true).unwrap();
+        let observer = FakeRestore { rows: HashMap::from([(10, (candidate(10), identity(10, std::process::id().wrapping_add(1).max(1))))]), replace: None };
+        let plan = restore_checked(&source, &binding_path, || true, &observer).unwrap();
+        let receipt = BindingRowReceipt::from_restore(&plan, &basis, 0).unwrap();
+        std::fs::write(&binding_path, b"[]").unwrap();
+        let issuer = WindowNativeIdentity { hwnd: 1, pid: 1, tid: 1 };
+        let mut backend = FakePlacement { foreground: issuer, moved: Vec::new(), unrelated_after_first: false, cleanup_warning: false, foreign_target: false, change_target_at_activation: false };
+        let report = place_all_home_checked(&source, Some(&basis), &[receipt], issuer, Arc::new(|| true), &mut backend);
+        assert!(report.error.is_some());
+        assert!(backend.moved.is_empty());
+    }
+
     #[test]
     fn restored_placement_refuses_changed_source_before_any_move() {
         let dir = tempfile::tempdir().unwrap();

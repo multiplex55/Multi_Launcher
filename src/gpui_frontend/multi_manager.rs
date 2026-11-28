@@ -15,6 +15,11 @@ struct PlacementOverlay {
     source: OverlaySource,
 }
 
+enum PlacementRequest {
+    Single { overlay: PlacementOverlay, destination: checked::Destination },
+    AllHome { rows: Vec<checked::BindingRowReceipt>, startup_owners: Vec<Arc<super::multi_manager_auto::Owner>>, binding_source: Option<checked::CheckedBindingSource> },
+}
+
 #[derive(Clone)]
 enum OverlaySource {
     Reconnect(checked::ReconnectedWorkspace),
@@ -59,7 +64,7 @@ fn select_overlay<'a>(
 
 fn binding_receipts(
     snapshot: &CheckedWorkspaceSnapshot,
-    binding_source: &checked::CheckedBindingSource,
+    binding_source: Option<&checked::CheckedBindingSource>,
     rows: &[MmWorkspace],
     overlays: &[PlacementOverlay],
     revision: u64,
@@ -75,7 +80,7 @@ fn binding_receipts(
                 startup_owners.push(owner.clone());
                 checked::BindingRowReceipt::from_catalog(plan, index)
             }
-            OverlaySource::Restore(plan) => checked::BindingRowReceipt::from_restore(plan, binding_source, index),
+            OverlaySource::Restore(plan) => checked::BindingRowReceipt::from_restore(plan, binding_source?, index),
             _ => None,
         }?;
         receipts.push(receipt);
@@ -229,6 +234,7 @@ pub(super) struct MultiManagerView {
     mount: utility_mount::MountReceipt,
     focus: FocusHandle,
     snapshot_focus: FocusHandle,
+    all_home_focus: FocusHandle,
     review_cancel: FocusHandle,
     workspace_path: PathBuf,
     bindings_path: PathBuf,
@@ -512,10 +518,25 @@ impl MultiManagerView {
         {
             return;
         }
-        let Some(overlay) = select_overlay(&self.overlays, index, expected, revision).cloned()
-        else {
+        let Some(overlay) = select_overlay(&self.overlays, index, expected, revision).cloned() else { return; };
+        self.place_windows(PlacementRequest::Single { overlay, destination }, window, cx);
+    }
+
+    fn move_all_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.current(window, cx) { return; }
+        let restore_basis = self.rows.iter().enumerate().find_map(|(index, row)| {
+            let overlay = select_overlay(&self.overlays, index, row, self.revision)?;
+            match &overlay.source { OverlaySource::Restore(plan) => Some(plan.binding_source()), _ => None }
+        });
+        let Some((rows, startup_owners)) = self.placement_receipts(restore_basis.as_ref()) else {
+            self.message = Some("No current checked windows are available; reconnect or restore first.".into());
+            cx.notify();
             return;
         };
+        self.place_windows(PlacementRequest::AllHome { rows, startup_owners, binding_source: restore_basis }, window, cx);
+    }
+
+    fn place_windows(&mut self, request: PlacementRequest, window: &mut Window, cx: &mut Context<Self>) {
         let Some(snapshot) = self.snapshot.clone() else {
             return;
         };
@@ -559,15 +580,20 @@ impl MultiManagerView {
             pid: native.identity.process_id,
             tid: native.identity.thread_id,
         };
-        let startup_owner = match &overlay.source { OverlaySource::Startup(_, owner) => Some(owner.clone()), _ => None };
+        let placement_snapshot = snapshot.clone();
+        let bulk = matches!(&request, PlacementRequest::AllHome { .. });
+        let startup_owners = match &request {
+            PlacementRequest::Single { overlay, .. } => match &overlay.source { OverlaySource::Startup(_, owner) => vec![owner.clone()], _ => Vec::new() },
+            PlacementRequest::AllHome { startup_owners, .. } => startup_owners.clone(),
+        };
         let current: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
             worker_receipt.is_current()
-                && startup_owner.as_ref().is_none_or(|owner| owner.is_current())
+                && startup_owners.iter().all(|owner| owner.is_current())
                 && !admission.is_fenced()
                 && lease.load(Ordering::Acquire)
-                && store::checked_workspace_source_is_current(&snapshot)
+                && (bulk || store::checked_workspace_source_is_current(&snapshot))
                 && worker_receipt.is_current()
-                && startup_owner.as_ref().is_none_or(|owner| owner.is_current())
+                && startup_owners.iter().all(|owner| owner.is_current())
                 && !admission.is_fenced()
                 && lease.load(Ordering::Acquire)
                 && json_utility::native_host_current(
@@ -577,12 +603,14 @@ impl MultiManagerView {
                     false,
                 )
         });
-        let restore_placement = matches!(&overlay.source, OverlaySource::Restore(_));
+        let restore_placement = match &request { PlacementRequest::Single { overlay, .. } if matches!(&overlay.source, OverlaySource::Restore(_)) => Some(overlay.index), _ => None };
         let task = cx.background_executor().spawn(async move {
             let mut backend = checked::NativePlacement {
                 effect_started: started,
             };
-            let report = match overlay.source {
+            let report = match request {
+                PlacementRequest::AllHome { rows, binding_source, .. } => checked::place_all_home_checked(&placement_snapshot, binding_source.as_ref(), &rows, issuer, current, &mut backend),
+                PlacementRequest::Single { overlay, destination } => match overlay.source {
                 OverlaySource::Reconnect(ref reconnect) => {
                     checked::place_checked(reconnect, issuer, destination, current, &mut backend)
                 }
@@ -595,6 +623,7 @@ impl MultiManagerView {
                     current,
                     &mut backend,
                 ),
+                },
             };
             (permit, report)
         });
@@ -608,7 +637,7 @@ impl MultiManagerView {
                 view.operation_lease = None;
                 view.focus_guard = None;
                 view.activation_guard = None;
-                if report.error.is_some() && restore_placement {
+                if report.error.is_some() && let Some(index) = restore_placement {
                     view.overlays.retain(|item| {
                         item.index != index || !matches!(&item.source, OverlaySource::Restore(_))
                     });
@@ -810,6 +839,7 @@ impl MultiManagerView {
             mount,
             focus: cx.focus_handle(),
             snapshot_focus: cx.focus_handle(),
+            all_home_focus: cx.focus_handle(),
             review_cancel: cx.focus_handle(),
             workspace_path,
             bindings_path,
@@ -1333,7 +1363,14 @@ impl MultiManagerView {
     fn snapshot_receipts(&self) -> Option<(Vec<checked::BindingRowReceipt>, Vec<Arc<super::multi_manager_auto::Owner>>)> {
         if !self.workspace_ready || self.pending || self.dirty() || self.rename.is_some()
             || self.review.is_some() || self.capture_slot.is_some() { return None; }
-        binding_receipts(self.snapshot.as_ref()?, self.binding_source.as_ref()?, &self.rows, &self.overlays, self.revision)
+        self.binding_source.as_ref()?;
+        self.placement_receipts(self.binding_source.as_ref())
+    }
+
+    fn placement_receipts(&self, binding_source: Option<&checked::CheckedBindingSource>) -> Option<(Vec<checked::BindingRowReceipt>, Vec<Arc<super::multi_manager_auto::Owner>>)> {
+        if !self.workspace_ready || self.pending || self.dirty() || self.rename.is_some()
+            || self.review.is_some() || self.capture_slot.is_some() { return None; }
+        binding_receipts(self.snapshot.as_ref()?, binding_source, &self.rows, &self.overlays, self.revision)
     }
 
     fn snapshot_available(&self) -> bool {
@@ -1963,6 +2000,10 @@ impl Render for MultiManagerView {
         let issued_attempt = self.attempt;
         let issued_overlay_revision = self.overlay_revision;
         let snapshot_available = self.snapshot_available();
+        let all_home_available = self.workspace_ready && !self.pending && !self.dirty()
+            && self.rename.is_none() && self.review.is_none() && self.capture_slot.is_none()
+            && self.snapshot.is_some() && self.rows.iter().enumerate().any(|(index, row)|
+                select_overlay(&self.overlays, index, row, self.revision).is_some());
         let mount = self.mount.clone();
         panel = panel.child(
             div()
@@ -2057,6 +2098,23 @@ impl Render for MultiManagerView {
                                     && view.overlay_revision == issued_overlay_revision
                                 {
                                     view.save_binding_snapshot(window, cx);
+                                }
+                            })
+                        }),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("mm-all-home-{:?}-{issued_revision}-{issued_attempt}-{issued_overlay_revision}", cx.entity_id())))
+                        .label("Send All Home")
+                        .track_focus(&self.all_home_focus)
+                        .tab_stop(true)
+                        .disabled(!all_home_available)
+                        .on_click({
+                            let mount = mount.clone();
+                            cx.listener(move |view, _, window, cx| {
+                                if mount.is_current() && mount.matches(&view.mount)
+                                    && view.revision == issued_revision && view.attempt == issued_attempt
+                                    && view.overlay_revision == issued_overlay_revision {
+                                    view.move_all_home(window, cx);
                                 }
                             })
                         }),
@@ -2613,10 +2671,11 @@ mod tests {
         let overlay = PlacementOverlay { index: 0, revision: 3, expected: expected.clone(), source: OverlaySource::Reconnect(checked::ReconnectedWorkspace {
             workspace: connected, identities: [(0, identity)].into_iter().collect(), summary: Default::default(),
         }) };
-        assert!(binding_receipts(&snapshot, &source, std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 3).is_some());
-        assert!(binding_receipts(&snapshot, &source, std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 4).is_none());
+        assert!(binding_receipts(&snapshot, Some(&source), std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 3).is_some());
+        assert!(binding_receipts(&snapshot, None, std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 3).is_some());
+        assert!(binding_receipts(&snapshot, Some(&source), std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 4).is_none());
         let mut changed = expected; changed.name.push('!');
-        assert!(binding_receipts(&snapshot, &source, &[changed], &[overlay], 3).is_none());
+        assert!(binding_receipts(&snapshot, Some(&source), &[changed], &[overlay], 3).is_none());
     }
 
     #[test]
@@ -2635,7 +2694,10 @@ mod tests {
         let row = MmWorkspace { id: "one".into(), name: "One".into(), windows: vec![multi_launcher::multi_manager::model::MmWindow {
             captured_title: "Editor".into(), executable: "editor.exe".into(), process_path: "C:\\editor.exe".into(), class_name: "Editor".into(), ..Default::default()
         }], ..Default::default() };
-        std::fs::write(&workspace_path, serde_json::to_vec(&[row]).unwrap()).unwrap();
+        let mut sibling = row.clone();
+        sibling.id = "two".into();
+        sibling.name = "Two".into();
+        std::fs::write(&workspace_path, serde_json::to_vec(&[row, sibling]).unwrap()).unwrap();
         let source = store::load_checked_workspaces(&workspace_path, || true).unwrap();
         let binding = multi_launcher::multi_manager::bindings::WorkspaceBindingSnapshot { workspace_id: Some("one".into()), workspace_name: "One".into(), windows: vec![multi_launcher::multi_manager::bindings::WindowBindingSnapshot {
             window_id: 0, window_index: 0, captured_title: "Editor".into(), hwnd: 42,
@@ -2646,14 +2708,31 @@ mod tests {
         let old = checked::load_checked_binding_source(&binding_path, || true).unwrap();
         let pid = std::process::id().wrapping_add(1).max(1);
         let identity = WindowSwitchIdentity { native: WindowNativeIdentity { hwnd: 42, pid, tid: 8 }, descriptor: WindowTargetIdentity { hwnd: 42, pid, executable: Some("editor.exe".into()), process_path: Some("C:\\editor.exe".into()), class_name: Some("Editor".into()) } };
-        let plan = Arc::new(checked::restore_checked(&source, &binding_path, || true, &Observer(identity)).unwrap());
+        let plan = Arc::new(checked::restore_checked(&source, &binding_path, || true, &Observer(identity.clone())).unwrap());
         let expected = source.workspaces()[0].clone();
         let overlay = PlacementOverlay { index: 0, revision: 1, expected: expected.clone(), source: OverlaySource::Restore(plan) };
-        assert!(binding_receipts(&source, &old, std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 1).is_some());
+        assert!(binding_receipts(&source, Some(&old), std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 1).is_some());
+        assert!(binding_receipts(&source, None, std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 1).is_none());
         let mut changed = bytes; changed.push(b' ');
         std::fs::write(&binding_path, changed).unwrap();
         let newer = checked::load_checked_binding_source(&binding_path, || true).unwrap();
-        assert!(binding_receipts(&source, &newer, &[expected], &[overlay], 1).is_none());
+        assert!(binding_receipts(&source, Some(&newer), std::slice::from_ref(&expected), std::slice::from_ref(&overlay), 1).is_none());
+        let fresh = Arc::new(checked::restore_checked(&source, &binding_path, || true, &Observer(identity.clone())).unwrap());
+        let fresh_basis = fresh.binding_source();
+        let fresh_overlay = PlacementOverlay { source: OverlaySource::Restore(fresh.clone()), ..overlay };
+        let sibling = source.workspaces()[1].clone();
+        let mut connected = sibling.clone();
+        connected.windows[0].mark_bound(43);
+        let mut sibling_identity = identity;
+        sibling_identity.native.hwnd = 43;
+        sibling_identity.descriptor.hwnd = 43;
+        let reconnect = PlacementOverlay { index: 1, revision: 1, expected: sibling.clone(), source: OverlaySource::Reconnect(checked::ReconnectedWorkspace {
+            workspace: connected, identities: [(0, sibling_identity)].into_iter().collect(), summary: Default::default(),
+        }) };
+        assert!(binding_receipts(&source, Some(&fresh_basis), &[expected, sibling], &[fresh_overlay, reconnect], 1).is_some());
+        std::fs::write(&binding_path, b"[]").unwrap();
+        let changed_again = checked::load_checked_binding_source(&binding_path, || true).unwrap();
+        assert!(!fresh.matches_binding_source(&changed_again));
     }
 
     #[test]
