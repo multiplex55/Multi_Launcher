@@ -864,7 +864,7 @@ impl RootWindow {
         let snippets = self
             .snippets_view
             .as_ref()
-            .is_some_and(|view| view.read(cx).open);
+            .is_some_and(|view| view.read(cx).is_mounted_in(id, false));
         let fill = self
             .snippet_fill
             .as_ref()

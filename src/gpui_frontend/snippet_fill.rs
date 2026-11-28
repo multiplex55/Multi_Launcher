@@ -159,6 +159,10 @@ impl SnippetFill {
         } else { self.focus.focus(window, cx); }
     }
 
+    pub(super) fn contains_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus.is_focused(window) || self.focus.contains_focused(window, cx)
+    }
+
     fn cycle_fields(&self, backwards: bool, window: &mut Window, cx: &mut App) {
         let current = self.fields.iter().position(|field| match &field.input {
             FieldInput::Single(input) => input.focus_handle(cx).is_focused(window),
@@ -257,7 +261,8 @@ impl SnippetFill {
         let preview_parent = self.preview_parent.take();
         self.retire(cx);
         if let Some((parent, receipt, instance, host)) = preview_parent {
-            let _ = parent.update(cx, |parent, cx| parent.return_from_preview(&receipt, instance, host, return_focus, owns, window, cx));
+            let child = cx.entity_id();
+            let _ = parent.update(cx, |parent, cx| parent.return_from_preview(&receipt, instance, host, child, return_focus, owns, window, cx));
             return;
         }
         let _ = self.root.update(cx, |root, cx| {
@@ -335,7 +340,7 @@ impl Render for SnippetFill {
                 if key == "escape" && modifiers == Modifiers::default() {
                     window.prevent_default(); cx.stop_propagation();
                     if !event.is_held {
-                        let _ = view.root.update(cx, |root, _| root.pane_escape_latched = true);
+                        if view.preview_parent.is_none() { let _ = view.root.update(cx, |root, _| root.pane_escape_latched = true); }
                         view.cancel(window, cx);
                     }
                 } else if key == "tab" && !modifiers.control && !modifiers.alt && !modifiers.platform {

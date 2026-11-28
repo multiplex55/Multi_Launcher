@@ -258,7 +258,7 @@ impl RootWindow {
         let id = window.window_handle().window_id();
         let history = self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
         let modify = self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
-        let snippets = self.snippets_view.as_ref().is_some_and(|view| view.read(cx).open);
+        let snippets = self.snippets_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
         let fill = self.snippet_fill.as_ref().is_some_and(|view| view.read(cx).open);
         self.root_scroll.scroll_to_top_of_item(self.clipboard_scroll_item(id, cx)
             + usize::from(history) + usize::from(modify) + usize::from(snippets) + usize::from(fill));

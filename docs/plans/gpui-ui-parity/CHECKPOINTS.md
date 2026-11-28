@@ -2326,3 +2326,15 @@ Locked `fast-dev` launcher checks passed in 15.13s and 6.78s. The corrected libr
 The History provider remains Stage 2. Paired 1516 × 937 replay remains open with the owned local document, directory, argument-reporting shortcut and loopback URL, plus an unavailable document. Use the paired keep-query and clear/hide settings with both Paste Sequence shortcuts disabled. Check one outer History and Usage record per accepted effect, correct destinations, unchanged saved data, stale refusal and no foreground theft. Indexed-only and provider-origin replay and Clear History retain their own criteria.
 
 Continue P0.08 checked Snippets editor Dock and Pop Out.
+
+### P0.08 checked Snippets Dock and Pop Out
+
+The retained Snippets editor supports Dock and Pop Out with the stock presentation key and geometry. A live transfer keeps the same list, filter, selection, draft, field order, and exact hidden or revealed text. It recreates the window-bound editors and focus handles after the checked handoff. Pending operations, removal review, active Preview and marked text block transfer. True Close retires the draft and revealed state. A fresh session starts with an empty filter.
+
+Save and Remove use the exact mounted window and the same checked canonical Snippets store. Bare and named Search opens keep the initiating Search and focus authority until native activation. A named open installs only the exact accepted row in the active destination and refuses to replace a draft. Dock checks the mounted pane focus before retiring the source popup. Geometry and presentation acknowledgements use the existing utility owners.
+
+Test / Preview opens inside the active editor window, including a popup while the launcher is hidden. It uses the protected prompt preparation with its own mount and draft receipt. Return restores the editor through the exact child identity and current host, and recalling a popup preserves focus in its active Preview. The editor reveals Preview on entry and restores its prior scroll position on Return. Standalone Search Fill keeps its own root slot and Copy flow.
+
+The locked `fast-dev` launcher checks passed in 11.91s, 7.22s and 7.26s, with the final focus and viewport correction checked in 5.00s. Independent review checked live draft transfer, foreground and rollback authority, exact child return, standalone Fill and geometry. The grouped launcher link took 32.90s. Nextest run `56f78a0f-c5df-45f1-a63b-425e6b44930a` passed all 17 selected cases in 7.456s with 591 skipped.
+
+P0.08 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned default and remembered profiles with both Paste Sequence shortcuts disabled. Reveal and edit the synthetic prompted snippet, Pop Out, Preview and Return with the launcher hidden, verify unchanged store bytes before Save, then Save, Dock, reopen and check egui readback. Replay true Close, popup recall and compact layout. Shrinking the popup during Preview can leave the restored Test / Preview button below the viewport because Return restores the prior scroll offset. Scoped Jump, pins and the remaining native clipboard gates stay open.

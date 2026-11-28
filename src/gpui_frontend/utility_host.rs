@@ -111,6 +111,9 @@ trait HostedUtility: Render + Sized + 'static {
     fn root(&self) -> WeakEntity<RootWindow>;
     fn open(&self) -> bool;
     fn rehosting(&self) -> bool;
+    fn transfer_source_current(&self, _: &RootWindow, _: &Window, _: &App, _: bool) -> bool { true }
+    fn transfer_commit_current(&self, _: &RootWindow, _: &App) -> bool { true }
+    fn transfer_requires_activation(&self) -> bool { false }
     fn close_blocked(&self, _: &App) -> bool { false }
     fn activation_lost(&mut self, _: &mut Context<Self>) {}
     fn activated(&mut self, _: &mut Window, _: &mut Context<Self>) {}
@@ -470,6 +473,50 @@ impl HostedUtility for super::clipboard_modify_view::ClipboardModifyView {
     fn pinned(_: &RootWindow) -> bool { false }
 }
 
+impl HostedUtility for super::snippets::SnippetsView {
+    const KIND: utility_mount::UtilityKind = utility_mount::UtilityKind::Snippets;
+    const PANEL: Panel = Panel::SnippetDialog;
+    const KEY: &'static str = "snippets";
+    const TITLE: &'static str = "Snippets";
+    const INITIAL: (f32, f32) = (600.0, 500.0);
+    const MINIMUM: (f32, f32) = (160.0, 160.0);
+    fn workspace(root: &RootWindow) -> Option<Entity<Self>> { root.snippets_view.clone() }
+    fn popup(root: &RootWindow) -> Option<&UtilityPopup> { root.snippets_popup.as_ref() }
+    fn popup_mut(root: &mut RootWindow) -> &mut Option<UtilityPopup> { &mut root.snippets_popup }
+    fn retiring(root: &mut RootWindow) -> &mut Vec<RetiringHashWindow> { &mut root.snippets_retiring }
+    fn drain(root: &mut RootWindow, cx: &mut Context<RootWindow>, detach: bool) { root.drain_host_geometry::<Self>(cx, detach); }
+    fn reattach(root: &mut RootWindow, cx: &mut Context<RootWindow>) { root.reattach_host_geometry::<Self>(cx); }
+    fn size_error(root: &mut RootWindow, message: Option<String>, cx: &mut Context<RootWindow>) {
+        if let Some(view) = root.snippets_view.clone() { view.update(cx, |view, cx| { view.geometry_error = message; cx.notify(); }); }
+    }
+    fn remember(root: &mut RootWindow, mode: RememberedPresentation, cx: &mut Context<RootWindow>) { root.remember_host_presentation(Self::KEY, mode, cx); }
+    fn retire(root: &mut RootWindow, cx: &mut Context<RootWindow>) { if let Some(view) = root.snippets_view.clone() { view.update(cx, |view, cx| view.shutdown_host(cx)); } }
+    fn observe(_: &mut RootWindow, _: WindowId, _: &mut Context<RootWindow>) {}
+    fn activated(&mut self, window: &mut Window, cx: &mut Context<Self>) { if self.has_pending_named() { self.after_host(window, cx); } }
+    fn root(&self) -> WeakEntity<RootWindow> { self.root.clone() }
+    fn open(&self) -> bool { self.open }
+    fn rehosting(&self) -> bool { self.rehosting }
+    fn transfer_source_current(&self, root: &RootWindow, window: &Window, cx: &App, modal: bool) -> bool { self.named_source_current(root, window, cx, modal) }
+    fn transfer_commit_current(&self, root: &RootWindow, cx: &App) -> bool { self.named_intent_current(root, cx) }
+    fn transfer_requires_activation(&self) -> bool { self.has_pending_named() || self.has_cold_origin() }
+    fn close_blocked(&self, _: &App) -> bool { self.busy() }
+    fn outer_scroll(&self) -> Option<ScrollHandle> { Some(self.outer_scroll.clone()) }
+    fn popout(&self) -> bool { self.popout }
+    fn fenced(&self) -> bool { self.admission.is_fenced() }
+    fn receipt(&self) -> utility_mount::MountReceipt { self.mount_receipt() }
+    fn mounted(&self, id: WindowId, popout: bool) -> bool { self.is_mounted_in(id, popout) }
+    fn replace(&mut self, host: AnyWindowHandle, native: Option<NativeWindow>, window: &mut Window, cx: &mut Context<Self>) { self.replace_mount(host, native, window, cx); }
+    fn set_popout(&mut self, value: bool) { self.popout = value; }
+    fn set_rehosting(&mut self, value: bool, cx: &mut Context<Self>) { self.set_rehosting(value, cx); }
+    fn set_error(&mut self, value: Option<String>) { self.presentation_error = value; }
+    fn set_geometry_error(&mut self, value: Option<String>) { self.geometry_error = value; }
+    fn after_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.after_host(window, cx); }
+    fn after_popout(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.after_host(window, cx); }
+    fn focus(&mut self, window: &mut Window, cx: &mut Context<Self>) { self.focus_host(window, cx); }
+    fn shutdown(&mut self, cx: &mut Context<Self>) { self.shutdown_host(cx); }
+    fn pinned(_: &RootWindow) -> bool { false }
+}
+
 impl HostedUtility for super::file_search::FileSearchView {
     const KIND: utility_mount::UtilityKind = utility_mount::UtilityKind::FileSearch;
     const PANEL: Panel = Panel::FileSearchDialog;
@@ -596,6 +643,13 @@ struct UtilityShell<T: HostedUtility> {
     workspace: Entity<T>,
     _activation: Subscription,
 }
+
+fn hosted_source_current<T: HostedUtility>(root: &WeakEntity<RootWindow>, workspace: &Entity<T>, host: AnyWindowHandle, cx: &mut AsyncApp) -> bool {
+    cx.update(|app| host.update(app, |_, window, app| {
+        let modal = window.has_active_dialog(app);
+        root.upgrade().is_some_and(|root| workspace.read(app).transfer_source_current(root.read(app), window, app, modal))
+    })).ok().unwrap_or(false)
+}
 impl<T: HostedUtility> Render for UtilityShell<T> {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -625,6 +679,7 @@ fn retiring_utilities(
         utility_mount::UtilityKind::Regex => &mut root.regex_retiring,
         utility_mount::UtilityKind::ClipboardHistory => &mut root.clipboard_retiring,
         utility_mount::UtilityKind::ClipboardModify => &mut root.clipboard_modify_retiring,
+        utility_mount::UtilityKind::Snippets => &mut root.snippets_retiring,
     }
 }
 
@@ -840,6 +895,10 @@ impl RootWindow {
                 if let Some(view) = self.clipboard_modify_view.clone() {
                     view.update(cx, |view, cx| { view.presentation_error = Some(error); cx.notify(); });
                 }
+            } else if UtilityToolKey::parse("snippets").ok() == Some(key) {
+                if let Some(view) = self.snippets_view.clone() {
+                    view.update(cx, |view, cx| { view.presentation_error = Some(error); cx.notify(); });
+                }
             } else if UtilityToolKey::parse("file-preview").ok() == Some(key) {
                 if let Some(view) = self.file_search.clone() { view.update(cx, |view, cx| view.report_preview_presentation_error(error, cx)); }
             } else if UtilityToolKey::parse("file-lock").ok() == Some(key) {
@@ -1002,6 +1061,12 @@ impl RootWindow {
     }
     pub(super) fn drain_clipboard_modify_geometry(&mut self, cx: &mut Context<Self>, detach: bool) {
         self.drain_host_geometry::<super::clipboard_modify_view::ClipboardModifyView>(cx, detach);
+    }
+    pub(super) fn start_snippets_rehost(&mut self, popout: bool, gesture: Option<hash_dock::Gesture>, source: utility_mount::MountReceipt, cx: &mut Context<Self>) {
+        self.start_hosted_rehost::<super::snippets::SnippetsView>(popout, gesture, source, None, None, cx);
+    }
+    pub(super) fn drain_snippets_geometry(&mut self, cx: &mut Context<Self>, detach: bool) {
+        self.drain_host_geometry::<super::snippets::SnippetsView>(cx, detach);
     }
     pub(super) fn start_regex_rehost(
         &mut self,
@@ -1220,6 +1285,7 @@ impl RootWindow {
                     }
                 };
                 let mounted_receipt = cx.update(|app| workspace.read(app).receipt());
+                let requires_activation = cx.update(|app| workspace.read(app).transfer_requires_activation());
                 if let (Some(native), Some(geometry)) = (native, geometry) {
                     if mounted_receipt.is_current() && native_window_is_valid(native) {
                         if let Some(target) = checked_geometry_target(native) {
@@ -1298,7 +1364,7 @@ impl RootWindow {
                     root.file_search_origin_current(origin, origin.native.identity, cx)).unwrap_or(false));
                 let cold_ready = cold_lock.as_ref().is_none_or(|origin| root.update(cx, |root, cx|
                     root.file_lock_cold_origin_current(origin, cx)).unwrap_or(false));
-                if installed && inherited_ready && cold_ready {
+                if installed && inherited_ready && cold_ready && hosted_source_current(&root, &workspace, root_window, cx) {
                     if let Some(native) = native {
                         if mounted_receipt.is_current() && native_window_is_valid(native) {
                             displayed = match set_native_window_visible(native, true) {
@@ -1323,11 +1389,11 @@ impl RootWindow {
                                     && current_foreground_identity()
                                         == Some(gesture.source.identity)
                             }) };
-                            if displayed && authorized && mounted_receipt.is_current() {
-                                if inherited.is_some() || cold_lock.is_some() {
+                            if displayed && authorized && mounted_receipt.is_current() && hosted_source_current(&root, &workspace, root_window, cx) {
+                                if inherited.is_some() || cold_lock.is_some() || requires_activation {
                                     displayed = activate_native_window(native).is_ok() && current_foreground_identity() == Some(native.identity);
                                 } else { let _ = activate_native_window(native); }
-                            } else if inherited.is_some() || cold_lock.is_some() { displayed = false; }
+                            } else if inherited.is_some() || cold_lock.is_some() || requires_activation { displayed = false; }
                             if displayed && mounted_receipt.is_current() && inherited.is_none() && cold_lock.is_none() {
                                 let _ = update_kit_window_content(
                                     window,
@@ -1361,6 +1427,9 @@ impl RootWindow {
                                 && T::popup(root).is_some_and(|popup| popup.window.window_id() == window.window_id() && popup.native == Some(native))
                                 && root.file_lock_cold_origin_retained(origin, cx)
                         }).unwrap_or(false));
+                }
+                if displayed {
+                    displayed = root.update(cx, |root, cx| workspace.read(cx).transfer_commit_current(root, cx)).unwrap_or(false);
                 }
                 if installed && displayed && mounted_receipt.is_current() {
                     let _ = root.update(cx, |root, cx| {
@@ -1428,7 +1497,7 @@ impl RootWindow {
                                 if inherited.is_none() { view.set_error(Some(format!(
                                     "Could not show {} window.", T::TITLE
                                 ))); }
-                                if gesture.is_some_and(|gesture| gesture.foreground_authorized)
+                                if !requires_activation && gesture.is_some_and(|gesture| gesture.foreground_authorized)
                                     && root_native.is_some_and(|native| {
                                         current_foreground_identity() == Some(native.identity)
                                     })

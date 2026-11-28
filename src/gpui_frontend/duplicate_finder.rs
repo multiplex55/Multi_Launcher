@@ -340,7 +340,7 @@ impl RootWindow {
         let id = window.window_handle().window_id();
         let history = self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
         let modify = self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
-        let snippets = self.snippets_view.as_ref().is_some_and(|view| view.read(cx).open);
+        let snippets = self.snippets_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));
         let fill = self.snippet_fill.as_ref().is_some_and(|view| view.read(cx).open);
         let tempfile = self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).open);
         let folder = self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false));

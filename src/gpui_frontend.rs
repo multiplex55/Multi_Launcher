@@ -2576,6 +2576,8 @@ struct RootWindow {
     regex_view: Option<Entity<regex_tester::RegexWorkspace>>,
     clipboard_history: Option<Entity<clipboard_history::ClipboardHistory>>,
     snippets_view: Option<Entity<snippets::SnippetsView>>,
+    snippets_popup: Option<utility_mount::UtilityPopup>,
+    snippets_retiring: Vec<RetiringHashWindow>,
     tempfile_view: Option<Entity<tempfile_view::TempfileView>>,
     tempfile_alias: Option<Entity<tempfile_alias::AliasView>>,
     tempfile_search: tempfile_search::Owner,
@@ -5109,6 +5111,7 @@ impl RootWindow {
 
     fn revoke_focus_bound_utility_operations(&mut self, cx: &mut Context<Self>) {
         self.app_editor.revoke_sheet_handoff();
+        if let Some(view) = &self.snippets_view { view.update(cx, |view, _| view.revoke_source()); }
         if let Some(view) = &self.plugin_editor { view.update(cx, |view, _| view.revoke_membership()); }
         if let Some(view) = &self.dashboard_editor { view.update(cx, |view, _| view.revoke()); }
         self.dashboard_epoch = self.dashboard_epoch.wrapping_add(1);
@@ -5614,7 +5617,7 @@ impl RootWindow {
     }
 
     fn poll_utility_size_writer(&mut self, cx: &mut Context<Self>) -> bool {
-        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged, regex_failure, regex_acknowledged, clipboard_failure, clipboard_acknowledged, modify_failure, modify_acknowledged, search_failure, search_acknowledged, preview_failure, preview_acknowledged, folder_failure, folder_acknowledged, lock_failure, lock_acknowledged) = {
+        let (pending, poll_error, write_failure, acknowledged, json_failure, json_acknowledged, xml_failure, xml_acknowledged, regex_failure, regex_acknowledged, clipboard_failure, clipboard_acknowledged, modify_failure, modify_acknowledged, snippets_failure, snippets_acknowledged, search_failure, search_acknowledged, preview_failure, preview_acknowledged, folder_failure, folder_acknowledged, lock_failure, lock_acknowledged) = {
             let mut store = self
                 .utility_size_store
                 .lock()
@@ -5632,6 +5635,8 @@ impl RootWindow {
             let clipboard_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == clipboard_key));
             let modify_key = UtilityToolKey::parse("clipboard-modify").ok();
             let modify_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == modify_key));
+            let snippets_key = UtilityToolKey::parse("snippets").ok();
+            let snippets_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == snippets_key));
             let preview_key = UtilityToolKey::parse("file-preview").ok();
             let preview_acknowledged = poll.as_ref().is_ok_and(|poll| poll.accepted.iter().any(|ack| Some(ack.acknowledgement.key) == preview_key));
             let lock_key = UtilityToolKey::parse("file-lock").ok();
@@ -5645,6 +5650,7 @@ impl RootWindow {
             let lock_failure = failures.iter().find(|failure| Some(failure.key) == lock_key).map(|failure| failure.message.clone());
             let folder_failure = failures.iter().find(|failure| Some(failure.key) == folder_key).map(|failure| failure.message.clone());
             let search_failure = failures.iter().find(|failure| Some(failure.key) == search_key).map(|failure| failure.message.clone());
+            let snippets_failure = failures.iter().find(|failure| Some(failure.key) == snippets_key).map(|failure| failure.message.clone());
             let modify_failure = failures.iter().find(|failure| Some(failure.key) == modify_key).map(|failure| failure.message.clone());
             let clipboard_failure = failures.iter().find(|failure| Some(failure.key) == clipboard_key).map(|failure| failure.message.clone());
             let regex_failure = failures.iter().find(|failure| Some(failure.key) == regex_key).map(|failure| failure.message.clone());
@@ -5666,6 +5672,8 @@ impl RootWindow {
                 clipboard_acknowledged,
                 modify_failure,
                 modify_acknowledged,
+                snippets_failure,
+                snippets_acknowledged,
                 search_failure, search_acknowledged, preview_failure, preview_acknowledged, folder_failure, folder_acknowledged, lock_failure, lock_acknowledged,
             )
         };
@@ -5696,6 +5704,9 @@ impl RootWindow {
         else if clipboard_acknowledged { self.set_clipboard_size_error(None, cx); }
         if let Some(error) = modify_failure { self.set_clipboard_modify_size_error(Some(format!("Could not save Clipboard Modify window geometry: {error}")), cx); }
         else if modify_acknowledged { self.set_clipboard_modify_size_error(None, cx); }
+        if snippets_failure.is_some() || snippets_acknowledged {
+            if let Some(view) = self.snippets_view.clone() { view.update(cx, |view, cx| { view.geometry_error = snippets_failure; cx.notify(); }); }
+        }
         if let Some(error) = search_failure { self.set_file_search_size_error(Some(format!("Could not save File Search window geometry: {error}")), cx); }
         else if search_acknowledged { self.set_file_search_size_error(None, cx); }
         if lock_failure.is_some() || lock_acknowledged {
@@ -5922,6 +5933,9 @@ impl RootWindow {
         if self.tempfile_alias.as_ref().is_some_and(|view| view.read(cx).blocks_close(cx)) { return Err(tempfile_alias::WAIT.to_owned()); }
         if self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).pending) { return Err(tempfile_view::WAIT.to_owned()); }
         if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).busy()) { return Err(snippets::SAVE_WAIT.to_owned()); }
+        if self.snippets_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return Err(snippets::SAVE_WAIT.to_owned()); }
+        self.snippets_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
+        if !self.snippets_retiring.is_empty() { return Err("A previous Snippets window has not retired.".to_owned()); }
         self.clipboard_modify_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
         if !self.clipboard_modify_retiring.is_empty() { return Err("A previous Clipboard Modify window has not retired.".to_owned()); }
         if self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).busy() || view.read(cx).rehosting) { return Err(clipboard_history::WAIT.to_owned()); }
@@ -5945,6 +5959,7 @@ impl RootWindow {
         self.drain_file_preview_geometry(cx, false);
         self.drain_clipboard_native_geometry(cx, false);
         self.drain_clipboard_modify_geometry(cx, false);
+        self.drain_snippets_geometry(cx, false);
         let _ = self.poll_utility_size_writer(cx);
         let size_status = self
             .utility_size_store
@@ -5962,6 +5977,11 @@ impl RootWindow {
             return Err(format!(
                 "The Hash Generator window geometry could not be saved: {error}. Move or resize the popout to retry the save before restarting."
             ));
+        }
+        if let Ok(key) = UtilityToolKey::parse("snippets") {
+            let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
+            if status.pending_revision.is_some() { self.start_utility_size_ack_poll(cx); return Err("The Snippets window geometry is still being saved.".to_owned()); }
+            if let Some((_, error)) = status.failure { return Err(format!("The Snippets window geometry could not be saved: {error}")); }
         }
         if let Ok(key) = UtilityToolKey::parse("json-utility") {
             let status = self.utility_size_store.lock().unwrap_or_else(std::sync::PoisonError::into_inner).status(key);
@@ -6048,6 +6068,7 @@ impl RootWindow {
         }
         if let Some(popup) = &self.clipboard_popup { child_windows.push(popup.window); if let Some(native) = popup.native { native_windows.push(native); } else if cfg!(windows) { return Err("The Clipboard History window has no checked native handle.".to_owned()); } }
         if let Some(popup) = &self.clipboard_modify_popup { child_windows.push(popup.window); if let Some(native) = popup.native { native_windows.push(native); } else if cfg!(windows) { return Err("The Clipboard Modify window has no checked native handle.".to_owned()); } }
+        if let Some(popup) = &self.snippets_popup { child_windows.push(popup.window); if let Some(native) = popup.native { native_windows.push(native); } else if cfg!(windows) { return Err("The Snippets window has no checked native handle.".to_owned()); } }
 
         if self.file_lock_view.as_ref().is_some_and(|view| view.read(cx).rehosting) { return Err("File Lock is changing presentation.".to_owned()); }
         self.file_lock_retiring.retain(|window| window.native_window.is_none_or(native_window_is_valid));
@@ -6199,7 +6220,8 @@ impl RootWindow {
                 clipboard_history: self.clipboard_history.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 clipboard_modify: self.clipboard_modify_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 snippets: self.snippets_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
-                snippet_fill: self.snippet_fill.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
+                snippet_fill: self.snippet_fill.as_ref().and_then(|view| view.read(cx).restart_draft(cx))
+                    .or_else(|| self.snippets_view.as_ref().and_then(|view| view.read(cx).preview_values(cx))),
                 tempfile: self.tempfile_view.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 tempfile_alias: self.tempfile_alias.as_ref().and_then(|view| view.read(cx).restart_draft(cx)),
                 hash: hash_draft,
@@ -6409,9 +6431,11 @@ impl RootWindow {
         self.drain_regex_native_geometry(cx, true);
         self.drain_clipboard_native_geometry(cx, true);
         self.drain_clipboard_modify_geometry(cx, true);
+        self.drain_snippets_geometry(cx, true);
         if let Some(view) = &self.regex_view { view.update(cx, |view, _| view.shutdown()); }
         if let Some(view) = &self.clipboard_history { view.update(cx, |view, _| view.shutdown()); }
         if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, _| view.shutdown_host()); }
+        if let Some(view) = &self.snippets_view { view.update(cx, |view, cx| view.shutdown_host(cx)); }
         if let Some(view) = &self.xml_view { view.update(cx, |view, cx| view.shutdown(cx)); }
         #[cfg(windows)]
         if let Some(view) = self.downloads_triage.clone() { view.update(cx, |view, _| view.shutdown()); }
@@ -10894,10 +10918,14 @@ impl RootWindow {
         self.drain_xml_native_geometry(cx, true);
         self.drain_clipboard_native_geometry(cx, true);
         self.drain_clipboard_modify_geometry(cx, true);
+        self.drain_snippets_geometry(cx, true);
         let mut retiring_clipboard = std::mem::take(&mut self.clipboard_retiring);
         if let Some(popup) = self.clipboard_popup.take() { retiring_clipboard.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
         retiring_clipboard.extend(std::mem::take(&mut self.clipboard_modify_retiring));
         if let Some(popup) = self.clipboard_modify_popup.take() { retiring_clipboard.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
+        retiring_clipboard.extend(std::mem::take(&mut self.snippets_retiring));
+        if let Some(popup) = self.snippets_popup.take() { retiring_clipboard.push(RetiringHashWindow { window: popup.window, native_window: popup.native }); }
+        if let Some(view) = &self.snippets_view { view.update(cx, |view, cx| view.shutdown_host(cx)); }
         if let Some(view) = &self.clipboard_modify_view { view.update(cx, |view, _| view.shutdown_host()); }
         if let Some(view) = &self.clipboard_history { view.update(cx, |view, _| view.shutdown()); }
         let mut retiring_search = self.file_search.clone().map(|view| view.update(cx, |view, _| view.take_preview_retiring())).unwrap_or_default();
@@ -11918,7 +11946,7 @@ impl Render for RootWindow {
         if let Some(view) = self.clipboard_modify_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
-        if let Some(view) = self.snippets_view.as_ref().filter(|view| view.read(cx).open) {
+        if let Some(view) = self.snippets_view.as_ref().filter(|view| view.read(cx).is_mounted_in(window.window_handle().window_id(), false)) {
             root_scroll = root_scroll.child(div().flex_shrink_0().w_full().child(view.clone()));
         }
         if let Some(view) = self.snippet_fill.as_ref().filter(|view| view.read(cx).open) {
@@ -13080,6 +13108,10 @@ impl RootWindow {
                 let view = view.read(cx);
                 view.is_mounted_in(window, false) && receipt.matches(&view.mount_receipt()) && receipt.is_current()
             }),
+            utility_mount::UtilityKind::Snippets => self.snippets_view.as_ref().is_some_and(|view| {
+                let view = view.read(cx);
+                view.is_mounted_in(window, false) && receipt.matches(&view.mount_receipt()) && receipt.is_current()
+            }),
             utility_mount::UtilityKind::Regex => self.regex_view.as_ref().is_some_and(|view| {
                 let view = view.read(cx);
                 view.is_mounted_in(window, false) && receipt.matches(&view.mount_receipt()) && receipt.is_current()
@@ -13780,6 +13812,8 @@ pub(crate) fn run_foundation_window(
                     root.drain_regex_native_geometry(cx, true);
                     root.drain_clipboard_native_geometry(cx, true);
                     root.drain_clipboard_modify_geometry(cx, true);
+                    root.drain_snippets_geometry(cx, true);
+                    if let Some(view) = &root.snippets_view { view.update(cx, |view, cx| view.shutdown_host(cx)); }
                     if let Some(view) = &root.clipboard_history { view.update(cx, |view, _| view.shutdown()); }
                     if let Some(view) = &root.clipboard_modify_view { view.update(cx, |view, _| view.shutdown_host()); }
                     if let Some(view) = &root.regex_view { view.update(cx, |view, _| view.shutdown()); }
@@ -14000,6 +14034,8 @@ pub(crate) fn run_foundation_window(
                 regex_view: None,
                 clipboard_history: None,
                 snippets_view: None,
+                snippets_popup: None,
+                snippets_retiring: Vec::new(),
                 tempfile_view: None,
                 tempfile_alias: None,
                 tempfile_search: tempfile_search::Owner::default(),
@@ -14476,7 +14512,7 @@ pub(crate) fn run_foundation_window(
                 match blocker {
                     None => {
                         let deferred = root_for_window_close.update(app, |root, cx| {
-                            if root.gesture_owner.is_some() || root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                            if root.gesture_owner.is_some() || root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() || root.snippets_popup.is_some() || !root.snippets_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                         }).unwrap_or(true);
                         if deferred { return false; }
                         let _ = root_for_window_close.update(app, |root, cx| {
@@ -14512,7 +14548,7 @@ pub(crate) fn run_foundation_window(
                             .unwrap_or(false);
                         if close_now {
                             let deferred = root_for_window_close.update(app, |root, cx| {
-                                if root.gesture_owner.is_some() || root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
+                                if root.gesture_owner.is_some() || root.timer_session.is_some() || root.xml_view.is_some() || root.file_lock_popup.is_some() || !root.file_lock_retiring.is_empty() || root.folder_size_popup.is_some() || !root.folder_size_retiring.is_empty() || root.file_search_popup.is_some() || !root.file_search_retiring.is_empty() || root.regex_popup.is_some() || !root.regex_retiring.is_empty() || root.clipboard_popup.is_some() || !root.clipboard_retiring.is_empty() || root.clipboard_modify_popup.is_some() || !root.clipboard_modify_retiring.is_empty() || root.snippets_popup.is_some() || !root.snippets_retiring.is_empty() { root.quit_after_xml_drain(cx); true } else { false }
                             }).unwrap_or(true);
                             if deferred { return false; }
                             let _ = root_for_window_close.update(app, |root, cx| {
@@ -14731,6 +14767,7 @@ pub(crate) fn run_foundation_window(
                         root.drain_file_preview_geometry(cx, false);
                         root.drain_clipboard_native_geometry(cx, false);
                         root.drain_clipboard_modify_geometry(cx, false);
+                        root.drain_snippets_geometry(cx, false);
                         root.hash_session
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -15194,8 +15231,15 @@ pub(crate) fn run_foundation_window(
                                 let regex_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Regex).and_then(|_| root.regex_view.as_ref()).cloned();
                                 let clipboard_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::ClipboardHistory).and_then(|_| root.clipboard_history.as_ref()).cloned();
                                 let clipboard_modify_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::ClipboardModify).and_then(|_| root.clipboard_modify_view.as_ref()).cloned();
-                                search_focus_selected = file_lock_view.is_none() && folder_size_view.is_none() && file_search_view.is_none() && hash_view.is_none() && json_view.is_none() && xml_view.is_none() && regex_view.is_none() && clipboard_view.is_none() && clipboard_modify_view.is_none();
-                                if let Some(view) = file_lock_view {
+                                let snippets_view = utility.filter(|(_, kind)| *kind == utility_mount::UtilityKind::Snippets).and_then(|_| root.snippets_view.as_ref()).cloned();
+                                search_focus_selected = snippets_view.is_none() && file_lock_view.is_none() && folder_size_view.is_none() && file_search_view.is_none() && hash_view.is_none() && json_view.is_none() && xml_view.is_none() && regex_view.is_none() && clipboard_view.is_none() && clipboard_modify_view.is_none();
+                                if let Some(view) = snippets_view {
+                                    let host = window.window_handle().window_id();
+                                    let history = root.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(host, false));
+                                    let modify = root.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(host, false));
+                                    root.root_scroll.scroll_to_top_of_item(root.clipboard_scroll_item(host, cx) + usize::from(history) + usize::from(modify));
+                                    utility_focus_delivered = view.update(cx, |view, cx| { view.focus_host(window, cx); view.contains_focus(window, cx) });
+                                } else if let Some(view) = file_lock_view {
                                     root.reveal_file_lock(window, cx);
                                     utility_focus_delivered = view.update(cx, |tool, cx| { tool.focus_host(window, cx); tool.choose_focus.is_focused(window) });
                                 } else if let Some(view) = folder_size_view {

@@ -430,7 +430,7 @@ impl RootWindow {
                     .as_ref()
                     .is_some_and(|v| v.read(cx).is_mounted_in(id, false)),
             )
-            + usize::from(self.snippets_view.as_ref().is_some_and(|v| v.read(cx).open))
+            + usize::from(self.snippets_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
             + usize::from(self.snippet_fill.as_ref().is_some_and(|v| v.read(cx).open))
             + usize::from(self.tempfile_view.as_ref().is_some_and(|v| v.read(cx).open))
             + usize::from(

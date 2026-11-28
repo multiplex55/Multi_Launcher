@@ -23,4 +23,4 @@ Named `cs edit` uses a watched snapshot of the canonical file. Stock action and 
 
 Unique alias-only Run reaches checked Copy or standalone Fill through the same canonical Search snapshot. [Standalone Fill checkpoint](../CHECKPOINTS.md#g13-standalone-snippet-run-and-fill)
 
-The editor supports ordered field labels, defaults, required state and input type. Test / Preview uses the unsaved candidate and restores the same draft. Remembered presentation, scoped Jump and matched Windows replay remain open. [Editor Preview checkpoint](../CHECKPOINTS.md#g13-snippets-field-authoring-and-editor-preview)
+The editor supports ordered field labels, defaults, required state and input type. Test / Preview uses the unsaved candidate and restores the same draft. The editor remembers Dock and Pop Out and hosts Preview in its own window. Dock and popup transfer retain an idle draft. Scoped Jump and matched Windows replay remain open. [Snippets host checkpoint](../CHECKPOINTS.md#p008-checked-snippets-dock-and-pop-out) [Editor Preview checkpoint](../CHECKPOINTS.md#g13-snippets-field-authoring-and-editor-preview)

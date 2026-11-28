@@ -926,7 +926,7 @@ impl RootWindow {
         let index = self.clipboard_scroll_item(id, cx)
             + usize::from(self.clipboard_history.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
             + usize::from(self.clipboard_modify_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
-            + usize::from(self.snippets_view.as_ref().is_some_and(|view| view.read(cx).open))
+            + usize::from(self.snippets_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
             + usize::from(self.snippet_fill.as_ref().is_some_and(|view| view.read(cx).open))
             + usize::from(self.tempfile_view.as_ref().is_some_and(|view| view.read(cx).open))
             + usize::from(self.folder_size_view.as_ref().is_some_and(|view| view.read(cx).is_mounted_in(id, false)))
