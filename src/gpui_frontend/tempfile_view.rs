@@ -88,7 +88,7 @@ impl TempfileView {
             let query = root.query.read(cx).value().to_string();
             let issued_search = if tempfile_search::list_query(&query) && tempfile_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()) {
                 Some(SearchReceipt::List(query, root.tempfile_search.revision()))
-            } else if !search_providers::tempfile_rows(&query, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()).is_empty() {
+            } else if search_providers::tempfile_rows(&query, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()).iter().any(|action| action.action == "tempfile:dialog") {
                 Some(SearchReceipt::Bare(query, root.launcher_results.generation))
             } else { None };
             Some((permit, root.restart_admission.clone(), root.root_visibility.clone(),
@@ -137,7 +137,7 @@ impl TempfileView {
                                     && root.native_window == Some(native)
                                     && json_utility::native_host_current(&visibility, revision, Some(native), false);
                                 let same_bare = same_search(issued_search.as_ref(), &query, root.launcher_results.generation, root.tempfile_search.revision())
-                                    && !search_providers::tempfile_rows(&query, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()).is_empty();
+                                    && search_providers::tempfile_rows(&query, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()).iter().any(|action| action.action == "tempfile:dialog");
                                 let live_list = root.launcher_results.query == query && tempfile_search::enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref())
                                     && refresh_current_list(issued_search.as_ref(), &query, root.launcher_results.generation, root.tempfile_search.revision());
                                 if host_current && (same_bare || live_list) {

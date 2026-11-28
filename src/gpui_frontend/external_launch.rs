@@ -551,6 +551,7 @@ pub(super) enum RunCommand {
     Omni { command: ExternalCommand, target: OmniTarget, guard: OmniGuard },
     Indexed { command: ExternalCommand, authority: super::indexed_applications::LaunchAuthority },
     Favorite(ExternalCommand),
+    TempfileCreate { command: multi_launcher::commands::StorageCommand, guard: OmniGuard },
     TempfileMutation { command: multi_launcher::commands::StorageCommand, row: multi_launcher::actions::tempfiles::ListedTempFile, guard: OmniGuard },
     Todo { owner: Arc<multi_launcher::plugins::todo::CheckedTodoOwner>, receipt: multi_launcher::plugins::todo::CheckedTodoReceipt, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard },
     CalendarJump { owner: Arc<multi_launcher::plugins::calendar::CheckedCalendarOwner>, snapshot: Arc<multi_launcher::plugins::calendar::CheckedCalendarSnapshot>, scope: Arc<AtomicU64>, revision: u64, guard: OmniGuard, day: chrono::NaiveDate },
@@ -689,7 +690,8 @@ struct Pending {
     omni_lease: Option<Arc<AtomicBool>>,
     omni_gate: Option<Arc<EffectGate>>,
     omni_category_effect: bool,
-    timer_effect: bool,
+    query_retire_lease: bool,
+    tempfile_handoff: bool,
 }
 
 #[derive(Default)]
@@ -703,7 +705,7 @@ pub(super) struct ExternalLaunch {
 
 impl ExternalLaunch {
     pub(super) fn defer_notes_wake_for_omni(&mut self) -> bool {
-        if self.pending.as_ref().is_some_and(|pending| pending.omni_lease.is_some() && !pending.timer_effect) {
+        if self.pending.as_ref().is_some_and(|pending| pending.omni_lease.is_some() && !pending.query_retire_lease) {
             self.notes_wake_deferred = true;
             true
         } else { false }
@@ -730,6 +732,20 @@ impl ExternalLaunch {
     }
     pub fn retire_focus_bound_effects(&self) {
         self.retire_timer_before_effect();
+        self.retire_other_focus_effects();
+    }
+
+    pub fn retire_on_os_deactivation(&self) {
+        if let Some(pending) = &self.pending && pending.query_retire_lease {
+            let revoked = pending.omni_gate.as_ref().is_some_and(|gate| gate.revoke_pending());
+            if (!pending.tempfile_handoff || revoked) && let Some(lease) = &pending.omni_lease {
+                lease.store(false, Ordering::Release);
+            }
+        }
+        self.retire_other_focus_effects();
+    }
+
+    fn retire_other_focus_effects(&self) {
         if let Some((lease, _)) = &self.auxiliary_effect { lease.store(false, Ordering::Release); }
         if let Some(lease) = &self.preview_lease { lease.store(false, Ordering::Release); }
         if let Some(pending) = self.pending.as_ref().filter(|pending| pending.snippet_effect) {
@@ -759,7 +775,7 @@ impl ExternalLaunch {
 
     pub(super) fn retire_timer_before_effect(&self) {
         if let Some(pending) = &self.pending
-            && pending.timer_effect
+            && pending.query_retire_lease
         {
             if let Some(gate) = &pending.omni_gate { gate.revoke_pending(); }
             if let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
@@ -809,10 +825,11 @@ impl ExternalLaunch {
             clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
-            omni_lease: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_lease: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
             omni_category_effect: match &request.command { RunCommand::Omni { target, .. } => !matches!(target, OmniTarget::Tempfile(_)), RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } => true, _ => false },
-            omni_gate: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
-            timer_effect: matches!(&request.command, RunCommand::TimerCreate { .. }),
+            omni_gate: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
+            query_retire_lease: matches!(&request.command, RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. }),
+            tempfile_handoff: matches!(&request.command, RunCommand::TempfileCreate { .. }),
         });
         Some(ticket)
     }
@@ -1095,6 +1112,31 @@ fn execute_request(
                 &mut IndexedHost { host, authority })
         }
         RunCommand::Favorite(command) => CommandBus.dispatch_external(command, &request.action, request.source, None, &mut FavoriteHost { host }),
+        RunCommand::TempfileCreate { command, guard } => {
+            let effect = match command {
+                multi_launcher::commands::StorageCommand::TempfileNew(alias) => {
+                    multi_launcher::actions::tempfiles::create_immediate_and_open_with_effect(
+                        alias.as_deref(), || guard.current(), || guard.effect_current(),
+                    ).and_then(|outcome| match outcome {
+                        multi_launcher::actions::tempfiles::CreateAndOpenOutcome::Opened(_) => Ok(()),
+                        multi_launcher::actions::tempfiles::CreateAndOpenOutcome::Published { path, reason } => {
+                            let reason = match reason {
+                                multi_launcher::actions::tempfiles::PublishedReason::Superseded => "request was superseded",
+                                multi_launcher::actions::tempfiles::PublishedReason::Changed => "the created file changed",
+                                multi_launcher::actions::tempfiles::PublishedReason::OpenFailed => "the file association failed",
+                            };
+                            anyhow::bail!("File created at {} but not opened: {reason}", path.display())
+                        },
+                    })
+                }
+                _ => Err(anyhow::anyhow!("Invalid temporary file creation")),
+            };
+            CommandBus.complete_checked_tempfile_new(command.clone(), &request.action, request.source,
+                request.settings.preserve_command, multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run, refocus: true,
+                }, effect)
+        }
         RunCommand::TempfileMutation { command, row, guard } => {
             let effect = if row.action == request.action {
                 multi_launcher::actions::tempfiles::mutate_listed_with_effect(row, || guard.current(), || guard.effect_current())
@@ -1248,7 +1290,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::GestureExternal { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::GestureExternal { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileCreate { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1747,6 +1789,11 @@ impl RootWindow {
         self.start_run(action, RunCommand::Omni { command, target, guard }, query, source, None, window, cx);
     }
 
+    pub(super) fn start_tempfile_create(&mut self, action: Action, command: multi_launcher::commands::StorageCommand,
+        guard: OmniGuard, query: String, source: ActivationSource, window: &mut Window, cx: &mut Context<Self>) {
+        self.start_run(action, RunCommand::TempfileCreate { command, guard }, query, source, None, window, cx);
+    }
+
     pub(super) fn start_tempfile_mutation(&mut self, action: Action, command: multi_launcher::commands::StorageCommand,
         row: multi_launcher::actions::tempfiles::ListedTempFile, guard: OmniGuard, query: String, source: ActivationSource,
         window: &mut Window, cx: &mut Context<Self>) {
@@ -1809,13 +1856,18 @@ impl RootWindow {
                 lease.store(false, Ordering::Release);
             }
         }
-        if let RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
+        if let RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
             if let Some(focus) = window.focused(cx) {
                 let lease = guard.lease.clone();
                 let effect_gate = guard.effect_gate.clone();
                 let strict_focus = matches!(&request.command, RunCommand::CalendarJump { .. } | RunCommand::TimerCreate { .. });
+                let tempfile_focus = matches!(&request.command, RunCommand::TempfileCreate { .. });
+                let native = guard.native;
                 let subscription = cx.on_blur(&focus, window, move |_, _, _| {
-                    if effect_gate.revoke_pending() || strict_focus { lease.store(false, Ordering::Release); }
+                    if effect_gate.revoke_pending() || strict_focus
+                        || (tempfile_focus && current_foreground_identity() == Some(native.identity)) {
+                        lease.store(false, Ordering::Release);
+                    }
                 });
                 if let Some(pending) = self.external_launch.pending.as_mut().filter(|pending| pending.ticket == ticket) {
                     pending.focus_guard = Some(subscription);
@@ -1827,7 +1879,7 @@ impl RootWindow {
         } else {
             self.query_history.reset();
         }
-        if matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. }) {
+        if matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. }) {
             let root = cx.entity().downgrade();
             window.defer(cx, move |window, app| {
                 let _ = root.update(app, |root, cx| {
@@ -1838,6 +1890,8 @@ impl RootWindow {
                             let guard_current = match &request.command {
                                 RunCommand::HistoryReplay { receipt, epoch, guard } => guard.current()
                                     && epoch.load(Ordering::Acquire) == receipt.canonical_revision,
+                                RunCommand::TempfileCreate { guard, .. } => guard.current()
+                                    && super::tempfile_search::current_create(&request.query, &request.action, root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()),
                                 RunCommand::TimerCreate { guard, .. } => guard.current()
                                     && super::timer_view::current_provider(&request.query, &request.action,
                                         root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()),
@@ -1875,7 +1929,7 @@ impl RootWindow {
         window_handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let checked_delivery = matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::GestureExternal { .. });
+        let checked_delivery = matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. } | RunCommand::GestureExternal { .. });
         let task = cx.background_executor().spawn(async move {
             let result = run(&request);
             if let RunCommand::TimerCreate { lane, .. } = &request.command { lane.release(); }
@@ -2006,6 +2060,12 @@ impl RootWindow {
             RunCommand::ClipboardExecute { current, .. } => current() && window.is_window_active(),
             RunCommand::SnippetRun { current, .. } => current() && window.is_window_active(),
             RunCommand::TimerCreate { guard, .. } => guard.current() && window.is_window_active(),
+            RunCommand::TempfileCreate { guard, .. } => {
+                receipt.result.outcome.is_ok()
+                    && guard.effect_gate.0.load(Ordering::Acquire) == EFFECT_ENTERED
+                    && guard.receipt_current()
+                    || guard.current() && window.is_window_active()
+            },
             RunCommand::HistoryReplay { receipt, epoch, guard } => guard.receipt_current()
                 && epoch.load(Ordering::Acquire) == receipt.canonical_revision,
             RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => guard.receipt_current(),
@@ -2206,6 +2266,8 @@ impl RootWindow {
         {
             let message = if matches!(&receipt.request.command, RunCommand::TimerCreate { .. }) {
                 format!("Timer or alarm started, but bookkeeping failed: {error}")
+            } else if matches!(&receipt.request.command, RunCommand::TempfileCreate { .. }) {
+                format!("Temporary file opened, but bookkeeping failed: {error}")
             } else if matches!(&receipt.request.command, RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::SnippetRun { .. }) {
                 format!("Copied, but bookkeeping failed: {error}")
             } else {
@@ -2408,7 +2470,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "o".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_gate: Some(Arc::new(EffectGate::default())), omni_category_effect: true, timer_effect: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(Arc::new(EffectGate::default())), omni_category_effect: true, query_retire_lease: false, tempfile_handoff: false,
         });
         assert!(owner.defer_notes_wake_for_omni());
         assert!(owner.defer_notes_wake_for_omni());
@@ -2432,7 +2494,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "timer add 5m".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, timer_effect: true,
+            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, query_retire_lease: true, tempfile_handoff: false,
         });
         assert!(!owner.defer_notes_wake_for_omni());
         owner.retire_omni_categories_before_effect();
@@ -2452,6 +2514,38 @@ mod tests {
     }
 
     #[test]
+    fn os_deactivation_preserves_only_entered_tempfile_handoff() {
+        let admission = Arc::new(RestartAdmission::default());
+        let lease = Arc::new(AtomicBool::new(true));
+        let gate = Arc::new(EffectGate::default());
+        let mut owner = ExternalLaunch::default();
+        owner.pending = Some(Pending {
+            ticket: 1, stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "tmp new".into(), focus: None },
+            permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
+            clipboard_lease: None, focus_guard: None, snippet_effect: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false,
+            query_retire_lease: true, tempfile_handoff: true,
+        });
+        owner.retire_on_os_deactivation();
+        assert!(!lease.load(Ordering::Acquire));
+        assert_eq!(gate.0.load(Ordering::Acquire), EFFECT_REVOKED);
+        let entered = Arc::new(EffectGate::default());
+        assert!(claim_omni_effect(&entered, || true));
+        let live = Arc::new(AtomicBool::new(true));
+        let pending = owner.pending.as_mut().unwrap();
+        pending.omni_gate = Some(entered.clone()); pending.omni_lease = Some(live.clone());
+        owner.retire_on_os_deactivation();
+        assert!(live.load(Ordering::Acquire));
+        owner.retire_timer_before_effect();
+        assert!(!live.load(Ordering::Acquire));
+        let timer_live = Arc::new(AtomicBool::new(true));
+        let pending = owner.pending.as_mut().unwrap();
+        pending.tempfile_handoff = false; pending.omni_lease = Some(timer_live.clone());
+        owner.retire_on_os_deactivation();
+        assert!(!timer_live.load(Ordering::Acquire));
+    }
+
+    #[test]
     fn category_retirement_preserves_direct_and_entered_effects() {
         let admission = Arc::new(RestartAdmission::default());
         let lease = Arc::new(AtomicBool::new(true));
@@ -2462,7 +2556,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "tmp list".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, timer_effect: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, query_retire_lease: false, tempfile_handoff: false,
         });
         owner.retire_omni_categories_before_effect();
         assert!(lease.load(Ordering::Acquire));

@@ -2278,3 +2278,15 @@ The locked `fast-dev` library check passed in 1m 06s and the corrected library c
 P0.07 and P0.14 remain Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned settings and catalog in matched profiles with both Paste Sequence shortcuts disabled. Verify discard, Save, egui readback and the actual named template and pipeline under both policies with synthetic clipboard text. The remaining Clipboard Modify Settings controls stay open.
 
 Continue P0.16 checked typed Temporary File creation and exact editor handoff.
+
+### P0.16 checked typed Temporary File creation
+
+Stock `tmp new` and `tmp create` admit the exact named or unnamed result from Search. The existing bare `tmp` multiline form keeps its own receipt. The shared publication owner creates an empty `.txt` at the first free ordinal or alias suffix without replacing an existing object.
+
+The existing external ticket holds focus and native ownership through publication and the one checked Shell attempt. The worker reopens the configured, canonical and Shell paths using the staged file ID and creation stamp. After an entered handoff, editor foreground can change while the still-current root applies stock query and hide behavior. Local query and visibility changes retire presentation. Only successful Open records History and Usage. Partial results retain the published file and log its exact path. The Shell association does not return a child window identity.
+
+The locked `fast-dev` library checks passed in 25.60s and 24.17s. Integrated library and launcher checks passed in 33.31s and 28.21s, and the final launcher check passed in 5.65s. Independent review cleared normal Search publication, exact file identity and the distinction between pending authority and an entered Shell handoff. The grouped link took 6m 39s. Nextest run `e5292fa8-4482-4fac-862e-1dc654a86202` passed all nine selected tests across two binaries in 3.081s with 9626 skipped.
+
+P0.16 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the isolated `ML_TMP_DIR` profile folders, both Paste Sequence shortcuts disabled, and the registered text editor. Verify empty starting contents, exact Unicode and numbered filenames after collisions, editing, subsequent list and Open, and the stock query and History outcomes. Confirm the seeded witness files are intact.
+
+Continue P0.09 checked Note Editor Find and Replace in Edit and Split.

@@ -55,6 +55,17 @@ impl CommandBus {
         };
         super::handlers::checked_timer_start_outcome(&invocation, raw_query, preserve_command, preferences, result)
     }
+    /// Complete an already opened checked temporary file without repeating its effect.
+    pub fn complete_checked_tempfile_new(&self, command: super::StorageCommand, action: &Action,
+        source: ActivationSource, preserve_command: bool, preferences: LauncherRunPreferences,
+        result: anyhow::Result<()>) -> Result<CommandOutcome, CommandError> {
+        if !matches!(command, super::StorageCommand::TempfileNew(_))
+            || super::parse_action(action).ok() != Some(Command::Storage(command.clone())) {
+            return Err(CommandError::new("launcher", "Invalid checked temporary file creation"));
+        }
+        let invocation = CommandInvocation { command: Command::Storage(command), original_action: action.clone(), query_override: None, source };
+        super::handlers::checked_tempfile_new_outcome(&invocation, preserve_command, preferences, result)
+    }
     pub fn complete_checked_tempfile_mutation(&self, command: super::StorageCommand, action: &Action,
         source: ActivationSource, effect: anyhow::Result<()>, preferences: LauncherRunPreferences) -> Result<CommandOutcome, CommandError> {
         if !matches!(command, super::StorageCommand::TempfileRemove(_) | super::StorageCommand::TempfileAlias { .. })
@@ -314,6 +325,20 @@ impl CommandBus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_tempfile_new_uses_stock_success_policy_only_after_open() {
+        use super::{CommandBus, LauncherRunPreferences};
+        use crate::commands::{ActivationSource, HistoryPolicy, QueryPolicy, StorageCommand, VisibilityPolicy};
+        let action = crate::actions::Action { label: "Create temp file".into(), desc: "Tempfile".into(), action: "tempfile:new".into(), args: None };
+        let prefs = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: true };
+        let result = CommandBus.complete_checked_tempfile_new(StorageCommand::TempfileNew(None), &action, ActivationSource::Enter, true, prefs, Ok(())).unwrap();
+        assert_eq!(result.query, QueryPolicy::Set("tmp new ".into()));
+        assert_eq!(result.history, HistoryPolicy::Record);
+        assert_eq!(result.visibility, VisibilityPolicy::Hide);
+        assert!(CommandBus.complete_checked_tempfile_new(StorageCommand::TempfileNew(None), &action, ActivationSource::Enter, false, prefs, Err(anyhow::anyhow!("published but not opened"))).is_err());
+        assert!(CommandBus.complete_checked_tempfile_new(StorageCommand::TempfileNew(Some("other".into())), &action, ActivationSource::Enter, false, prefs, Ok(())).is_err());
+    }
+
     #[test]
     fn checked_timer_start_preserves_literal_stock_query_policy() {
         use super::{CommandBus, LauncherRunPreferences};

@@ -49,16 +49,15 @@ fn ensure_dir() -> std::io::Result<PathBuf> {
 
 /// Create a new unnamed temporary file and return its path.
 pub fn create_file() -> anyhow::Result<PathBuf> {
+    create_empty_file_checked(None, || true).map(|created| created.path)
+}
+
+/// Publish one empty numbered or named file with no replacement.
+pub fn create_empty_file_checked(alias: Option<&str>, current: impl Fn() -> bool) -> anyhow::Result<CreatedTempFile> {
+    if let Some(alias) = alias { validate_alias(alias)?; }
+    anyhow::ensure!(current(), "Temp file request was superseded");
     let dir = ensure_dir()?;
-    let mut idx = 0;
-    loop {
-        let path = dir.join(format!("temp_{idx}.txt"));
-        if !path.exists() {
-            File::create(&path)?;
-            return Ok(path);
-        }
-        idx += 1;
-    }
+    create_file_in(&dir, alias, "", &current)
 }
 
 /// Create a new temp file with a specific `alias` and initial `contents`.
@@ -84,16 +83,16 @@ pub fn create_named_file_checked(
     validate_alias(alias)?;
     anyhow::ensure!(current(), "Temp file request was superseded");
     let dir = ensure_dir()?;
-    create_named_file_in(&dir, alias, contents, &current)
+    create_file_in(&dir, Some(alias), contents, &current)
 }
 
-fn create_named_file_in(
+fn create_file_in(
     dir: &Path,
-    alias: &str,
+    alias: Option<&str>,
     contents: &str,
     current: &dyn Fn() -> bool,
 ) -> anyhow::Result<CreatedTempFile> {
-    validate_alias(alias)?;
+    if let Some(alias) = alias { validate_alias(alias)?; }
     anyhow::ensure!(current(), "Temp file request was superseded");
     let mut staging_builder = tempfile::Builder::new();
     staging_builder.prefix(".multi-launcher-stage-");
@@ -135,10 +134,10 @@ fn create_named_file_in(
     file.as_file().sync_all()?;
     let mut idx = 0usize;
     loop {
-        let name = if idx == 0 {
-            format!("temp_{alias}.txt")
-        } else {
-            format!("temp_{alias}_{idx}.txt")
+        let name = match alias {
+            None => format!("temp_{idx}.txt"),
+            Some(alias) if idx == 0 => format!("temp_{alias}.txt"),
+            Some(alias) => format!("temp_{alias}_{idx}.txt"),
         };
         let path = dir.join(&name);
         anyhow::ensure!(current(), "Temp file request was superseded");
@@ -162,6 +161,11 @@ fn create_named_file_in(
         }
         idx = idx.checked_add(1).ok_or_else(|| anyhow::anyhow!("No available temp file name"))?;
     }
+}
+
+#[cfg(test)]
+fn create_named_file_in(dir: &Path, alias: &str, contents: &str, current: &dyn Fn() -> bool) -> anyhow::Result<CreatedTempFile> {
+    create_file_in(dir, Some(alias), contents, current)
 }
 
 /// Remove a specific file inside the storage directory.
@@ -251,6 +255,25 @@ pub fn alias_action(path: &Path, name: &str, alias: &str) -> Action {
     Action { label: format!("Set alias {name} -> {alias}"), desc: "Tempfile".into(), action: format!("tempfile:alias:{}|{alias}", path.to_string_lossy()), args: None }
 }
 
+/// Stock immediate New/Create projection; invalid and incomplete aliases produce no row.
+pub fn immediate_create_action(query: &str) -> Option<Action> {
+    let trimmed = query.trim();
+    if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new ")
+        .or_else(|| crate::common::strip_prefix_ci(trimmed, "tmp create "))
+    {
+        let alias = rest.trim();
+        if !alias.is_empty() && validate_alias(alias).is_ok() {
+            return Some(Action { label: format!("Create temp file {alias}"), desc: "Tempfile".into(), action: format!("tempfile:new:{alias}"), args: None });
+        }
+    } else if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new")
+        .or_else(|| crate::common::strip_prefix_ci(trimmed, "tmp create"))
+        && rest.is_empty()
+    {
+        return Some(Action { label: "Create temp file".into(), desc: "Tempfile".into(), action: "tempfile:new".into(), args: None });
+    }
+    None
+}
+
 impl Plugin for TempfilePlugin {
     fn search(&self, query: &str) -> Vec<Action> {
         let trimmed = query.trim();
@@ -264,31 +287,7 @@ impl Plugin for TempfilePlugin {
                 args: None,
             }];
         }
-        const NEW_PREFIX: &str = "tmp new ";
-        const CREATE_PREFIX: &str = "tmp create ";
-        if let Some(rest) = crate::common::strip_prefix_ci(trimmed, NEW_PREFIX)
-            .or_else(|| crate::common::strip_prefix_ci(trimmed, CREATE_PREFIX))
-        {
-            let alias = rest.trim();
-            if !alias.is_empty() && validate_alias(alias).is_ok() {
-                return vec![Action {
-                    label: format!("Create temp file {alias}"),
-                    desc: "Tempfile".into(),
-                    action: format!("tempfile:new:{alias}"),
-                    args: None,
-                }];
-            }
-        } else if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp new")
-            .or_else(|| crate::common::strip_prefix_ci(trimmed, "tmp create"))
-            && rest.is_empty()
-        {
-            return vec![Action {
-                label: "Create temp file".into(),
-                desc: "Tempfile".into(),
-                action: "tempfile:new".into(),
-                args: None,
-            }];
-        }
+        if let Some(action) = immediate_create_action(trimmed) { return vec![action]; }
         if let Some(rest) = crate::common::strip_prefix_ci(trimmed, "tmp open")
             && rest.is_empty()
         {
@@ -412,6 +411,23 @@ impl Plugin for TempfilePlugin {
 mod checked_creation_tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    fn immediate_projection_and_numbered_publication_follow_stock() {
+        assert_eq!(immediate_create_action("tmp new").unwrap().action, "tempfile:new");
+        let action = immediate_create_action("TMP CREATE  café notes ").unwrap();
+        assert_eq!(action.label, "Create temp file café notes");
+        assert_eq!(action.action, "tempfile:new:café notes");
+        assert!(action.args.is_none());
+        assert!(immediate_create_action("tmp new bad/name").is_none());
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("temp_0.txt"), b"foreign").unwrap();
+        let created = create_file_in(root.path(), None, "", &|| true).unwrap();
+        assert_eq!(created.path, root.path().join("temp_1.txt"));
+        assert_eq!(fs::read(root.path().join("temp_0.txt")).unwrap(), b"foreign");
+        assert_eq!(fs::read(created.path).unwrap(), b"");
+        assert!(create_file_in(root.path(), None, "", &|| false).is_err());
+    }
 
     #[test]
     fn checked_creation_preserves_collision_and_exact_unicode() {

@@ -260,11 +260,11 @@ impl multi_launcher::plugin::Plugin for TempfileBare {
     fn search(&self, query: &str) -> Vec<Action> {
         if query.trim().eq_ignore_ascii_case("tmp") {
             multi_launcher::plugin::Plugin::search(&multi_launcher::plugins::tempfile::TempfilePlugin, query)
-        } else { Vec::new() }
+        } else { multi_launcher::plugins::tempfile::immediate_create_action(query).into_iter().collect() }
     }
     fn commands(&self) -> Vec<Action> {
         multi_launcher::plugin::Plugin::commands(&multi_launcher::plugins::tempfile::TempfilePlugin)
-            .into_iter().filter(|action| matches!(action.action.as_str(), "query:tmp" | "query:tmp list" | "query:tmp rm ")).collect()
+            .into_iter().filter(|action| matches!(action.action.as_str(), "query:tmp" | "query:tmp new " | "query:tmp create " | "query:tmp list" | "query:tmp rm ")).collect()
     }
 }
 
@@ -852,12 +852,15 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     #[test]
-    fn tempfile_bare_provider_admits_only_enabled_dialog() {
+    fn tempfile_bare_provider_admits_checked_create_and_dialog() {
         let enabled = HashSet::from(["tempfile".to_owned()]);
         let rows = super::tempfile_rows("TmP", Some(&enabled), None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].action, "tempfile:dialog");
-        assert!(super::tempfile_rows("tmp new secret", Some(&enabled), None).is_empty());
+        let created = super::tempfile_rows("tmp new café notes", Some(&enabled), None);
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].action, "tempfile:new:café notes");
+        assert!(super::tempfile_rows("tmp create café notes", Some(&HashSet::new()), None).is_empty());
         assert!(super::tempfile_rows("tmp", Some(&HashSet::new()), None).is_empty());
         let commands = super::TempfileBare.commands();
         assert!(commands.iter().any(|action| action.action == "query:tmp rm "));

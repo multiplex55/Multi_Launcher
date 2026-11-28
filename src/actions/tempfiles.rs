@@ -307,6 +307,26 @@ pub fn create_and_open_checked(
     }))
 }
 
+/// Create once and claim the checked association only at native entry.
+pub fn create_immediate_and_open_with_effect(
+    alias: Option<&str>, current: impl Fn() -> bool, claim: impl Fn() -> bool,
+) -> anyhow::Result<CreateAndOpenOutcome> {
+    let created = crate::plugins::tempfile::create_empty_file_checked(alias, &current)?;
+    let superseded = std::cell::Cell::new(false);
+    let outcome = open_created_with(created, &current, |path, guard| {
+        crate::actions::exec::launch_association_if_current(path.as_os_str(), || {
+            if !guard() { return false; }
+            if !claim() || !current() { superseded.set(true); return false; }
+            true
+        })
+    });
+    Ok(match outcome {
+        CreateAndOpenOutcome::Published { path, reason: PublishedReason::OpenFailed } if superseded.get() =>
+            CreateAndOpenOutcome::Published { path, reason: PublishedReason::Superseded },
+        outcome => outcome,
+    })
+}
+
 fn open_created_with(
     created: crate::plugins::tempfile::CreatedTempFile,
     current: &dyn Fn() -> bool,
@@ -314,40 +334,45 @@ fn open_created_with(
 ) -> CreateAndOpenOutcome {
     let path = created.path;
     #[cfg(windows)]
-    let expected_identity = crate::file_operations::native_file_identity(&created.file).ok();
+    let expected_identity = file_identity(&created.file);
     #[cfg(windows)]
     let launch_path = created.resolved_path;
     #[cfg(windows)]
     drop(created.file);
     #[cfg(windows)]
-    let held = open_published_guard(&launch_path, expected_identity);
+    let matches_path = |candidate: &Path| {
+        open_published_guard(candidate, expected_identity.map(|identity| identity.0))
+            .is_some_and(|file| file_identity(&file) == expected_identity && expected_identity.is_some())
+    };
     #[cfg(windows)]
-    let same_file = || held.is_some();
+    let held = open_published_guard(&launch_path, expected_identity.map(|identity| identity.0))
+        .filter(|file| file_identity(file) == expected_identity && expected_identity.is_some());
     #[cfg(not(windows))]
-    let same_file = || same_published_file(&created.file, &path);
-    if !current() { return CreateAndOpenOutcome::Published { path, reason: PublishedReason::Superseded }; }
-    if !same_file() { return CreateAndOpenOutcome::Published { path, reason: PublishedReason::Changed }; }
-    let reason = std::cell::Cell::new(None);
+    let matches_path = |candidate: &Path| same_published_file(&created.file, candidate);
     #[cfg(not(windows))]
     let launch_path = path.clone();
     #[cfg(windows)]
     let shell_path = shell_path_from_resolved(&launch_path);
     #[cfg(not(windows))]
     let shell_path = launch_path.clone();
+    let actual_path = || if matches_path(&path) { path.clone() } else { shell_path.clone() };
+    let same_file = || {
+        #[cfg(windows)]
+        if held.is_none() { return false; }
+        matches_path(&path) && matches_path(&launch_path) && matches_path(&shell_path)
+    };
+    if !current() { return CreateAndOpenOutcome::Published { path: actual_path(), reason: PublishedReason::Superseded }; }
+    if !same_file() { return CreateAndOpenOutcome::Published { path: actual_path(), reason: PublishedReason::Changed }; }
+    let reason = std::cell::Cell::new(None);
     let result = launch(&shell_path, &|| {
         if !current() { reason.set(Some(PublishedReason::Superseded)); return false; }
         if !same_file() { reason.set(Some(PublishedReason::Changed)); return false; }
-        #[cfg(windows)]
-        if open_published_guard(&launch_path, expected_identity).is_none()
-            || open_published_guard(&shell_path, expected_identity).is_none() {
-            reason.set(Some(PublishedReason::Changed)); return false;
-        }
         if !current() { reason.set(Some(PublishedReason::Superseded)); return false; }
         true
     });
     match result {
-        Ok(()) => CreateAndOpenOutcome::Opened(path),
-        Err(_) => CreateAndOpenOutcome::Published { path, reason: reason.get().unwrap_or(PublishedReason::OpenFailed) },
+        Ok(()) => CreateAndOpenOutcome::Opened(actual_path()),
+        Err(_) => CreateAndOpenOutcome::Published { path: actual_path(), reason: reason.get().unwrap_or(PublishedReason::OpenFailed) },
     }
 }
 
@@ -701,6 +726,23 @@ mod checked_creation_tests {
     fn shell_projection_keeps_drive_and_unc_targets() {
         assert_eq!(shell_path_from_resolved(Path::new(r"\\?\C:\tmp\é.txt")), PathBuf::from(r"C:\tmp\é.txt"));
         assert_eq!(shell_path_from_resolved(Path::new(r"\\?\UNC\server\share\é.txt")), PathBuf::from(r"\\server\share\é.txt"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn created_open_rejects_configured_path_mismatch_and_reports_published_path() {
+        let root = tempfile::tempdir().unwrap();
+        let mut created = owned_file(root.path());
+        let actual = created.resolved_path.clone();
+        let foreign = root.path().join("foreign.txt");
+        std::fs::write(&foreign, b"foreign").unwrap();
+        created.path = foreign.clone();
+        let result = open_created_with(created, &|| true, |_, _| panic!("mismatched path must not launch"));
+        let CreateAndOpenOutcome::Published { path, reason } = result else { panic!("expected retained file") };
+        assert_eq!(reason, PublishedReason::Changed);
+        assert_eq!(path, actual);
+        assert_eq!(std::fs::read(path).unwrap(), b"owned");
+        assert_eq!(std::fs::read(foreign).unwrap(), b"foreign");
     }
 
     #[test]

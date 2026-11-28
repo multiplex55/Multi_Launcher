@@ -216,6 +216,30 @@ pub(crate) fn checked_timer_start_outcome(
     finish_execution(invocation, result, || outcome)
 }
 
+pub(crate) fn checked_tempfile_new_outcome(
+    invocation: &CommandInvocation,
+    preserve_command: bool,
+    preferences: super::super::LauncherRunPreferences,
+    result: anyhow::Result<()>,
+) -> Result<CommandOutcome, CommandError> {
+    let Some(outcome) = tempfile_new_success(invocation, preserve_command, preferences) else {
+        return Err(CommandError::new("launcher", "Invalid checked temporary file creation"));
+    };
+    finish_execution(invocation, result, || outcome)
+}
+
+fn tempfile_new_success(
+    invocation: &CommandInvocation,
+    preserve_command: bool,
+    preferences: super::super::LauncherRunPreferences,
+) -> Option<CommandOutcome> {
+    if !matches!(&invocation.command, Command::Storage(StorageCommand::TempfileNew(_))) { return None; }
+    let mut outcome = initial_success_outcome(invocation);
+    outcome.query = QueryPolicy::Set(if preserve_command { "tmp new ".into() } else { String::new() });
+    outcome.focus = true;
+    Some(finish_success_with_preferences(preferences, invocation, outcome, true))
+}
+
 fn timer_start_success(
     invocation: &CommandInvocation,
     raw_query: &str,
@@ -259,11 +283,14 @@ pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
     if let Some(outcome) = timer_start_success(invocation, host.current_query(), host.preserve_command(), super::super::LauncherRunPreferences {
         clear_query_after_run: host.clear_query_after_run(), hide_after_run: host.hide_after_run(), refocus: host.launcher_should_refocus(),
     }) { return outcome; }
+    if let Some(outcome) = tempfile_new_success(invocation, host.preserve_command(), super::super::LauncherRunPreferences {
+        clear_query_after_run: host.clear_query_after_run(), hide_after_run: host.hide_after_run(), refocus: host.launcher_should_refocus(),
+    }) { return outcome; }
     if let Some(outcome) = checked_authoring_success_outcome(invocation, host.preserve_command(), super::super::LauncherRunPreferences {
         clear_query_after_run: host.clear_query_after_run(), hide_after_run: host.hide_after_run(), refocus: host.launcher_should_refocus(),
     }) { return outcome; }
     let mut outcome = initial_success_outcome(invocation);
-    let mut command_changed_query = false;
+    let command_changed_query = false;
 
     match &invocation.command {
         Command::Storage(
@@ -277,15 +304,6 @@ pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
             outcome.search = true;
             outcome.invalidate_results = true;
             outcome.focus = true;
-        }
-        Command::Storage(StorageCommand::TempfileNew(_)) => {
-            outcome.query = QueryPolicy::Set(if host.preserve_command() {
-                "tmp new ".into()
-            } else {
-                String::new()
-            });
-            outcome.focus = true;
-            command_changed_query = true;
         }
         Command::Timer(TimerCommand::Cancel(_) | TimerCommand::InvalidCancel)
             if host.current_query().starts_with("timer rm") =>

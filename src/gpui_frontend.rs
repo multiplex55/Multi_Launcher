@@ -7469,8 +7469,8 @@ impl RootWindow {
                 } else if provider == "clipboard" {
                     clipboard_history::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "tempfile" {
-                    tempfile_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
-                        || self.tempfile_search.projected(&query, action)
+                    tempfile_search::publication_allows(&query, action, self.tempfile_search.projected(&query, action),
+                        self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "timer" {
                     timer_view::current_provider(&query, action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
                 } else if provider == "todo" {
@@ -8303,6 +8303,20 @@ impl RootWindow {
         }
         if matches!(&result.origin, LauncherResultOrigin::CalendarJump { .. }) {
             self.activate_calendar_jump(&result, query, source, window, cx);
+            return;
+        }
+        if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "tempfile")
+            && tempfile_search::current_create(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+            if self.restart_admission.is_fenced() || window.has_active_dialog(cx)
+                || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx) { return; }
+            let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+            let Ok(Command::Storage(command @ StorageCommand::TempfileNew(_))) = parse_action(&result.action) else { return; };
+            let guard = external_launch::OmniGuard {
+                catalog: Arc::new(AtomicBool::new(true)), lease: Arc::new(AtomicBool::new(true)),
+                effect_gate: Arc::new(external_launch::EffectGate::default()), visibility: self.root_visibility.clone(),
+                revision: self.root_visibility.request_revision.load(Ordering::Acquire), native, admission: self.restart_admission.clone(),
+            };
+            self.start_tempfile_create(result.action, command, guard, query, source, window, cx);
             return;
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "tempfile")
@@ -14408,7 +14422,7 @@ pub(crate) fn run_foundation_window(
                         }
                     } else {
                         root.dashboard_epoch = root.dashboard_epoch.wrapping_add(1);
-                        root.external_launch.retire_focus_bound_effects();
+                        root.external_launch.retire_on_os_deactivation();
                         root.external_launch.retire_omni_before_effect();
                         root.app_editor.revoke_picker_prelaunch();
                         root.folder_authoring.revoke();

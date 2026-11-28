@@ -47,6 +47,15 @@ pub(super) fn enabled(plugins: Option<&HashSet<String>>, caps: Option<&HashMap<S
     plugins.is_none_or(|plugins| plugins.contains("tempfile"))
         && multi_launcher::settings::provider_search_capability_enabled(caps, "tempfile")
 }
+pub(super) fn current_create(query: &str, action: &Action, plugins: Option<&HashSet<String>>, caps: Option<&HashMap<String, Vec<String>>>) -> bool {
+    enabled(plugins, caps) && search_providers::tempfile_rows(query, plugins, caps).iter().any(|candidate| candidate == action)
+        && matches!(parse_action(action), Ok(Command::Storage(StorageCommand::TempfileNew(_))))
+}
+pub(super) fn publication_allows(query: &str, action: &Action, scanned: bool,
+    plugins: Option<&HashSet<String>>, caps: Option<&HashMap<String, Vec<String>>>) -> bool {
+    super::tempfile_view::current_provider(query, action, plugins, caps)
+        || scanned || current_create(query, action, plugins, caps)
+}
 pub(super) fn list_query(query: &str) -> bool {
     let (query, _) = multi_launcher::common::query::split_action_filters(query);
     multi_launcher::plugins::tempfile::list_filter(&query).is_some()
@@ -124,6 +133,19 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn immediate_create_requires_exact_live_provider_row() {
+        let enabled = std::collections::HashSet::from(["tempfile".to_owned()]);
+        let action = super::super::search_providers::tempfile_rows("tmp new café notes", Some(&enabled), None).remove(0);
+        assert!(super::current_create("tmp new café notes", &action, Some(&enabled), None));
+        assert!(super::publication_allows("tmp new café notes", &action, false, Some(&enabled), None));
+        assert!(!super::publication_allows("tmp new café notes", &action, false, Some(&std::collections::HashSet::new()), None));
+        assert!(!super::current_create("tmp new other", &action, Some(&enabled), None));
+        assert!(!super::current_create("tmp new café notes", &action, Some(&std::collections::HashSet::new()), None));
+        let mut forged = action.clone(); forged.label.push('!');
+        assert!(!super::current_create("tmp new café notes", &forged, Some(&enabled), None));
+    }
+
     use super::{Owner, enabled, list_query, mutation_query};
     use std::sync::{Arc, atomic::AtomicBool};
 
