@@ -317,6 +317,17 @@ fn read_session_alarm_bytes(path: &std::path::Path) -> anyhow::Result<Option<Vec
 }
 
 fn save_session_alarms(path: &str, timers: &HashMap<u64, TimerEntry>, candidate: Option<&TimerEntry>, excluded: Option<u64>) -> anyhow::Result<()> {
+    save_session_alarms_if(path, timers, candidate, excluded, || true, || true)
+}
+
+fn save_session_alarms_if(
+    path: &str,
+    timers: &HashMap<u64, TimerEntry>,
+    candidate: Option<&TimerEntry>,
+    excluded: Option<u64>,
+    current: impl Fn() -> bool,
+    claim: impl Fn() -> bool,
+) -> anyhow::Result<()> {
     let path = std::path::Path::new(path);
     let before = read_session_alarm_bytes(path)?;
     let mut baseline = SESSION_ALARM_BASELINE.lock().map_err(|_| anyhow::anyhow!("alarm baseline unavailable"))?;
@@ -329,9 +340,22 @@ fn save_session_alarms(path: &str, timers: &HashMap<u64, TimerEntry>, candidate:
     let mut saved: Vec<SavedAlarm> = timers.values().filter(|entry| entry.persist && Some(entry.id) != excluded).map(saved_alarm).collect();
     if let Some(entry) = candidate.filter(|entry| entry.persist) { saved.push(saved_alarm(entry)); }
     let bytes = serde_json::to_vec_pretty(&saved)?;
-    crate::common::atomic_file::save_atomic_if(path, &bytes, || match std::fs::read(path) {
-        Ok(current) => before.as_ref() == Some(&current),
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound && before.is_none(),
+    let claimed = std::cell::Cell::new(false);
+    let source_current = || match std::fs::read(path) {
+            Ok(bytes) => before.as_ref() == Some(&bytes),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound && before.is_none(),
+    };
+    crate::common::atomic_file::save_atomic_if(path, &bytes, || {
+        if !source_current() || !current() {
+            return false;
+        }
+        if !claimed.get() {
+            if !claim() {
+                return false;
+            }
+            claimed.set(true);
+        }
+        current() && source_current()
     })?;
     *baseline = Some((path.to_string_lossy().into_owned(), Some(bytes)));
     Ok(())
@@ -1333,11 +1357,47 @@ pub(crate) fn restore_session_alarms(path: &str) -> anyhow::Result<Vec<u64>> {
 }
 
 pub(crate) fn start_session_alarm(path: &str, spec: AlarmSpec, name: Option<String>, sound: String) -> anyhow::Result<u64> {
+    start_session_alarm_if(path, spec, name, sound, || true, || true)
+}
+
+pub(crate) fn start_session_alarm_if(
+    path: &str,
+    spec: AlarmSpec,
+    name: Option<String>,
+    sound: String,
+    current: impl Fn() -> bool,
+    claim: impl Fn() -> bool,
+) -> anyhow::Result<u64> {
     use chrono::TimeZone;
     let _completion = TIMER_COMPLETION_LOCK.lock().map_err(|_| anyhow::anyhow!("timer completion unavailable"))?;
     let entry = alarm_entry_at(allocate_timer_id()?, spec, name, sound, chrono::Local::now(), Instant::now(), |local| chrono::Local.from_local_datetime(&local))?;
     let mut timers = ACTIVE_TIMERS.lock().map_err(|_| anyhow::anyhow!("timer state unavailable"))?;
-    publish_entry_into_map(&mut timers, entry, true, |current, candidate| save_session_alarms(path, current, Some(candidate), None), |deadline, id, generation| TIMER_MANAGER.register(deadline, id, generation))
+    publish_entry_into_map(
+        &mut timers,
+        entry,
+        true,
+        |timers, candidate| save_session_alarms_if(path, timers, Some(candidate), None, current, claim),
+        |deadline, id, generation| TIMER_MANAGER.register(deadline, id, generation),
+    )
+}
+
+pub(crate) fn start_session_timer_if(
+    duration: Duration,
+    name: Option<String>,
+    sound: String,
+    current: impl Fn() -> bool,
+    claim: impl Fn() -> bool,
+) -> anyhow::Result<u64> {
+    let entry = timer_entry_at(
+        allocate_timer_id()?, duration, name, sound, chrono::Local::now(), Instant::now(),
+    )?;
+    let mut timers = ACTIVE_TIMERS.lock()
+        .map_err(|_| anyhow::anyhow!("timer state is unavailable"))?;
+    anyhow::ensure!(current() && claim(), "Timer start superseded");
+    publish_entry_into_map(
+        &mut timers, entry, false, |_, _| Ok(()),
+        |deadline, id, generation| TIMER_MANAGER.register(deadline, id, generation),
+    )
 }
 
 pub(crate) fn cancel_session_entry(path: &str, id: u64, generation: u64) -> anyhow::Result<bool> {
@@ -1702,6 +1762,38 @@ mod tests {
         assert!(take_finished_timer(&mut entries, 42, 2).is_none());
         assert!(take_finished_timer(&mut entries, 42, 3).is_some());
         assert!(take_finished_timer(&mut entries, 42, 3).is_none());
+    }
+
+    #[test]
+    fn alarm_claim_external_write_refuses_publish_and_preserves_bytes() {
+        let _owner = TEST_TIMER_INBOX_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("alarms.json");
+        let path_str = path.to_str().unwrap();
+        let original = b"[]";
+        let external = b"[ ]";
+        std::fs::write(&path, original).unwrap();
+        *SESSION_ALARM_BASELINE.lock().unwrap() = Some((path_str.to_owned(), Some(original.to_vec())));
+        let mut timers = HashMap::new();
+        let claims = std::cell::Cell::new(0);
+        let registrations = std::cell::Cell::new(0);
+        let result = publish_entry_into_map(
+            &mut timers,
+            test_entry(991, true),
+            true,
+            |timers, candidate| save_session_alarms_if(path_str, timers, Some(candidate), None, || true, || {
+                claims.set(claims.get() + 1);
+                std::fs::write(&path, external).unwrap();
+                true
+            }),
+            |_, _, _| registrations.set(registrations.get() + 1),
+        );
+        assert!(result.is_err());
+        assert_eq!(claims.get(), 1);
+        assert_eq!(registrations.get(), 0);
+        assert!(timers.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), external);
+        *SESSION_ALARM_BASELINE.lock().unwrap() = None;
     }
 
     #[test]

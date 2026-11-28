@@ -34,6 +34,27 @@ pub fn normalize_outcome_for_root_policy(
 }
 
 impl CommandBus {
+    /// Complete an already admitted typed Timer or Alarm creation.
+    pub fn complete_checked_timer_start(
+        &self,
+        command: super::TimerCommand,
+        action: &Action,
+        raw_query: &str,
+        source: ActivationSource,
+        preserve_command: bool,
+        preferences: LauncherRunPreferences,
+        result: anyhow::Result<()>,
+    ) -> Result<CommandOutcome, CommandError> {
+        if !matches!(command, super::TimerCommand::Start { .. } | super::TimerCommand::AlarmSet { .. })
+            || super::parse_action(action).ok() != Some(Command::Timer(command.clone()))
+        {
+            return Err(CommandError::new("launcher", "Invalid checked timer start command"));
+        }
+        let invocation = CommandInvocation {
+            command: Command::Timer(command), original_action: action.clone(), query_override: None, source,
+        };
+        super::handlers::checked_timer_start_outcome(&invocation, raw_query, preserve_command, preferences, result)
+    }
     pub fn complete_checked_tempfile_mutation(&self, command: super::StorageCommand, action: &Action,
         source: ActivationSource, effect: anyhow::Result<()>, preferences: LauncherRunPreferences) -> Result<CommandOutcome, CommandError> {
         if !matches!(command, super::StorageCommand::TempfileRemove(_) | super::StorageCommand::TempfileAlias { .. })
@@ -293,6 +314,28 @@ impl CommandBus {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn checked_timer_start_preserves_literal_stock_query_policy() {
+        use super::{CommandBus, LauncherRunPreferences};
+        use crate::commands::{ActivationSource, HistoryPolicy, QueryPolicy, TimerCommand, VisibilityPolicy};
+        let action = crate::actions::Action { label: "Start timer".into(), desc: "Timer".into(), action: "timer:start:5m|tea".into(), args: None };
+        let command = TimerCommand::Start { duration: "5m".into(), name: "tea".into() };
+        let prefs = LauncherRunPreferences { clear_query_after_run: true, hide_after_run: true, refocus: true };
+        let result = CommandBus.complete_checked_timer_start(command.clone(), &action, "timer add 5m tea", ActivationSource::Enter, true, prefs, Ok(())).unwrap();
+        assert_eq!(result.query, QueryPolicy::Set("timer add ".into()));
+        assert_eq!(result.history, HistoryPolicy::Record);
+        assert_eq!(result.visibility, VisibilityPolicy::Hide);
+        let uppercase = CommandBus.complete_checked_timer_start(command.clone(), &action, "Timer add 5m tea", ActivationSource::Enter, true, prefs, Ok(())).unwrap();
+        assert_eq!(uppercase.query, QueryPolicy::Set(String::new()));
+        assert!(CommandBus.complete_checked_timer_start(command.clone(), &action, "timer add", ActivationSource::Enter, true, prefs, Err(anyhow::anyhow!("revoked"))).is_err());
+        assert!(CommandBus.complete_checked_timer_start(TimerCommand::Start { duration: "10m".into(), name: "tea".into() }, &action, "timer add", ActivationSource::Enter, true, prefs, Ok(())).is_err());
+        let alarm_action = crate::actions::Action { label: "Alarm".into(), desc: "Timer".into(), action: "alarm:set:12:00|meeting".into(), args: None };
+        let alarm = TimerCommand::AlarmSet { time: "12:00".into(), name: "meeting".into() };
+        let result = CommandBus.complete_checked_timer_start(alarm, &alarm_action, "alarm set 12:00 meeting", ActivationSource::Enter, true, prefs, Ok(())).unwrap();
+        assert_eq!(result.query, QueryPolicy::Set(String::new()));
+        assert_eq!(result.visibility, VisibilityPolicy::Hide);
+    }
+
     #[test]
     fn checked_tempfile_mutation_preserves_stock_outcome_and_rejects_mismatch() {
         use super::{CommandBus, LauncherRunPreferences};

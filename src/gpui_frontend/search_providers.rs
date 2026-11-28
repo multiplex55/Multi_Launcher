@@ -59,12 +59,27 @@ impl multi_launcher::plugin::Plugin for TimerBare {
     fn capabilities(&self) -> &[&str] { &["search", "completion_dialog"] }
     fn query_prefixes(&self) -> &[&str] { &["timer", "alarm"] }
     fn search(&self, query: &str) -> Vec<Action> {
-        if !query.trim().eq_ignore_ascii_case("timer") && !query.trim().eq_ignore_ascii_case("alarm") { return Vec::new(); }
+        let lowered = query.trim().to_ascii_lowercase();
+        if lowered.starts_with("alarm list")
+            || (lowered != "timer" && lowered != "alarm"
+                && !lowered.starts_with("timer add") && !lowered.starts_with("alarm "))
+        {
+            return Vec::new();
+        }
         multi_launcher::plugin::Plugin::search(&multi_launcher::plugins::timer::TimerPlugin, query)
+            .into_iter().filter(|action| action.args.is_none() && matches!(
+                multi_launcher::commands::parse_action(action),
+                Ok(multi_launcher::commands::Command::Timer(
+                    multi_launcher::commands::TimerCommand::TimerDialog
+                    | multi_launcher::commands::TimerCommand::AlarmDialog
+                    | multi_launcher::commands::TimerCommand::Start { .. }
+                    | multi_launcher::commands::TimerCommand::AlarmSet { .. }
+                ))
+            )).collect()
     }
     fn commands(&self) -> Vec<Action> {
         multi_launcher::plugin::Plugin::commands(&multi_launcher::plugins::timer::TimerPlugin)
-            .into_iter().filter(|action| matches!(action.action.as_str(), "query:timer" | "query:alarm")).collect()
+            .into_iter().filter(|action| matches!(action.action.as_str(), "query:timer" | "query:alarm" | "query:timer add ")).collect()
     }
 }
 impl multi_launcher::plugin::Plugin for MultiManagerBare {

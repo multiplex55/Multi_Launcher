@@ -643,6 +643,9 @@ impl LauncherSearchCatalog {
                 let duplicate_result = provider == "duplicate_finder" && duplicate_finder::current_provider(raw_query, &action, None, None);
                 let quick_notes_result = provider == "notes" && quick_notes::current_provider(raw_query, &action, None, None);
                 let calculation_pad_result = provider == "calculator" && calculation_pad::current_provider(raw_query, &action, None, None);
+                let timer_result = provider == "timer" && matches!(parse_action(&action),
+                    Ok(Command::Timer(multi_launcher::commands::TimerCommand::Start { .. } | multi_launcher::commands::TimerCommand::AlarmSet { .. })))
+                    && timer_view::current_provider(raw_query, &action, None, None);
                 let multi_manager_result = provider == "MultiManager" && multi_manager::current_provider(raw_query, &action, None, None);
                 let bookmark_command = provider == "bookmarks" && matches!(parse_action(&action), Ok(Command::Storage(StorageCommand::BookmarkDialog | StorageCommand::BookmarkAdd(_) | StorageCommand::BookmarkRemove(_))))
                     && self.providers.bookmark_row_is_current(raw_query, &action, None, None);
@@ -653,7 +656,7 @@ impl LauncherSearchCatalog {
                 let settings_result = provider == "settings" && (settings_navigation::current_provider(raw_query, &action, None, None).is_some() || dashboard_editor::current_provider(raw_query, &action, None, None));
                 let clipboard_modify_result = provider == "clipboard_modify";
                 let score = if external_launch::AssociationKind::from_provider_name(&provider)
-                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || provider == "tempfile" || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || calculation_pad_result || note_source.is_some() || note_new.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
+                    .is_some() || date_result || base_result || unit_result || calculator_result || window_result || file_result || provider == "tempfile" || folder_size_result || file_lock_result || duplicate_result || quick_notes_result || multi_manager_result || calculation_pad_result || timer_result || note_source.is_some() || note_new.is_some() || settings_result || clipboard_modify_result || folder_command || bookmark_command || omni_source.is_some() || (provider == "favorites" && favorite_search::is_executable(&action))
                 {
                     let cached = CachedSearchEntry::from_action(&action);
                     multi_launcher::actions::search::score_provider_candidate(
@@ -7344,6 +7347,7 @@ impl RootWindow {
     }
 
     fn refresh_launcher_results_inner(&mut self, query: String, scroll_to_search: bool, preserve_entered_omni: bool, cx: &mut Context<Self>) {
+        self.external_launch.retire_timer_before_effect();
         if self.launcher_results.query != query {
             if let Some(view) = &self.multi_manager_view { view.update(cx, |view, _| view.revoke_restore()); }
             self.note_open_epoch.fetch_add(1, Ordering::AcqRel);
@@ -7429,6 +7433,7 @@ impl RootWindow {
     }
 
     fn publish_launcher_provider_results(&mut self, query: String, raw_provider_actions: Vec<(String, Action)>, scroll_to_search: bool) {
+        self.external_launch.retire_timer_before_effect();
         let raw_provider_results_empty = raw_provider_actions.is_empty();
         let omni_projection = self.search_catalog.providers.omni.projection(&query);
         let history_projection = self.search_catalog.providers.history.projection(&query);
@@ -8418,8 +8423,12 @@ impl RootWindow {
         }
         if matches!(&result.origin, LauncherResultOrigin::Provider(name) if name == "timer") {
             if timer_view::current_provider(&query, &result.action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
-                let alarm = matches!(parse_action(&result.action), Ok(Command::Timer(multi_launcher::commands::TimerCommand::AlarmDialog)));
-                self.open_timer(alarm, window, cx);
+                match parse_action(&result.action) {
+                    Ok(Command::Timer(multi_launcher::commands::TimerCommand::TimerDialog)) => self.open_timer(false, window, cx),
+                    Ok(Command::Timer(multi_launcher::commands::TimerCommand::AlarmDialog)) => self.open_timer(true, window, cx),
+                    Ok(Command::Timer(multi_launcher::commands::TimerCommand::Start { .. } | multi_launcher::commands::TimerCommand::AlarmSet { .. })) => self.start_typed_timer(result.action, query, source, window, cx),
+                    _ => {}
+                }
             }
             return;
         }
@@ -16790,6 +16799,25 @@ mod tests {
                 .any(|row| row.action == fallback)
         );
         assert!(catalog.compose("G Café+Tea", Vec::new(), true).is_empty());
+    }
+
+    #[test]
+    fn typed_timer_search_preserves_stock_rows_and_generation() {
+        let enabled = HashSet::from(["timer".to_owned()]);
+        let catalog = completion_catalog(Vec::new(), true, Some(&enabled));
+        for query in ["timer add 5m tea", "alarm 1d 12:00 meeting"] {
+            let rows = super::search_providers::search_routed(catalog.providers.plugins(), query, Some(&enabled), None);
+            assert_eq!(rows.len(), 1);
+            let projected = catalog.compose(query, rows.clone(), false);
+            assert_eq!(projected.len(), 1);
+            assert_eq!(projected[0].action, rows[0].1);
+            let mut results = LauncherSearchResults::default();
+            results.replace(query.into(), projected.clone(), ResolvedQueryResultsLayout::default(), 2);
+            let old = results.generation;
+            assert!(results.resolve_result(old, 0, query).is_some());
+            results.replace(query.into(), projected, ResolvedQueryResultsLayout::default(), 2);
+            assert!(results.resolve_result(old, 0, query).is_none());
+        }
     }
 
     #[test]

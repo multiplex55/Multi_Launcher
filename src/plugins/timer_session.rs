@@ -110,6 +110,46 @@ impl TimerSession {
         Ok(id)
     }
 
+    /// Start a typed countdown only after the caller's final effect claim.
+    pub fn start_typed_timer_if(
+        &self,
+        duration: &str,
+        label: &str,
+        current: impl Fn() -> bool,
+        claim: impl Fn() -> bool,
+    ) -> Result<u64, String> {
+        let mut owned = self.owned.lock().map_err(|_| "Timer session unavailable")?;
+        let owned = owned.as_mut().ok_or("Timer session closed")?;
+        let duration = timer::parse_duration(duration)
+            .ok_or("invalid or non-positive timer duration")?;
+        let name = (!label.is_empty()).then(|| label.to_owned());
+        let id = timer::start_session_timer_if(duration, name, "None".into(), current, claim)
+            .map_err(|error| error.to_string())?;
+        owned.insert(id);
+        Ok(id)
+    }
+
+    /// Persist a typed alarm before publishing its exact session occurrence.
+    /// `current` must remain a liveness check after `claim` succeeds, because
+    /// a transient atomic rename failure can retry without claiming twice.
+    pub fn start_typed_alarm_if(
+        &self,
+        input: &str,
+        label: &str,
+        current: impl Fn() -> bool,
+        claim: impl Fn() -> bool,
+    ) -> Result<u64, String> {
+        let mut owned = self.owned.lock().map_err(|_| "Timer session unavailable")?;
+        let owned = owned.as_mut().ok_or("Timer session closed")?;
+        let spec = timer::parse_alarm_spec(input).map_err(|error| error.to_string())?;
+        let name = (!label.is_empty()).then(|| label.to_owned());
+        let id = timer::start_session_alarm_if(
+            &self.alarm_path, spec, name, "None".into(), current, claim,
+        ).map_err(|error| error.to_string())?;
+        owned.insert(id);
+        Ok(id)
+    }
+
     pub fn rows(&self) -> Vec<TimerRow> {
         self.try_rows().unwrap_or_default()
     }
@@ -220,6 +260,42 @@ mod tests {
     use crate::platform::app_data::AppDataRoot;
     use crate::plugins::timer;
     use std::sync::Arc;
+
+    #[test]
+    fn typed_creation_checks_effect_before_publish_and_preserves_alarm_bytes() {
+        let _owner = crate::plugins::timer::TEST_TIMER_INBOX_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = AppDataRoot::from_settings_path(dir.path().join("settings.json")).unwrap();
+        let session = TimerSession::start(root, Arc::new(|| {})).unwrap();
+        session.restore_alarms().unwrap();
+        let claims = std::cell::Cell::new(0);
+        assert!(session.start_typed_timer_if("1h", "tea", || false, || { claims.set(claims.get() + 1); true }).is_err());
+        assert_eq!(claims.get(), 0);
+        assert!(session.start_typed_timer_if("1h", "tea", || true, || false).is_err());
+        assert!(session.rows().is_empty());
+        assert!(session.start_typed_alarm_if("1d 12:00", "alarm", || true, || false).is_err());
+        assert!(session.rows().is_empty());
+        let alarm_path = dir.path().join("alarms.json");
+        assert!(!alarm_path.exists());
+
+        let timer_id = session.start_typed_timer_if("1h", "tea", || true, || true).unwrap();
+        assert_eq!(timer::ACTIVE_TIMERS.lock().unwrap().get(&timer_id).unwrap().sound, "None");
+        let alarm_claims = std::cell::Cell::new(0);
+        let alarm_id = session.start_typed_alarm_if("1d 12:00", "alarm", || true, || {
+            alarm_claims.set(alarm_claims.get() + 1);
+            true
+        }).unwrap();
+        assert_eq!(alarm_claims.get(), 1);
+        assert_eq!(timer::ACTIVE_TIMERS.lock().unwrap().get(&alarm_id).unwrap().sound, "None");
+        let changed = b"[]";
+        std::fs::write(&alarm_path, changed).unwrap();
+        let before = session.rows();
+        assert!(session.start_typed_alarm_if("1d 13:00", "other", || true, || { claims.set(claims.get() + 1); true }).is_err());
+        assert_eq!(claims.get(), 0);
+        assert_eq!(session.rows().iter().map(|row| row.id).collect::<Vec<_>>(), before.iter().map(|row| row.id).collect::<Vec<_>>());
+        assert_eq!(std::fs::read(&alarm_path).unwrap(), changed);
+        session.shutdown().unwrap();
+    }
 
     #[test]
     fn session_start_cancel_is_generation_checked_and_retired() {

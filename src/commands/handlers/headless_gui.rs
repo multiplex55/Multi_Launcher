@@ -203,6 +203,38 @@ pub(crate) fn checked_storage_authoring_outcome(
     finish_execution(invocation, result, || outcome)
 }
 
+pub(crate) fn checked_timer_start_outcome(
+    invocation: &CommandInvocation,
+    raw_query: &str,
+    preserve_command: bool,
+    preferences: super::super::LauncherRunPreferences,
+    result: anyhow::Result<()>,
+) -> Result<CommandOutcome, CommandError> {
+    let Some(outcome) = timer_start_success(invocation, raw_query, preserve_command, preferences) else {
+        return Err(CommandError::new("launcher", "Invalid checked timer start command"));
+    };
+    finish_execution(invocation, result, || outcome)
+}
+
+fn timer_start_success(
+    invocation: &CommandInvocation,
+    raw_query: &str,
+    preserve_command: bool,
+    preferences: super::super::LauncherRunPreferences,
+) -> Option<CommandOutcome> {
+    if !matches!(&invocation.command, Command::Timer(TimerCommand::Start { .. } | TimerCommand::AlarmSet { .. })) {
+        return None;
+    }
+    let mut outcome = initial_success_outcome(invocation);
+    let changed = matches!(&invocation.command, Command::Timer(TimerCommand::Start { .. }))
+        && raw_query.starts_with("timer add");
+    if changed {
+        outcome.query = QueryPolicy::Set(if preserve_command { "timer add ".into() } else { String::new() });
+        outcome.focus = true;
+    }
+    Some(finish_success_with_preferences(preferences, invocation, outcome, changed))
+}
+
 fn checked_authoring_success_outcome(invocation: &CommandInvocation, preserve_command: bool,
     preferences: super::super::LauncherRunPreferences) -> Option<CommandOutcome> {
     let mut outcome = initial_success_outcome(invocation);
@@ -224,6 +256,9 @@ pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
     host: &H,
     invocation: &CommandInvocation,
 ) -> CommandOutcome {
+    if let Some(outcome) = timer_start_success(invocation, host.current_query(), host.preserve_command(), super::super::LauncherRunPreferences {
+        clear_query_after_run: host.clear_query_after_run(), hide_after_run: host.hide_after_run(), refocus: host.launcher_should_refocus(),
+    }) { return outcome; }
     if let Some(outcome) = checked_authoring_success_outcome(invocation, host.preserve_command(), super::super::LauncherRunPreferences {
         clear_query_after_run: host.clear_query_after_run(), hide_after_run: host.hide_after_run(), refocus: host.launcher_should_refocus(),
     }) { return outcome; }
@@ -272,17 +307,6 @@ pub(crate) fn success_outcome<H: HeadlessCommandHost + ?Sized>(
             outcome.search = true;
             outcome.invalidate_results = true;
             outcome.focus = true;
-        }
-        Command::Timer(TimerCommand::Start { .. })
-            if host.current_query().starts_with("timer add") =>
-        {
-            outcome.query = QueryPolicy::Set(if host.preserve_command() {
-                "timer add ".into()
-            } else {
-                String::new()
-            });
-            outcome.focus = true;
-            command_changed_query = true;
         }
         _ => {}
     }

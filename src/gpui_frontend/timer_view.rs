@@ -4,6 +4,34 @@ use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::timer_session::{TimerKind, TimerRow, TimerSession};
 pub(super) const WAIT: &str = "Wait for the Timer or Alarm operation to finish.";
 
+pub(super) struct TypedTimerLane {
+    busy: Arc<AtomicBool>,
+    wake: Arc<HashWakeSignal>,
+    released: AtomicBool,
+}
+impl TypedTimerLane {
+    pub fn acquire(busy: Arc<AtomicBool>, wake: Arc<HashWakeSignal>) -> Option<Arc<Self>> {
+        busy.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()?;
+        Some(Arc::new(Self {
+            busy,
+            wake,
+            released: AtomicBool::new(false),
+        }))
+    }
+    pub fn release(&self) {
+        if !self.released.swap(true, Ordering::AcqRel) {
+            self.busy.store(false, Ordering::Release);
+            self.wake.notify();
+        }
+    }
+}
+impl Drop for TypedTimerLane {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 pub(super) fn current_provider(
     query: &str,
     action: &Action,
@@ -17,6 +45,8 @@ pub(super) fn current_provider(
             Ok(Command::Timer(
                 multi_launcher::commands::TimerCommand::TimerDialog
                     | multi_launcher::commands::TimerCommand::AlarmDialog
+                    | multi_launcher::commands::TimerCommand::Start { .. }
+                    | multi_launcher::commands::TimerCommand::AlarmSet { .. }
             ))
         )
         && search_providers::search_routed(
@@ -648,12 +678,46 @@ impl RootWindow {
 
 #[cfg(test)]
 mod tests {
-    use super::{current_provider, default_sound, displayed_rows, latest_completion, pause_button_id};
+    use super::{current_provider, default_sound, displayed_rows, latest_completion, pause_button_id, TypedTimerLane};
     use multi_launcher::plugin::Plugin;
     use multi_launcher::plugins::timer::TimerPlugin;
     use multi_launcher::plugins::timer_session::{TimerKind, TimerRow};
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
+
+    #[test]
+    fn typed_timer_rows_require_exact_stock_action_and_current_gates() {
+        let enabled = HashSet::from(["timer".to_owned()]);
+        for query in ["timer add 5m tea", "alarm 1d 12:00 meeting"] {
+            let row = TimerPlugin.search(query).remove(0);
+            assert!(current_provider(query, &row, Some(&enabled), None));
+            assert!(!current_provider("timer", &row, Some(&enabled), None));
+            assert!(!current_provider(query, &row, Some(&HashSet::new()), None));
+            assert!(!current_provider(query, &row, Some(&enabled), Some(&HashMap::from([
+                ("timer".to_owned(), vec!["completion_dialog".to_owned()]),
+            ]))));
+            let mut forged = row;
+            forged.label.push('!');
+            assert!(!current_provider(query, &forged, Some(&enabled), None));
+        }
+        assert!(!super::search_providers::TimerBare.search("timer list").iter().any(|row| row.action.starts_with("timer:show:")));
+        assert!(super::search_providers::TimerBare.commands().iter().any(|row| row.action == "query:timer add "));
+    }
+
+    #[test]
+    fn typed_timer_lane_is_single_flight_and_releases_on_drop() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        let busy = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(super::HashWakeSignal::default());
+        let lane = TypedTimerLane::acquire(busy.clone(), wake.clone()).unwrap();
+        assert!(busy.load(Ordering::Acquire));
+        assert!(TypedTimerLane::acquire(busy.clone(), wake.clone()).is_none());
+        drop(lane);
+        assert!(!busy.load(Ordering::Acquire));
+        let lane = TypedTimerLane::acquire(busy.clone(), wake).unwrap();
+        lane.release();
+        assert!(!busy.load(Ordering::Acquire));
+    }
 
     #[test]
     fn pending_pause_retains_exact_painted_row_and_button_identity() {

@@ -2218,3 +2218,15 @@ Locked `fast-dev` checks passed for the shared library in 1m 12s and for the fin
 P0.09 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use matched disposable profiles with both Paste Sequence shortcuts disabled, an owned notes directory and separate owned template directory. Check the heading, alias and frozen time expansion, same-day reopen, absence of a Markdown file before explicit Save, existing-day precedence and egui readback.
 
 Continue P0.17 typed Timer and Alarm creation from Search. Earlier P0 workflows with working source continue awaiting essential native replay.
+
+### P0.17 checked typed Timer and Alarm creation
+
+Stock `timer add <duration> [label]` and `alarm <time or date/time> [label]` now run from GPUI Search. The exact rendered action carries the stock duration, time and label. Dispatch checks the provider, Search capability, current generation, query and active launcher ownership. The bare forms retain their original routes. The stock `timer add ` query suggestion is available.
+
+Typed starts use the shared Timer Session, silent sound and the existing form and restore operation lane. A countdown is inserted after a one-shot authority claim. An alarm saves its canonical file before scheduler publication. Each replacement attempt rechecks liveness and exact alarm bytes, including after the claim. Focus or Search changes retire retries. The lane releases before waking the retained timers. The worker records History and Usage once after success using the original action, query and activation source. The current receipt applies the stock query retention and visibility preferences.
+
+The locked `fast-dev` library check passed in 1m 31s. Review identified a late byte comparison race. The corrected library check passed in 23.40s, and the integrated library and launcher check passed in 22.55s. Independent review cleared the exact byte and authority boundaries, operation lane and receipt ownership. The grouped link took 10m 37s. Nextest run `bbc4842f-3221-4269-bbad-8adfa460e292` passed all 11 selected tests across two binaries in 4.246s with 9599 skipped.
+
+P0.17 remains Stage 2. Paired 1516 × 937 Windows replay remains open. The owned profiles use the preserve or hide policies and disable both Paste Sequence shortcuts. Start one short silent countdown and one labelled future alarm. Check exact History and Usage, completion once, visibility and relaunch readback of the alarm. The remaining typed controls, host behavior and broader G23 criteria stay open.
+
+Continue P0.10 MultiManager Save HWND Snapshot.

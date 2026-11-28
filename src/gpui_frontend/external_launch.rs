@@ -544,6 +544,7 @@ pub(super) enum DiagnosticKind {
 
 #[derive(Clone)]
 pub(super) enum RunCommand {
+    TimerCreate { session: Arc<multi_launcher::plugins::timer_session::TimerSession>, command: multi_launcher::commands::TimerCommand, guard: OmniGuard, lane: Arc<super::timer_view::TypedTimerLane> },
     HistoryReplay { receipt: Arc<super::history_search::Receipt>, epoch: Arc<AtomicU64>, guard: OmniGuard },
     External { command: ExternalCommand, association: Option<AssociationKind> },
     Omni { command: ExternalCommand, target: OmniTarget, guard: OmniGuard },
@@ -683,6 +684,7 @@ struct Pending {
     omni_lease: Option<Arc<AtomicBool>>,
     omni_gate: Option<Arc<EffectGate>>,
     omni_category_effect: bool,
+    timer_effect: bool,
 }
 
 #[derive(Default)]
@@ -696,7 +698,7 @@ pub(super) struct ExternalLaunch {
 
 impl ExternalLaunch {
     pub(super) fn defer_notes_wake_for_omni(&mut self) -> bool {
-        if self.pending.as_ref().is_some_and(|pending| pending.omni_lease.is_some()) {
+        if self.pending.as_ref().is_some_and(|pending| pending.omni_lease.is_some() && !pending.timer_effect) {
             self.notes_wake_deferred = true;
             true
         } else { false }
@@ -722,6 +724,7 @@ impl ExternalLaunch {
         if let Some(lease) = self.pending.as_ref().and_then(|pending| pending.clipboard_lease.as_ref()) { lease.store(false, Ordering::Release); }
     }
     pub fn retire_focus_bound_effects(&self) {
+        self.retire_timer_before_effect();
         if let Some((lease, _)) = &self.auxiliary_effect { lease.store(false, Ordering::Release); }
         if let Some(lease) = &self.preview_lease { lease.store(false, Ordering::Release); }
         if let Some(pending) = self.pending.as_ref().filter(|pending| pending.snippet_effect) {
@@ -747,6 +750,15 @@ impl ExternalLaunch {
             && pending.omni_category_effect
             && pending.omni_gate.as_ref().is_some_and(|gate| gate.revoke_pending())
             && let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
+    }
+
+    pub(super) fn retire_timer_before_effect(&self) {
+        if let Some(pending) = &self.pending
+            && pending.timer_effect
+        {
+            if let Some(gate) = &pending.omni_gate { gate.revoke_pending(); }
+            if let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
+        }
     }
 
     pub(super) fn set_snippet_preview_lease(&mut self, lease: Arc<std::sync::atomic::AtomicBool>) {
@@ -792,9 +804,10 @@ impl ExternalLaunch {
             clipboard_lease: match &request.command { RunCommand::ClipboardUndo(_, lease) | RunCommand::ClipboardExecute { lease, .. } | RunCommand::SnippetRun { lease, .. } => Some(lease.clone()), _ => None },
             focus_guard: None,
             snippet_effect: matches!(&request.command, RunCommand::SnippetRun { .. }),
-            omni_lease: match &request.command { RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
+            omni_lease: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.lease.clone()), _ => None },
             omni_category_effect: match &request.command { RunCommand::Omni { target, .. } => !matches!(target, OmniTarget::Tempfile(_)), RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } => true, _ => false },
-            omni_gate: match &request.command { RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
+            omni_gate: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
+            timer_effect: matches!(&request.command, RunCommand::TimerCreate { .. }),
         });
         Some(ticket)
     }
@@ -983,6 +996,24 @@ fn execute_request(
     copy: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> Result<CommandOutcome, CommandError> {
     match &request.command {
+        RunCommand::TimerCreate { session, command, guard, .. } => {
+            let effect = match command {
+                multi_launcher::commands::TimerCommand::Start { duration, name } =>
+                    session.start_typed_timer_if(duration, name, || guard.current(), || guard.effect_current()),
+                multi_launcher::commands::TimerCommand::AlarmSet { time, name } =>
+                    session.start_typed_alarm_if(time, name, || guard.current(), || guard.effect_current()),
+                _ => Err("Invalid Timer request".into()),
+            }.map(|_| ()).map_err(anyhow::Error::msg);
+            CommandBus.complete_checked_timer_start(
+                command.clone(), &request.action, &request.query, request.source,
+                request.settings.preserve_command,
+                multi_launcher::commands::LauncherRunPreferences {
+                    clear_query_after_run: request.settings.clear_query_after_run,
+                    hide_after_run: request.settings.hide_after_run,
+                    refocus: true,
+                }, effect,
+            )
+        }
         RunCommand::HistoryReplay { receipt, epoch, guard } => {
             let current = || guard.current()
                 && epoch.load(Ordering::Acquire) == receipt.canonical_revision;
@@ -1176,7 +1207,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::TimerCreate { .. } | RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1224,6 +1255,33 @@ fn switch_receipt_foreground_current(
 struct ExternalNotification;
 
 impl RootWindow {
+    pub(super) fn start_typed_timer(
+        &mut self, action: Action, query: String, source: ActivationSource,
+        window: &mut Window, cx: &mut Context<Self>,
+    ) {
+        let Ok(multi_launcher::commands::Command::Timer(command @ (
+            multi_launcher::commands::TimerCommand::Start { .. }
+            | multi_launcher::commands::TimerCommand::AlarmSet { .. }
+        ))) = multi_launcher::commands::parse_action(&action) else { return; };
+        if !super::timer_view::current_provider(&query, &action, self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref())
+            || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
+            || !window.is_window_active() || !self.external_owner_is_current(window.focused(cx).as_ref(), window, cx)
+        { return; }
+        let Some(native) = self.native_window.filter(|native| current_foreground_identity() == Some(native.identity)) else { return; };
+        let Some(session) = self.timer_session.clone() else {
+            self.restart_status = Some("Timer notifications are unavailable.".into());
+            cx.notify();
+            return;
+        };
+        let Some(lane) = super::timer_view::TypedTimerLane::acquire(self.timer_busy.clone(), self.timer_wake.clone()) else { return; };
+        let guard = OmniGuard {
+            catalog: Arc::new(AtomicBool::new(true)), lease: Arc::new(AtomicBool::new(true)),
+            effect_gate: Arc::new(EffectGate::default()), visibility: self.root_visibility.clone(),
+            revision: self.root_visibility.request_revision.load(Ordering::Acquire), native,
+            admission: self.restart_admission.clone(),
+        };
+        self.start_run(action, RunCommand::TimerCreate { session, command, guard, lane }, query, source, None, window, cx);
+    }
     fn settle_snippet_lane(&mut self, cx: &mut Context<Self>) {
         if self.launcher_search_error.as_deref() == Some(super::clipboard_modify_view::LAUNCHER_EFFECT_WAIT) {
             self.launcher_search_error = None;
@@ -1689,11 +1747,11 @@ impl RootWindow {
                 lease.store(false, Ordering::Release);
             }
         }
-        if let RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
+        if let RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } = &request.command {
             if let Some(focus) = window.focused(cx) {
                 let lease = guard.lease.clone();
                 let effect_gate = guard.effect_gate.clone();
-                let strict_focus = matches!(&request.command, RunCommand::CalendarJump { .. });
+                let strict_focus = matches!(&request.command, RunCommand::CalendarJump { .. } | RunCommand::TimerCreate { .. });
                 let subscription = cx.on_blur(&focus, window, move |_, _, _| {
                     if effect_gate.revoke_pending() || strict_focus { lease.store(false, Ordering::Release); }
                 });
@@ -1707,7 +1765,7 @@ impl RootWindow {
         } else {
             self.query_history.reset();
         }
-        if matches!(&request.command, RunCommand::HistoryReplay { .. }) {
+        if matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. }) {
             let root = cx.entity().downgrade();
             window.defer(cx, move |window, app| {
                 let _ = root.update(app, |root, cx| {
@@ -1718,6 +1776,9 @@ impl RootWindow {
                             let guard_current = match &request.command {
                                 RunCommand::HistoryReplay { receipt, epoch, guard } => guard.current()
                                     && epoch.load(Ordering::Acquire) == receipt.canonical_revision,
+                                RunCommand::TimerCreate { guard, .. } => guard.current()
+                                    && super::timer_view::current_provider(&request.query, &request.action,
+                                        root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref()),
                                 _ => false,
                             };
                             guard_current
@@ -1752,9 +1813,10 @@ impl RootWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let history = matches!(&request.command, RunCommand::HistoryReplay { .. });
+        let checked_delivery = matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. });
         let task = cx.background_executor().spawn(async move {
             let result = run(&request);
+            if let RunCommand::TimerCreate { lane, .. } = &request.command { lane.release(); }
             (request, result)
         });
         let root = cx.entity().downgrade();
@@ -1777,7 +1839,7 @@ impl RootWindow {
                     }
                 });
             });
-            if history && delivered.is_err() {
+            if checked_delivery && delivered.is_err() {
                 let _ = root.update(cx, |root, cx| {
                     if root.external_launch.pending.as_ref()
                         .is_some_and(|pending| pending.ticket == ticket)
@@ -1880,6 +1942,7 @@ impl RootWindow {
             RunCommand::ClipboardUndo(current, _) => current() && window.is_window_active(),
             RunCommand::ClipboardExecute { current, .. } => current() && window.is_window_active(),
             RunCommand::SnippetRun { current, .. } => current() && window.is_window_active(),
+            RunCommand::TimerCreate { guard, .. } => guard.current() && window.is_window_active(),
             RunCommand::HistoryReplay { receipt, epoch, guard } => guard.receipt_current()
                 && epoch.load(Ordering::Acquire) == receipt.canonical_revision,
             RunCommand::Omni { guard, .. } | RunCommand::TempfileMutation { guard, .. } => guard.receipt_current(),
@@ -2078,7 +2141,9 @@ impl RootWindow {
             )
             .enumerate()
         {
-            let message = if matches!(&receipt.request.command, RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::SnippetRun { .. }) {
+            let message = if matches!(&receipt.request.command, RunCommand::TimerCreate { .. }) {
+                format!("Timer or alarm started, but bookkeeping failed: {error}")
+            } else if matches!(&receipt.request.command, RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::SnippetRun { .. }) {
                 format!("Copied, but bookkeeping failed: {error}")
             } else {
                 format!("Application launched, but bookkeeping failed: {error}")
@@ -2269,7 +2334,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "o".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_gate: Some(Arc::new(EffectGate::default())), omni_category_effect: true,
+            omni_lease: Some(lease.clone()), omni_gate: Some(Arc::new(EffectGate::default())), omni_category_effect: true, timer_effect: false,
         });
         assert!(owner.defer_notes_wake_for_omni());
         assert!(owner.defer_notes_wake_for_omni());
@@ -2283,6 +2348,36 @@ mod tests {
     }
 
     #[test]
+    fn timer_retirement_revokes_liveness_after_claim_without_deferring_notes() {
+        let admission = Arc::new(RestartAdmission::default());
+        let lease = Arc::new(AtomicBool::new(true));
+        let gate = Arc::new(EffectGate::default());
+        let mut owner = ExternalLaunch::default();
+        owner.pending = Some(Pending {
+            ticket: 1,
+            stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "timer add 5m".into(), focus: None },
+            permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
+            clipboard_lease: None, focus_guard: None, snippet_effect: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, timer_effect: true,
+        });
+        assert!(!owner.defer_notes_wake_for_omni());
+        owner.retire_omni_categories_before_effect();
+        assert!(lease.load(Ordering::Acquire));
+        owner.retire_timer_before_effect();
+        assert!(!lease.load(Ordering::Acquire));
+        assert_eq!(gate.0.load(Ordering::Acquire), EFFECT_REVOKED);
+        let entered = Arc::new(EffectGate::default());
+        assert!(claim_omni_effect(&entered, || true));
+        let lease = Arc::new(AtomicBool::new(true));
+        let pending = owner.pending.as_mut().unwrap();
+        pending.omni_gate = Some(entered.clone());
+        pending.omni_lease = Some(lease.clone());
+        owner.retire_timer_before_effect();
+        assert!(!lease.load(Ordering::Acquire));
+        assert_eq!(entered.0.load(Ordering::Acquire), EFFECT_ENTERED);
+    }
+
+    #[test]
     fn category_retirement_preserves_direct_and_entered_effects() {
         let admission = Arc::new(RestartAdmission::default());
         let lease = Arc::new(AtomicBool::new(true));
@@ -2293,7 +2388,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "tmp list".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, timer_effect: false,
         });
         owner.retire_omni_categories_before_effect();
         assert!(lease.load(Ordering::Acquire));
