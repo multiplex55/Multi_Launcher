@@ -1,7 +1,7 @@
 //! Single-flight ownership for ordinary external launcher actions.
 use std::sync::{Arc, atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering}};
 
-use gpui_kit::{AppContext as _, Context, FocusHandle, Focusable as _, WeakEntity, Window, WindowId};
+use gpui_kit::{AnyWindowHandle, AppContext as _, Context, FocusHandle, Focusable as _, WeakEntity, Window, WindowId};
 use multi_launcher::actions::Action;
 use multi_launcher::commands::{
     ActivationSource, CommandBus, CommandError, CommandOutcome, ExternalCommand,
@@ -544,6 +544,7 @@ pub(super) enum DiagnosticKind {
 
 #[derive(Clone)]
 pub(super) enum RunCommand {
+    GestureExternal { command: ExternalCommand, guard: super::gesture_query::Request, visibility: super::RootVisibility, admission: Arc<RestartAdmission>, gate: Arc<EffectGate> },
     TimerCreate { session: Arc<multi_launcher::plugins::timer_session::TimerSession>, command: multi_launcher::commands::TimerCommand, guard: OmniGuard, lane: Arc<super::timer_view::TypedTimerLane> },
     HistoryReplay { receipt: Arc<super::history_search::Receipt>, epoch: Arc<AtomicU64>, guard: OmniGuard },
     External { command: ExternalCommand, association: Option<AssociationKind> },
@@ -928,6 +929,38 @@ impl ExternalCommandHost for OmniHost<'_> {
 }
 
 struct FavoriteHost<'a> { host: &'a Host }
+
+struct GestureHost<'a> {
+    host: &'a Host,
+    guard: &'a super::gesture_query::Request,
+    visibility: &'a super::RootVisibility,
+    admission: &'a RestartAdmission,
+    gate: &'a EffectGate,
+}
+impl GestureHost<'_> {
+    fn current(&self) -> bool {
+        self.visibility.active.load(Ordering::Acquire)
+            && !self.visibility.retired.load(Ordering::Acquire)
+            && super::native_window_is_valid(self.guard.root)
+            && self.guard.current(self.guard.root, current_foreground_identity(),
+                self.visibility.request_revision.load(Ordering::Acquire), self.admission.is_fenced())
+    }
+}
+impl ExternalCommandHost for GestureHost<'_> {
+    fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
+        anyhow::ensure!(command.namespace.is_none() && command.target == action.action && command.args == action.args, "Gesture target changed");
+        #[cfg(windows)]
+        multi_launcher::actions::exec::checked_local_file(std::path::Path::new(&command.target))?;
+        multi_launcher::actions::exec::launch_with_identity_if_current(&command.target, command.args.as_deref(), || {
+            #[cfg(windows)]
+            if multi_launcher::actions::exec::checked_local_file(std::path::Path::new(&command.target)).is_err() { return false; }
+            self.gate.claim(|| self.current())
+        }).map(|_| ())
+    }
+    fn external_clear_query_after_run(&self) -> bool { self.host.external_clear_query_after_run() }
+    fn external_hide_after_run(&self) -> bool { self.host.external_hide_after_run() }
+    fn external_launcher_should_refocus(&self) -> bool { false }
+}
 impl ExternalCommandHost for FavoriteHost<'_> {
     fn execute_external_command(&mut self, command: &ExternalCommand, action: &Action) -> anyhow::Result<()> {
         anyhow::ensure!(command.namespace.is_none() && command.target == action.action && command.args == action.args, "Invalid favorite command");
@@ -996,6 +1029,10 @@ fn execute_request(
     copy: impl FnOnce(&str) -> anyhow::Result<()>,
 ) -> Result<CommandOutcome, CommandError> {
     match &request.command {
+        RunCommand::GestureExternal { command, guard, visibility, admission, gate } => CommandBus.dispatch_external(
+            command, &request.action, request.source, None,
+            &mut GestureHost { host, guard, visibility, admission, gate },
+        ),
         RunCommand::TimerCreate { session, command, guard, .. } => {
             let effect = match command {
                 multi_launcher::commands::TimerCommand::Start { duration, name } =>
@@ -1207,7 +1244,7 @@ pub(super) fn run(request: &Request) -> WorkerResult {
         settings: request.settings.clone(),
         association: match &request.command {
             RunCommand::External { association, .. } => *association,
-            RunCommand::TimerCreate { .. } | RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
+            RunCommand::GestureExternal { .. } | RunCommand::TimerCreate { .. } | RunCommand::HistoryReplay { .. } | RunCommand::Omni { .. } | RunCommand::TempfileMutation { .. } | RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } | RunCommand::WindowSwitch(_) | RunCommand::WindowClose(_) | RunCommand::Indexed { .. } | RunCommand::Favorite(_) | RunCommand::Copy(_) | RunCommand::Calculator(_) | RunCommand::CalculatorHistory(_) | RunCommand::Diagnostic { .. } | RunCommand::ClipboardUndo(..) | RunCommand::ClipboardExecute { .. } | RunCommand::SnippetRun { .. } => None,
         },
         query: request.query.clone(),
     };
@@ -1255,6 +1292,28 @@ fn switch_receipt_foreground_current(
 struct ExternalNotification;
 
 impl RootWindow {
+    pub(super) fn start_gesture_external(&mut self, guard: super::gesture_query::Request, cx: &mut Context<Self>) {
+        let source = guard.source();
+        if source.process_id == std::process::id() && source != guard.root.identity { return; }
+        if self.native_window != Some(guard.root) || !guard.current(guard.root, current_foreground_identity(),
+            self.root_visibility.request_revision.load(Ordering::Acquire), self.restart_admission.is_fenced()) { return; }
+        let action = guard.release.action.clone();
+        let Ok(parsed) = multi_launcher::commands::parse_action(&action) else { return; };
+        let Some(command) = ordinary_external(&parsed).cloned() else { return; };
+        let Some(root) = self.root_window else { return; };
+        let query = self.query.read(cx).value().to_string();
+        let focus = if source == guard.root.identity && self.root_visibility.visible.load(Ordering::Acquire) {
+            root.update(cx, |_, window, app| window.is_window_active().then(|| window.focused(app)).flatten()).ok().flatten()
+        } else { None };
+        let stamp = Stamp { root: root.window_id(), generation: self.launcher_results.generation,
+            visibility_revision: guard.revision, query: query.clone(), focus };
+        let request = Request { action, history_label: None,
+            command: RunCommand::GestureExternal { command, guard, visibility: self.root_visibility.clone(),
+                admission: self.restart_admission.clone(), gate: Arc::new(EffectGate::default()) },
+            query, source: ActivationSource::Gesture, settings: self.external_launch_preferences.clone() };
+        let Some(ticket) = self.external_launch.begin(&self.restart_admission, stamp, &request) else { return; };
+        self.spawn_run_worker(ticket, request, root, cx);
+    }
     pub(super) fn start_typed_timer(
         &mut self, action: Action, query: String, source: ActivationSource,
         window: &mut Window, cx: &mut Context<Self>,
@@ -1792,7 +1851,7 @@ impl RootWindow {
                                 && root.external_owner_is_current(pending.stamp.focus.as_ref(), window, cx)
                         });
                     if current {
-                        root.spawn_run_worker(ticket, request, window, cx);
+                        root.spawn_run_worker(ticket, request, window.window_handle(), cx);
                     } else if root.external_launch.pending.as_ref()
                         .is_some_and(|pending| pending.ticket == ticket)
                     {
@@ -1803,24 +1862,23 @@ impl RootWindow {
             });
             return;
         }
-        self.spawn_run_worker(ticket, request, window, cx);
+        self.spawn_run_worker(ticket, request, window.window_handle(), cx);
     }
 
     fn spawn_run_worker(
         &mut self,
         ticket: u64,
         request: Request,
-        window: &mut Window,
+        window_handle: AnyWindowHandle,
         cx: &mut Context<Self>,
     ) {
-        let checked_delivery = matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. });
+        let checked_delivery = matches!(&request.command, RunCommand::HistoryReplay { .. } | RunCommand::TimerCreate { .. } | RunCommand::GestureExternal { .. });
         let task = cx.background_executor().spawn(async move {
             let result = run(&request);
             if let RunCommand::TimerCreate { lane, .. } = &request.command { lane.release(); }
             (request, result)
         });
         let root = cx.entity().downgrade();
-        let window_handle = window.window_handle();
         cx.spawn(async move |_, cx| {
             let (request, result) = task.await;
             let delivered = window_handle.update(cx, |_, window, app| {
@@ -1914,6 +1972,8 @@ impl RootWindow {
             _ => None,
         };
         let switch_current = match &receipt.request.command {
+            RunCommand::GestureExternal { guard, .. } => window.is_window_active()
+                && current_foreground_identity() == Some(guard.root.identity),
             RunCommand::WindowSwitch(checked) => {
                 let initiating = ForegroundIdentity {
                     hwnd: checked.initiating.hwnd,

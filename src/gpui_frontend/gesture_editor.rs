@@ -4,6 +4,12 @@ use multi_launcher::plugin::Plugin;
 use multi_launcher::plugins::mouse_gestures::{GestureEdit, GestureEditorSnapshot, GpuiGestureOwner};
 use multi_launcher::settings::{ScopedSetting as Field, ScopedSettingChange as Change, ScopedSettingValue as Value};
 
+fn editable_executable(binding: &multi_launcher::mouse_gestures::db::BindingEntry) -> bool {
+    multi_launcher::plugins::mouse_gestures::gesture_executable(binding).is_some()
+        && !binding.label.contains(['\r', '\n'])
+        && binding.args.as_deref().is_none_or(|args| !args.contains(['\r', '\n']))
+}
+
 fn native_current(visibility: &RootVisibility, revision: u64, native: NativeWindow) -> bool {
     #[cfg(windows)]
     { visibility.is_current_visible_revision(revision, native) && current_foreground_identity() == Some(native.identity) }
@@ -31,6 +37,9 @@ pub(super) struct GestureEditor {
     tokens: Entity<InputState>,
     binding: Entity<InputState>,
     query: Entity<InputState>,
+    execute_label: Entity<InputState>,
+    execute_target: Entity<InputState>,
+    execute_args: Entity<InputState>,
     snapshot: Option<GestureEditorSnapshot>,
     selected: Option<usize>,
     selected_basis: Option<multi_launcher::mouse_gestures::db::GestureEntry>,
@@ -57,6 +66,9 @@ impl GestureEditor {
             tokens: cx.new(|cx| InputState::new(window, cx).placeholder("Directions: U D L R")),
             binding: cx.new(|cx| InputState::new(window, cx).placeholder("Binding name")),
             query: cx.new(|cx| InputState::new(window, cx).placeholder("Search query")),
+            execute_label: cx.new(|cx| InputState::new(window, cx).placeholder("Executable binding name")),
+            execute_target: cx.new(|cx| InputState::new(window, cx).placeholder("Absolute executable path")),
+            execute_args: cx.new(|cx| InputState::new(window, cx).placeholder("Arguments")),
             snapshot: None, selected: None, selected_basis: None, renaming: false, rename_draft: None, settings_baseline_valid: false, busy: false, enabled: true, practice: false, pending_apply: None, status: None, settings_error: None, enable_lease: None, enable_blur: None, enable_active: None }
     }
 
@@ -77,6 +89,10 @@ impl GestureEditor {
         let binding = row.bindings.iter().find(|item| item.kind == multi_launcher::mouse_gestures::db::BindingKind::SetQuery);
         self.binding.update(cx, |input, cx| input.set_value(binding.map_or("", |item| item.label.as_str()), window, cx));
         self.query.update(cx, |input, cx| input.set_value(binding.map_or("", |item| item.action.as_str()), window, cx));
+        let executable = row.bindings.iter().find(|item| editable_executable(item));
+        self.execute_label.update(cx, |input, cx| input.set_value(executable.map_or("", |item| item.label.as_str()), window, cx));
+        self.execute_target.update(cx, |input, cx| input.set_value(executable.map_or("", |item| item.action.as_str()), window, cx));
+        self.execute_args.update(cx, |input, cx| input.set_value(executable.and_then(|item| item.args.as_deref()).unwrap_or(""), window, cx));
         cx.notify();
     }
 
@@ -84,7 +100,11 @@ impl GestureEditor {
         let preferences = self.snapshot.as_ref().is_some_and(|snapshot| self.enabled != snapshot.enabled || self.practice != snapshot.practice_mode);
         let row = self.selected_basis.as_ref().is_some_and(|row| {
             let binding = row.bindings.iter().find(|item| item.kind == multi_launcher::mouse_gestures::db::BindingKind::SetQuery);
+            let executable = row.bindings.iter().find(|item| editable_executable(item));
             self.tokens.read(cx).value().to_string() != row.tokens || self.binding.read(cx).value().to_string() != binding.map_or("", |item| item.label.as_str()) || self.query.read(cx).value().to_string() != binding.map_or("", |item| item.action.as_str())
+                || self.execute_label.read(cx).value().as_str() != executable.map_or("", |item| item.label.as_str())
+                || self.execute_target.read(cx).value().as_str() != executable.map_or("", |item| item.action.as_str())
+                || self.execute_args.read(cx).value().as_str() != executable.and_then(|item| item.args.as_deref()).unwrap_or("")
         });
         preferences || row || self.renaming || self.rename_draft.is_some()
     }
@@ -158,6 +178,7 @@ impl GestureEditor {
         let added = matches!(edit, Some(GestureEdit::Add));
         let renamed = matches!(edit, Some(GestureEdit::Rename { .. }));
         let directions = matches!(edit, Some(GestureEdit::Tokens { .. }));
+        let execute = matches!(edit, Some(GestureEdit::Execute { .. }));
         let row_enabled = matches!(edit, Some(GestureEdit::Enabled { .. }));
         let edited = edit.is_some();
         if added && self.dirty(cx) { self.status = Some("Save or discard the current draft before adding a gesture.".into()); cx.notify(); return; }
@@ -212,6 +233,13 @@ impl GestureEditor {
                             if added { if let Some(index) = selection { view.select(index, window, cx); } }
                             else if edited && let Some(index) = selection { view.selected_basis = view.snapshot.as_ref().and_then(|snapshot| snapshot.database.gestures.get(index)).cloned(); }
                             if directions && let Some(row) = &view.selected_basis { view.tokens.update(cx, |input, cx| input.set_value(&row.tokens, window, cx)); }
+                            if execute && let Some(row) = &view.selected_basis {
+                                if let Some(binding) = row.bindings.iter().find(|item| editable_executable(item)) {
+                                    view.execute_label.update(cx, |input, cx| input.set_value(&binding.label, window, cx));
+                                    view.execute_target.update(cx, |input, cx| input.set_value(&binding.action, window, cx));
+                                    view.execute_args.update(cx, |input, cx| input.set_value(binding.args.as_deref().unwrap_or(""), window, cx));
+                                }
+                            }
                             if row_enabled { view.status = Some("Gesture enabled setting saved.".into()); }
                             if added && view.current(window, cx) { view.present_rename(window, cx); }
                             else if renamed { view.renaming = false; view.rename_draft = None; }
@@ -321,7 +349,9 @@ impl Render for GestureEditor {
             }
         }
         if let Some((index, row)) = self.selected.zip(self.selected_basis.clone()) {
-            for (binding_index, binding) in row.bindings.iter().enumerate().filter(|(_, binding)| binding.kind != multi_launcher::mouse_gestures::db::BindingKind::SetQuery) {
+            let editable_execute = (row.dir_mode == multi_launcher::mouse_gestures::engine::DirMode::Four)
+                .then(|| row.bindings.iter().position(editable_executable)).flatten();
+            for (binding_index, binding) in row.bindings.iter().enumerate().filter(|(binding_index, binding)| binding.kind != multi_launcher::mouse_gestures::db::BindingKind::SetQuery && Some(*binding_index) != editable_execute) {
                 panel = panel.child(div().id(SharedString::from(format!("gesture-unsupported-{index}-{binding_index}"))).child(Label::new(format!("{} (read-only)", binding.label))));
             }
             let rename_row = row.clone();
@@ -385,11 +415,27 @@ impl Render for GestureEditor {
                 panel = panel.child(Input::new(&self.query).readonly(busy).aria_label("Set query"));
                 let binding = row.bindings.iter().position(|item| item.kind == multi_launcher::mouse_gestures::db::BindingKind::SetQuery);
                 let query_mount = self.mount.clone();
+                let query_row = row.clone();
                 panel = panel.child(Button::new("gesture-save-query").label("Save Set Query").disabled(busy).on_click(cx.listener(move |view, _, window, cx| {
-                    if !query_mount.is_current() || !query_mount.matches(&view.mount) || view.selected != Some(index) || view.selected_basis.as_ref() != Some(&row) { return; }
+                    if !query_mount.is_current() || !query_mount.matches(&view.mount) || view.selected != Some(index) || view.selected_basis.as_ref() != Some(&query_row) { return; }
                     let label = view.binding.read(cx).value().to_string();
                     let query = view.query.read(cx).value().to_string();
-                    view.run(Some(GestureEdit::SetQuery { index, expected: row.clone(), binding, label, query }), window, cx);
+                    view.run(Some(GestureEdit::SetQuery { index, expected: query_row.clone(), binding, label, query }), window, cx);
+                })));
+                panel = panel.child(Input::new(&self.execute_label).readonly(busy).aria_label("Executable binding name"));
+                panel = panel.child(Input::new(&self.execute_target).readonly(busy).aria_label("Executable path"));
+                panel = panel.child(Input::new(&self.execute_args).readonly(busy).aria_label("Executable arguments"));
+                let executable = editable_execute;
+                let execute_mount = self.mount.clone();
+                panel = panel.child(Button::new("gesture-save-execute").label("Save Execute").disabled(busy).on_click(cx.listener(move |view, _, window, cx| {
+                    if !execute_mount.is_current() || !execute_mount.matches(&view.mount) || view.selected != Some(index) || view.selected_basis.as_ref() != Some(&row) { return; }
+                    let label = view.execute_label.read(cx).value().to_string();
+                    let target = view.execute_target.read(cx).value().to_string();
+                    let raw_args = view.execute_args.read(cx).value().to_string();
+                    let existing = executable.and_then(|index| row.bindings.get(index)).and_then(|item| item.args.as_deref());
+                    let args = if raw_args == existing.unwrap_or("") { existing.map(str::to_owned) }
+                        else { let trimmed = raw_args.trim(); (!trimmed.is_empty()).then(|| trimmed.to_owned()) };
+                    view.run(Some(GestureEdit::Execute { index, expected: row.clone(), binding: executable, label, target, args }), window, cx);
                 })));
             } else { panel = panel.child(Label::new("This direction mode is read-only.")); }
         }
@@ -449,5 +495,27 @@ mod tests {
         let row = Action { label: "Edit mouse gestures".into(), desc: "Mouse gestures".into(), action: "mg:dialog".into(), args: None };
         assert!(current_provider("mg edit", &row, None, None));
         assert!(!current_provider("mg", &row, None, None));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn multiline_executable_arguments_stay_runtime_supported_and_read_only() {
+        use multi_launcher::mouse_gestures::db::{BindingEntry, BindingKind};
+        let mut binding = BindingEntry {
+            label: "Run".into(), kind: BindingKind::Execute,
+            action: r"C:\Tools\app.exe".into(), args: Some("--one\n--two".into()), enabled: true,
+        };
+        assert!(multi_launcher::plugins::mouse_gestures::gesture_executable(&binding).is_some());
+        assert!(!super::editable_executable(&binding));
+        binding.args = Some("--one --two".into());
+        assert!(super::editable_executable(&binding));
+        binding.args = Some("--one\r--two".into());
+        assert!(!super::editable_executable(&binding));
+        binding.args = None;
+        binding.label = "Run\napplication".into();
+        assert!(multi_launcher::plugins::mouse_gestures::gesture_executable(&binding).is_some());
+        assert!(!super::editable_executable(&binding));
+        binding.label = "Run\rapplication".into();
+        assert!(!super::editable_executable(&binding));
     }
 }

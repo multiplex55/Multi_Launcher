@@ -22,6 +22,7 @@ pub enum GestureEdit {
     Rename { index: usize, expected: GestureEntry, label: String },
     Tokens { index: usize, expected: GestureEntry, tokens: String },
     SetQuery { index: usize, expected: GestureEntry, binding: Option<usize>, label: String, query: String },
+    Execute { index: usize, expected: GestureEntry, binding: Option<usize>, label: String, target: String, args: Option<String> },
     Enabled { index: usize, expected: GestureEntry, enabled: bool },
 }
 
@@ -47,7 +48,7 @@ fn apply_edit(db: &mut GestureDb, edit: GestureEdit) -> anyhow::Result<()> {
         return Ok(());
     }
     let (index, expected) = match &edit {
-        GestureEdit::Rename { index, expected, .. } | GestureEdit::Tokens { index, expected, .. } | GestureEdit::SetQuery { index, expected, .. } | GestureEdit::Enabled { index, expected, .. } => (*index, expected.clone()),
+        GestureEdit::Rename { index, expected, .. } | GestureEdit::Tokens { index, expected, .. } | GestureEdit::SetQuery { index, expected, .. } | GestureEdit::Execute { index, expected, .. } | GestureEdit::Enabled { index, expected, .. } => (*index, expected.clone()),
         GestureEdit::Add => unreachable!(),
     };
     anyhow::ensure!(db.gestures.get(index) == Some(&expected), "Gesture changed; reload before saving");
@@ -76,6 +77,22 @@ fn apply_edit(db: &mut GestureDb, edit: GestureEdit) -> anyhow::Result<()> {
                 row.bindings[binding].label = label;
                 row.bindings[binding].action = query;
             } else { row.bindings.push(BindingEntry { label, kind: BindingKind::SetQuery, action: query, args: None, enabled: true }); }
+        }
+        GestureEdit::Execute { binding, label, target, args, .. } => {
+            anyhow::ensure!(expected.dir_mode == DirMode::Four, "Only Four direction gestures can be edited here");
+            anyhow::ensure!(!label.trim().is_empty(), "Binding name cannot be empty");
+            let candidate = BindingEntry { label, kind: BindingKind::Execute, action: target, args, enabled: true };
+            anyhow::ensure!(super::gesture_executable(&candidate).is_some(), "Choose an ordinary absolute local executable");
+            let row = &mut db.gestures[index];
+            if let Some(binding) = binding {
+                let existing = row.bindings.get_mut(binding).ok_or_else(|| anyhow::anyhow!("Binding changed"))?;
+                anyhow::ensure!(super::gesture_executable(existing).is_some(), "Binding changed or is not a supported executable");
+                existing.label = candidate.label;
+                existing.action = candidate.action;
+                existing.args = candidate.args;
+            } else {
+                row.bindings.push(candidate);
+            }
         }
         GestureEdit::Enabled { enabled, .. } => {
             anyhow::ensure!(expected.dir_mode == DirMode::Four, "Only Four direction gestures can be edited here");
@@ -161,6 +178,33 @@ mod tests {
     use super::{apply_edit, GestureEdit};
     use crate::mouse_gestures::db::{BindingEntry, BindingKind, GestureDb};
     use crate::mouse_gestures::engine::DirMode;
+
+    #[cfg(windows)]
+    #[test]
+    fn checked_execute_edit_round_trips_and_preserves_siblings() {
+        let mut db = GestureDb::default();
+        apply_edit(&mut db, GestureEdit::Add).unwrap();
+        db.gestures[0].tokens = "LR".into();
+        db.gestures[0].stroke = vec![[1, 2]];
+        db.gestures[0].bindings.push(BindingEntry { label: "query".into(), kind: BindingKind::SetQuery, action: "hello".into(), args: None, enabled: true });
+        let before = db.gestures[0].clone();
+        let edit = GestureEdit::Execute { index: 0, expected: before.clone(), binding: None,
+            label: "app".into(), target: r"C:\Tools\app.exe".into(), args: Some(r#"--name "two words""#.into()) };
+        apply_edit(&mut db, edit.clone()).unwrap();
+        assert!(apply_edit(&mut db, edit).is_err());
+        assert_eq!(db.gestures[0].bindings[0], before.bindings[0]);
+        assert_eq!(db.gestures[0].stroke, before.stroke);
+        let bytes = serde_json::to_vec(&db).unwrap();
+        let restored: GestureDb = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, db);
+        let expected = db.gestures[0].clone();
+        db.gestures[0].bindings[1].enabled = false;
+        let disabled = db.gestures[0].clone();
+        assert!(apply_edit(&mut db, GestureEdit::Execute { index: 0, expected, binding: Some(1), label: "new".into(), target: r"C:\Tools\other.exe".into(), args: None }).is_err());
+        apply_edit(&mut db, GestureEdit::Execute { index: 0, expected: disabled, binding: Some(1), label: "new".into(), target: r"C:\Tools\other.exe".into(), args: None }).unwrap();
+        assert!(!db.gestures[0].bindings[1].enabled);
+        assert_eq!(db.gestures[0].bindings[0], before.bindings[0]);
+    }
 
     #[test]
     fn checked_enabled_transition_preserves_rows_and_refuses_stale_or_ambiguous_enable() {

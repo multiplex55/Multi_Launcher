@@ -2242,3 +2242,15 @@ Locked `fast-dev` shared checks passed in 1m 15s and 24.24s. Integrated checks p
 P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open. In matched owned profiles with both Paste Sequence shortcuts disabled, reconnect two owned windows, save their bindings and confirm workspace bytes and geometry are unchanged. Keep the same windows live across launcher relaunch with automatic Reconnect off and restore the exact saved bindings. Typed and automatic binding saves and remaining MultiManager runtime criteria stay open.
 
 Continue P0.18 checked local application Execute from Mouse Gestures.
+
+### P0.18 checked local application gesture Execute
+
+A stock Mouse Gesture **Execute** binding can launch an ordinary local Windows `.exe` using its saved Args. The retained Four-direction editor can add or update the exact supported binding. It preserves siblings, loaded labels and raw Args, applies stock normalization when the user edits Args, and acknowledges the saved fields independently of other drafts. Legacy multiline labels or Args stay visible as read-only and remain available to the runtime.
+
+The stock capture owner retains the exact selected binding, stroke generation and origin foreground. Unsupported effects pass through. The shared worker rechecks the executable, exact native foreground and root, current release, and restart authority immediately before its one-shot launch. It preserves the stock argument parsing and working directory. A gesture from another application leaves a hidden launcher hidden and cannot refocus it. The exact successful Action, query and Gesture source reach the existing History and Usage worker.
+
+The locked `fast-dev` shared check passed in 2m 10s, the first integrated check in 55.14s and the corrected launcher checks in 4.33s and 4.41s. Independent review cleared the rechecked target, hidden and active root settlement, sibling visibility, saved acknowledgement and preservation of legacy text. The grouped link of the final source took 22m 11s. Nextest run `4748424a-0e2c-4d1c-9f74-19910ea6dd68` passed all eight selected tests across two binaries in 2.768s with 9615 skipped.
+
+P0.18 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned foreground target, owned receipt executable and profiles with both Paste Sequence shortcuts disabled. Replay one release while the launcher is hidden and compare the exact quoted and empty Args, inherited working directory, History and Usage. Practice and the disabled gesture must produce no execution. General shell, other binding kinds and the separate host remain open.
+
+Continue P0.10 checked Send All Home in MultiManager.

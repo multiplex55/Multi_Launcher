@@ -269,8 +269,11 @@ impl RootWindow {
                             ) && native_window_is_valid(NativeWindow {
                                 identity: request.source(),
                             }) {
-                                root.root_visibility
-                                    .queue_visible(RootVisibilityRequest::GestureQuery(request));
+                                if request.outcome().is_some() {
+                                    root.root_visibility.queue_visible(RootVisibilityRequest::GestureQuery(request));
+                                } else {
+                                    root.start_gesture_external(request, cx);
+                                }
                             }
                         }
                         cx.notify();

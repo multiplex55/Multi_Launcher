@@ -494,6 +494,33 @@ static SERVICE: OnceCell<Mutex<MouseGestureRuntime>> = OnceCell::new();
 mod editor;
 pub use editor::{GestureEdit, GestureEditorSnapshot};
 
+/// Supported local application target and its unmodified stock argument string.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GestureExecutable<'a> {
+    pub target: &'a str,
+    pub args: Option<&'a str>,
+}
+
+/// Classify without filesystem access; native identity is checked at execution.
+pub fn gesture_executable(binding: &crate::mouse_gestures::db::BindingEntry) -> Option<GestureExecutable<'_>> {
+    if binding.kind != crate::mouse_gestures::db::BindingKind::Execute { return None; }
+    let path = std::path::Path::new(&binding.action);
+    #[cfg(windows)]
+    let admissible = crate::actions::exec::ordinary_local_path_is_admissible(path);
+    #[cfg(not(windows))]
+    let admissible = false;
+    if !admissible || !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")) {
+        return None;
+    }
+    Some(GestureExecutable { target: &binding.action, args: binding.args.as_deref() })
+}
+
+fn gpui_binding_supported(binding: &crate::mouse_gestures::db::BindingEntry) -> bool {
+    (binding.kind == crate::mouse_gestures::db::BindingKind::SetQuery
+        && !binding.action.trim().is_empty() && !binding.action.contains(['\r', '\n']))
+        || gesture_executable(binding).is_some()
+}
+
 #[derive(Clone)]
 pub struct GestureRelease {
     generation: u64,
@@ -587,7 +614,7 @@ impl GpuiGestureOwner {
         let Ok(db) = self.db.try_lock() else { return false; };
         if ambiguous_gesture(&db, &release.tokens, release.mode) { return false; }
         let Some((label, bindings)) = db.match_bindings_owned(&release.tokens, release.mode) else { return false; };
-        let valid = bindings.get(release.index).is_some_and(|binding| binding.kind == crate::mouse_gestures::db::BindingKind::SetQuery && binding.to_action(&label) == release.action);
+        let valid = bindings.get(release.index).is_some_and(|binding| gpui_binding_supported(binding) && binding.to_action(&label) == release.action);
         valid && self.active.load(Ordering::Acquire) && self.ready.load(Ordering::Acquire) && self.generation.load(Ordering::Acquire) == release.generation && self.latest_sequence.load(Ordering::Acquire) == release.sequence
     }
     pub fn take(&self) -> Vec<GestureRelease> {
@@ -645,7 +672,7 @@ impl crate::mouse_gestures::service::GestureReleaseSink for GpuiGestureOwner {
         let Some((label, bindings)) = db.match_bindings_owned(tokens, mode) else { return Ignore; };
         let Some(binding) = bindings.get(index) else { return Ignore; };
         if binding.to_action(&label) != action || self.generation.load(Ordering::Acquire) != generation || self.latest_sequence.load(Ordering::Acquire) != sequence || !self.active.load(Ordering::Acquire) || !self.ready.load(Ordering::Acquire) { return Ignore; }
-        if binding.kind != crate::mouse_gestures::db::BindingKind::SetQuery { return PassThrough; }
+        if !gpui_binding_supported(binding) { return PassThrough; }
         drop(db);
         let release = GestureRelease { generation, sequence, tokens: tokens.to_owned(), mode, index, action, foreground, visibility_revision };
         if !self.is_current(&release) { return Ignore; }
@@ -663,7 +690,7 @@ fn gpui_binding_available(db: &GestureDb, mode: crate::mouse_gestures::engine::D
     db.gestures.iter().any(|gesture| gesture.enabled && gesture.dir_mode == mode && !gesture.tokens.is_empty() && gesture.tokens.chars().all(|token| match mode {
         crate::mouse_gestures::engine::DirMode::Four => matches!(token, 'U' | 'D' | 'L' | 'R'),
         crate::mouse_gestures::engine::DirMode::Eight => matches!(token, '1' | '2' | '3' | '4' | '6' | '7' | '8' | '9'),
-    }) && !ambiguous_gesture(db, &gesture.tokens, mode) && gesture.bindings.iter().any(|binding| binding.enabled && binding.kind == crate::mouse_gestures::db::BindingKind::SetQuery && !binding.action.trim().is_empty() && !binding.action.contains(['\r', '\n'])))
+    }) && !ambiguous_gesture(db, &gesture.tokens, mode) && gesture.bindings.iter().any(|binding| binding.enabled && gpui_binding_supported(binding)))
 }
 
 /// Installs the existing watcher/service for the selected GPUI app session.
@@ -1386,6 +1413,23 @@ mod persistence_tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn executable_classifier_preserves_raw_arguments_and_rejects_other_routes() {
+        let mut binding = BindingEntry { label: "app".into(), kind: BindingKind::Execute,
+            action: r"C:\Tools\app.EXE".into(), args: Some(r#"--name "two words""#.into()), enabled: true };
+        let effect = gesture_executable(&binding).unwrap();
+        assert_eq!(effect.target, binding.action);
+        assert_eq!(effect.args, binding.args.as_deref());
+        for target in ["query:hello", "https://example.com/app.exe", r"\\server\share\app.exe", r"C:\Tools\app.lnk", "app.exe"] {
+            binding.action = target.into();
+            assert!(gesture_executable(&binding).is_none(), "{target}");
+        }
+        binding.action = r"C:\Tools\app.exe".into();
+        binding.kind = BindingKind::SetQuery;
+        assert!(gesture_executable(&binding).is_none());
+    }
+
     #[test]
     fn gpui_release_requires_exact_selected_set_query_and_live_generation() {
         use crate::mouse_gestures::service::{GestureReleaseSink, GestureReleaseDisposition::{Accepted, Ignore, PassThrough}};
@@ -1410,6 +1454,27 @@ mod persistence_tests {
         assert_eq!(owner.release(9, Some(0), foreground, Some(0), "L", DirMode::Four, 1, query.to_action("left")), Ignore);
         owner.fence();
         assert_eq!(owner.release(owner.stroke_generation(), Some(0), foreground, Some(0), "L", DirMode::Four, 1, query.to_action("left")), Ignore);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn gpui_release_preserves_selected_executable_and_retires_stale_binding() {
+        use crate::mouse_gestures::service::{GestureReleaseSink, GestureReleaseDisposition::{Accepted, Ignore}};
+        let mut database = db("left");
+        let binding = BindingEntry { label: "run".into(), kind: BindingKind::Execute,
+            action: r"C:\Tools\app.exe".into(), args: Some(r#"--name "two words""#.into()), enabled: true };
+        database.gestures[0].bindings = vec![binding.clone()];
+        let (sender, receiver) = std::sync::mpsc::sync_channel(2);
+        let owner = GpuiGestureOwner { db: Arc::new(Mutex::new(database)), generation: Arc::new(AtomicU64::new(9)), editor_revision: AtomicU64::new(0), latest_sequence: Arc::new(AtomicU64::new(0)), active: AtomicBool::new(true), ready: AtomicBool::new(true), sender, receiver: Mutex::new(receiver), wake: Arc::new(|| {}), shutdown_gate: Mutex::new(()), shutdown_complete: AtomicBool::new(false), status: Mutex::new((None, false)), shutdown_error: Mutex::new(None) };
+        let foreground = Some(crate::mouse_gestures::service::GestureForeground { hwnd: 1, process_id: 2, thread_id: 3 });
+        let action = binding.to_action("left");
+        assert_eq!(owner.release(9, Some(0), foreground, Some(4), "L", DirMode::Four, 0, action.clone()), Accepted);
+        let release = owner.take().pop().unwrap();
+        assert_eq!(release.action, action);
+        assert!(owner.is_current(&release));
+        owner.db.lock().unwrap().gestures[0].bindings[0].args = Some("changed".into());
+        assert!(!owner.is_current(&release));
+        assert_eq!(owner.release(9, Some(0), foreground, Some(4), "L", DirMode::Four, 0, action), Ignore);
     }
 
     #[test]
