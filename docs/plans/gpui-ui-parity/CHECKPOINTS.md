@@ -2368,3 +2368,17 @@ Confirmation claims the exact watched record once and checks current native and 
 The locked `fast-dev` launcher check passed in 5.10s. Independent review checked normal Sheet admission, original projection, current-category and confirmation authority and canonical mutation. The grouped link took 16.89s. Nextest run `b5f75915-00b8-4599-b006-d248d3257483` passed 13 focused cases across two binaries in 5.807s with 9642 skipped.
 
 P0.03, P0.04 and P0.06 remain Stage 2. Paired 1516 × 937 native replay remains open with both Paste Sequence shortcuts disabled. Use the owned normal and Omni-only profiles. Verify Cancel, held Enter, stale refusal, exact one-record removal, surviving URL and folder contents, and egui readback. Folder Repair retains its separate scope.
+
+### P0.09 checked internal Note links
+
+Rich Render and Split can follow existing `note://` links and stock wiki links. Both frontends use the same wiki projection and note URL target decoder. The preview preserves the editable Markdown, and the shared rewrite keeps stock displayed text and literal wiki self-links. An accepted first Save reprojects against the canonical slug.
+
+The GPUI preview checks the source that Kit had parsed when the link was painted and again at activation. It rejects stale document, mount, mode and focus receipts and waits for the current async parse to repaint before admitting a link. Marked composition cannot enter or settle navigation. Primary navigation is limited to internal note targets, without an external URL fallback.
+
+The canonical reader loads a unique existing exact slug and binds the current note version. Navigation reuses the retained editor's checked Save, Discard and Cancel decision. Self-links hold the same draft. Missing, ambiguous or changed targets give feedback without creating a document.
+
+The shared locked `fast-dev` library check passed in 26.26s. Corrected library and launcher checks passed in 6.43s and 5.04s. Independent review checked stock egui compatibility, the pinned Kit click inputs, async parsed and painted source authority, composition and the exact dirty switch. The grouped link took 9m 05s. Nextest run `1babba5b-538b-4c82-b835-add41a474b8b` passed all 13 selected cases in 4.291s across two binaries with 9645 skipped.
+
+P0.09 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned Markdown profiles with both Paste Sequence shortcuts disabled. Follow the explicit and wiki links, exercise dirty Cancel and accepted navigation, and verify both files. Test a context click, an absent target and a stale large-preview click. External, filesystem and Todo destinations, missing-target authoring and the remaining G12 behavior stay open.
+
+Continue P0.07/P0.14 checked Clipboard Modify configuration Reload and external edit from Settings.

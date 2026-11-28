@@ -2,6 +2,22 @@ use url::Url;
 
 use super::parse::{fence_info, leading_spaces, line_spans};
 
+/// Project stock wiki links into Markdown while preserving their complete displayed text.
+pub fn project_wiki_links(content: &str, current_slug: &str) -> String {
+    static WIKI_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| regex::Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
+    WIKI_RE.replace_all(content, |caps: &regex::Captures| {
+        let text = &caps[1];
+        let target = text.split('|').next().unwrap_or(text).trim();
+        let slug = crate::common::slug::slugify(target);
+        if slug == current_slug { caps[0].to_string() } else { format!("[{text}](note://{slug})") }
+    }).into_owned()
+}
+
+/// Read the stock note URL host without changing URL parsing or classification.
+pub fn note_url_slug(url: &Url) -> Option<&str> {
+    (url.scheme() == "note").then(|| url.host_str()).flatten()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WrapLinksReport {
     pub content: String,
@@ -855,6 +871,20 @@ mod tests {
             ("![alt](https://example.com/i.png)".into(), 0, 1)
         );
     }
+    #[test]
+    fn wiki_projection_preserves_stock_display_and_self_links() {
+        let source = "[[Target Note|friendly label]] [[  Spaced Note  ]] [[Current Note]]";
+        assert_eq!(super::project_wiki_links(source, "current-note"),
+            "[Target Note|friendly label](note://target-note) [  Spaced Note  ](note://spaced-note) [[Current Note]]");
+    }
+
+    #[test]
+    fn note_url_slug_uses_parsed_note_host_only() {
+        assert_eq!(super::note_url_slug(&url::Url::parse("note://Shortcut/path").unwrap()), Some("Shortcut"));
+        assert_eq!(super::note_url_slug(&url::Url::parse("todo://abc").unwrap()), None);
+        assert_eq!(super::note_url_slug(&url::Url::parse("note:///path").unwrap()), None);
+    }
+
     #[test]
     fn wiki_links() {
         assert_eq!(

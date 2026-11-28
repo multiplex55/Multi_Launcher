@@ -828,19 +828,7 @@ fn preprocess_note_links(
     current_slug: &str,
     todo_labels: &HashMap<String, String>,
 ) -> String {
-    static WIKI_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\[\[([^\]]+)\]\]").unwrap());
-    let mut out = WIKI_RE
-        .replace_all(content, |caps: &regex::Captures| {
-            let text = &caps[1];
-            let target = text.split('|').next().unwrap_or(text).trim();
-            let slug = slugify(target);
-            if slug == current_slug {
-                caps[0].to_string()
-            } else {
-                format!("[{text}](note://{slug})")
-            }
-        })
-        .to_string();
+    let mut out = crate::notes_markdown::links::project_wiki_links(content, current_slug);
 
     out = TODO_TOKEN_RE
         .replace_all(&out, |caps: &regex::Captures| {
@@ -878,7 +866,7 @@ enum MarkdownLinkAction {
 fn classify_markdown_link(target: &str) -> MarkdownLinkAction {
     match Url::parse(target) {
         Ok(url) => match url.scheme() {
-            "note" => url.host_str().map_or_else(
+            "note" => crate::notes_markdown::links::note_url_slug(&url).map_or_else(
                 || MarkdownLinkAction::InvalidNoteLink("missing note slug".to_string()),
                 |slug| MarkdownLinkAction::NoteReference(slug.to_string()),
             ),

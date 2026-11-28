@@ -100,6 +100,12 @@ fn preview_source(text: &str) -> &str {
     &text[..end]
 }
 
+fn preview_projection_current(rendered: &str, intended: &str) -> bool { rendered == intended }
+
+fn preview_receipt_current(issued: u64, current: u64, issued_presentation: u64, current_presentation: u64, slug: &str, path: &std::path::Path, note: &Note) -> bool {
+    issued == current && issued_presentation == current_presentation && note.slug == slug && note.path == path
+}
+
 fn same_note(left: &Note, right: &Note) -> bool {
     left.slug == right.slug && left.path == right.path
 }
@@ -153,6 +159,10 @@ pub(super) struct NoteEditor {
     body: Entity<TextareaState>,
     find: find::FindOwner,
     preview: Entity<TextViewState>,
+    preview_projection: Arc<str>,
+    preview_ready: bool,
+    _preview_observer: Subscription,
+    link_revision: Arc<AtomicU64>,
     _subscription: Subscription,
     notes_wake: Arc<HashWakeSignal>,
     open_epoch: Arc<AtomicU64>,
@@ -231,14 +241,27 @@ impl NoteEditor {
         body.update(cx, |body, cx| {
             body.set_value(note.content.clone(), window, cx)
         });
-        let preview = cx.new(|cx| TextViewState::markdown(preview_source(&note.content), cx));
+        let initial_preview = multi_launcher::notes_markdown::links::project_wiki_links(preview_source(&note.content), &note.slug);
+        let preview = cx.new(|cx| TextViewState::markdown(&initial_preview, cx));
+        let preview_projection: Arc<str> = initial_preview.into();
+        let preview_ready = preview_projection_current(preview.read(cx).rendered_text().source(), &preview_projection);
+        let preview_observer = cx.observe(&preview, |view: &mut Self, preview, cx| {
+            let ready = preview_projection_current(preview.read(cx).rendered_text().source(), &view.preview_projection);
+            if ready != view.preview_ready { view.preview_ready = ready; cx.notify(); }
+        });
+        let link_revision = Arc::new(AtomicU64::new(0));
         let subscription = cx.subscribe(&body, |view: &mut Self, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 view.find.model.content_changed();
+                view.link_revision.fetch_add(1, Ordering::AcqRel);
                 let content = view.body.read(cx).value().to_string();
+                let slug = view.note.slug.clone();
+                let projected = multi_launcher::notes_markdown::links::project_wiki_links(preview_source(&content), &slug);
                 view.preview.update(cx, |preview, cx| {
-                    preview.set_text(preview_source(&content), cx)
+                    preview.set_text(&projected, cx)
                 });
+                view.preview_projection = projected.into();
+                view.preview_ready = preview_projection_current(view.preview.read(cx).rendered_text().source(), &view.preview_projection);
                 cx.notify();
             }
         });
@@ -258,6 +281,10 @@ impl NoteEditor {
             body,
             find,
             preview,
+            preview_projection,
+            preview_ready,
+            _preview_observer: preview_observer,
+            link_revision,
             _subscription: subscription,
             notes_wake,
             open_epoch,
@@ -353,6 +380,7 @@ impl NoteEditor {
     }
     fn install(&mut self, destination: Destination, window: &mut Window, cx: &mut Context<Self>) {
         self.presentation_epoch = self.presentation_epoch.wrapping_add(1).max(1);
+        self.link_revision.fetch_add(1, Ordering::AcqRel);
         self.reset_find(window, cx);
         let Destination { note, identity, .. } = destination;
         self.baseline = note.content.clone();
@@ -361,9 +389,12 @@ impl NoteEditor {
         self.body.update(cx, |body, cx| {
             body.set_value(self.baseline.clone(), window, cx)
         });
+        let projected = multi_launcher::notes_markdown::links::project_wiki_links(preview_source(&self.baseline), &self.note.slug);
         self.preview.update(cx, |preview, cx| {
-            preview.set_text(preview_source(&self.baseline), cx)
+            preview.set_text(&projected, cx)
         });
+        self.preview_projection = projected.into();
+        self.preview_ready = preview_projection_current(self.preview.read(cx).rendered_text().source(), &self.preview_projection);
         self.set_decision(None);
         self.message = None;
         cx.notify();
@@ -463,6 +494,60 @@ impl NoteEditor {
             }
         })
         .detach();
+        cx.notify();
+    }
+    fn open_preview_link(&mut self, href: &str, revision: u64, presentation: u64, source_slug: &str, source_path: &std::path::Path, mount: &utility_mount::MountReceipt, window: &mut Window, cx: &mut Context<Self>) {
+        if self.pending || self.switch_pending || self.decision.is_some() || !self.current(window, cx)
+            || !matches!(self.mode, NoteViewMode::Preview | NoteViewMode::Split) || !self.settings.rich_preview_enabled()
+            || !mount.is_current() || !mount.matches(&self.mount)
+            || !preview_receipt_current(revision, self.link_revision.load(Ordering::Acquire), presentation, self.presentation_epoch, source_slug, source_path, &self.note) { return; }
+        if !preview_projection_current(self.preview.read(cx).rendered_text().source(), &self.preview_projection)
+            || self.body.update(cx, |body, cx| body.marked_text_range(window, cx).is_some()) { return; }
+        let Ok(url) = url::Url::parse(href) else { return; };
+        let Some(slug) = multi_launcher::notes_markdown::links::note_url_slug(&url).filter(|slug| !slug.is_empty()).map(str::to_owned) else { return; };
+        if slug == self.note.slug { return; }
+        let Some(native) = self.native else { return; };
+        let Some(focus) = window.focused(cx) else { return; };
+        let Some(permit) = self.admission.admit() else { return; };
+        let lease = Arc::new(AtomicBool::new(true));
+        let revoked = lease.clone();
+        let guard = cx.on_blur(&focus, window, move |_, _, _| { revoked.store(false, Ordering::Release); });
+        let attempt = self.link_revision.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        let epoch = self.link_revision.clone(); let worker_epoch = epoch.clone();
+        let receipt = mount.clone(); let worker_receipt = receipt.clone();
+        let visibility = self.visibility.clone(); let admission = self.admission.clone();
+        let host_revision = visibility.request_revision.load(Ordering::Acquire);
+        let worker_lease = lease.clone();
+        let task = cx.background_executor().spawn(async move {
+            let current = || worker_lease.load(Ordering::Acquire) && worker_epoch.load(Ordering::Acquire) == attempt
+                && worker_receipt.is_current() && !admission.is_fenced()
+                && current_foreground_identity() == Some(native.identity)
+                && json_utility::native_host_current(&visibility, host_revision, Some(native), false);
+            if !current() { return None; }
+            let version = note::note_version();
+            let loaded = note::read_note_exact_if(&slug, None, || current() && note::note_version() == version).ok()??;
+            (current() && note::note_version() == version).then_some((version, loaded))
+        });
+        let host = self.host; let source_slug = source_slug.to_owned(); let source_path = source_path.to_owned();
+        cx.spawn(async move |weak, cx| {
+            let result = task.await; let _permit = permit; let _guard = guard;
+            let _ = host.update(cx, |_, window, cx| {
+                let _ = weak.update(cx, |view, cx| {
+                    if !lease.load(Ordering::Acquire) || epoch.load(Ordering::Acquire) != attempt
+                        || !receipt.is_current() || !receipt.matches(&view.mount)
+                        || !preview_receipt_current(attempt, epoch.load(Ordering::Acquire), presentation, view.presentation_epoch, &source_slug, &source_path, &view.note)
+                        || !focus.is_focused(window) || !view.current(window, cx)
+                        || view.pending || view.switch_pending || view.decision.is_some()
+                        || view.visibility.request_revision.load(Ordering::Acquire) != host_revision { return; }
+                    if !preview_projection_current(view.preview.read(cx).rendered_text().source(), &view.preview_projection)
+                        || view.body.update(cx, |body, cx| body.marked_text_range(window, cx).is_some()) { return; }
+                    match result {
+                        Some((version, note)) if note::note_version() == version => view.open_note(Destination::existing(note), window, cx),
+                        _ => { view.message = Some("That note link is missing, ambiguous, or changed. Refresh and try again.".into()); cx.notify(); }
+                    }
+                });
+            });
+        }).detach();
         cx.notify();
     }
     fn open_note(&mut self, destination: Destination, window: &mut Window, cx: &mut Context<Self>) {
@@ -643,6 +728,11 @@ impl NoteEditor {
                         }
                         view.note = note;
                         view.identity = Identity::Existing;
+                        view.link_revision.fetch_add(1, Ordering::AcqRel);
+                        let projected = multi_launcher::notes_markdown::links::project_wiki_links(preview_source(view.body.read(cx).value().as_str()), &view.note.slug);
+                        view.preview.update(cx, |preview, cx| preview.set_text(&projected, cx));
+                        view.preview_projection = projected.into();
+                        view.preview_ready = preview_projection_current(view.preview.read(cx).rendered_text().source(), &view.preview_projection);
                         cx.notify();
                         true
                     } else {
@@ -778,10 +868,26 @@ impl Render for NoteEditor {
         }
         if matches!(self.mode, NoteViewMode::Preview | NoteViewMode::Split) {
             if self.settings.rich_preview_enabled() {
+                let weak = cx.entity().downgrade();
+                let render_ready = preview_projection_current(self.preview.read(cx).rendered_text().source(), &self.preview_projection);
+                let render_revision = self.link_revision.load(Ordering::Acquire);
+                let render_presentation = self.presentation_epoch;
+                let render_slug = self.note.slug.clone();
+                let render_path = self.note.path.clone();
+                let render_mount = self.mount.clone();
                 let text = TextView::new(&self.preview)
                     .selectable(true)
                     .markdown_extensions(MarkdownExtensions::default().raw_html(false))
-                    .on_link_click(|_, _, _, _| {})
+                    .on_link_click(move |href, event, window, cx| {
+                        let allowed = match event {
+                            ClickEvent::Mouse(click) => matches!(click.up.button, MouseButton::Left | MouseButton::Middle),
+                            ClickEvent::Keyboard(_) => true,
+                            ClickEvent::Touch(click) => !click.long_press,
+                        };
+                        if !allowed || !render_ready { return; }
+                        let href = href.to_string();
+                        let _ = weak.update(cx, |view, cx| view.open_preview_link(&href, render_revision, render_presentation, &render_slug, &render_path, &render_mount, window, cx));
+                    })
                     .image_source(|_| gpui_kit::ImageSource::Custom(Arc::new(|_, _| None)));
                 content = content.child(
                     div()
@@ -1213,6 +1319,19 @@ mod tests {
             aliases: vec![],
             entity_refs: vec![],
         }
+    }
+
+    #[test]
+    fn preview_link_receipt_rejects_old_source_and_projection() {
+        let source = note("alpha", "alpha.md");
+        assert!(super::preview_projection_current("new", "new"));
+        assert!(!super::preview_projection_current("old", "new"));
+        let path = source.path.as_path();
+        assert!(super::preview_receipt_current(1, 1, 2, 2, "alpha", path, &source));
+        assert!(!super::preview_receipt_current(1, 2, 2, 2, "alpha", path, &source));
+        assert!(!super::preview_receipt_current(1, 1, 2, 3, "alpha", path, &source));
+        assert!(!super::preview_receipt_current(1, 1, 2, 2, "beta", path, &source));
+        assert!(!super::preview_receipt_current(1, 1, 2, 2, "alpha", std::path::Path::new("other.md"), &source));
     }
 
     #[test]
