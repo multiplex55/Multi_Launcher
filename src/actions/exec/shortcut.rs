@@ -306,11 +306,19 @@ pub fn launch_shortcut_if_current(
     path: impl AsRef<OsStr>,
     is_current: impl FnOnce() -> bool,
 ) -> anyhow::Result<()> {
+    launch_shortcut_if_current_with_paths(path, |_, _| is_current())
+}
+
+/// Provide the decoded target and working directory to the final authority check.
+pub fn launch_shortcut_if_current_with_paths(
+    path: impl AsRef<OsStr>,
+    is_current: impl FnOnce(&Path, &Path) -> bool,
+) -> anyhow::Result<()> {
     checked_with(
         Path::new(path.as_ref()),
         check_local_object,
         read_shortcut,
-        |shortcut| spawn_shortcut_with(shortcut, is_current, |command| {
+        |shortcut| spawn_shortcut_with(shortcut, || is_current(&shortcut.target, &shortcut.directory), |command| {
             command.spawn().context("Cannot launch shortcut executable")?;
             Ok(())
         }),

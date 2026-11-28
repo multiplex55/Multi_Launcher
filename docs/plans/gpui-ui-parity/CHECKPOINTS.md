@@ -2314,3 +2314,15 @@ The locked `fast-dev` library check passed in 1m 13s and the integrated library 
 P0.14 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned History, Temporary Files and silent timer profiles with both Paste Sequence shortcuts disabled. Toggle each provider, check Search and completion, and read back the settings in egui. Verify existing countdown completion and the History and temporary file witnesses. Exercise Search capability separately from Enabled.
 
 Continue P0.01/P0.02 checked History replay of saved Open targets.
+
+### P0.01 P0.02 checked History replay for saved Open targets
+
+Stock `hi [filter]` can reopen a uniquely saved local document, Windows shortcut, strict HTTP(S) URL or verified local folder. The existing local executable replay retains its exact Args. GPUI matches the full saved Action, including raw Args and the stock `app ` display prefix, and rejects ambiguous or changed candidates. Saved folders require an exact entry in the verified folder catalog.
+
+Replay uses the same checked saved associations as Omni. At native entry the worker compares the reviewed Actions and History snapshots and rechecks local paths before claiming one effect. File and directory checks refuse unsupported paths and reparses. Shortcut replay keeps the decoded executable, Args and Start In and rechecks the decoded paths before spawn. The outer History row and activation source own success accounting. A newer Search generation revokes an unentered replay. An entered effect can finish bookkeeping and only a current launcher presentation can apply query and hide behavior. Search refocus requires the exact launcher foreground.
+
+Locked `fast-dev` launcher checks passed in 15.13s and 6.78s. The corrected library and launcher check passed in 29.76s. Independent review checked exact saved provenance, final path eligibility, preservation of the entered handoff, and independent History retirement. The grouped link took 2m 40s. Nextest run `516b941b-ea7e-4933-b45d-6b8481d81700` passed all 20 selected Windows cases across two binaries in 8.640s with 9625 skipped.
+
+The History provider remains Stage 2. Paired 1516 × 937 replay remains open with the owned local document, directory, argument-reporting shortcut and loopback URL, plus an unavailable document. Use the paired keep-query and clear/hide settings with both Paste Sequence shortcuts disabled. Check one outer History and Usage record per accepted effect, correct destinations, unchanged saved data, stale refusal and no foreground theft. Indexed-only and provider-origin replay and Clear History retain their own criteria.
+
+Continue P0.08 checked Snippets editor Dock and Pop Out.

@@ -1,6 +1,6 @@
 # Launcher
 
-G05 owns `launcher`, the root query and result workflow. The source baseline is `98bbc0ccc22a297e8eafae7e844c2f7e45854856`. GPUI Search supports the installed Hash Generator result, single-line saved Query Set actions, list arrows, query history and Tab completion within their verified scopes. Stock `hi [filter]` adds checked replay of uniquely saved local applications. Paired Windows replay remains open. [History replay checkpoint](../CHECKPOINTS.md#p001-p002-checked-history-replay-for-saved-apps) The full launcher remains in implementation. Native egui evidence also covers the scoped `app` query for a reopened custom action. [Validation log](../VALIDATION_LOG.md)
+G05 owns `launcher`, the root query and result workflow. The source baseline is `98bbc0ccc22a297e8eafae7e844c2f7e45854856`. GPUI Search supports the installed Hash Generator result, single-line saved Query Set actions, list arrows, query history and Tab completion within their verified scopes. Stock `hi [filter]` adds checked replay of uniquely saved local applications, documents, Windows shortcuts, strict HTTP(S) URLs and verified local folders. Paired Windows replay remains open. [History replay checkpoint](../CHECKPOINTS.md#p001-p002-checked-history-replay-for-saved-open-targets) The full launcher remains in implementation. Native egui evidence also covers the scoped `app` query for a reopened custom action. [Validation log](../VALIDATION_LOG.md)
 
 ## Routes and ownership
 

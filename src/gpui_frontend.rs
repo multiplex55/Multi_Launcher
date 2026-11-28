@@ -629,7 +629,7 @@ impl LauncherSearchCatalog {
                 let note_new = (provider == "notes").then(|| self.providers.note_new_source(&note_effective, &action)).flatten();
                 let history = (provider == "history").then(|| {
                     history_projection.and_then(|projection| projection.receipt(
-                        &action, self.canonical_saved.clone(), self.canonical_revision,
+                        &action, self.canonical_saved.clone(), self.canonical_revision, &self.verified_folders,
                     ))
                 }).flatten();
                 if provider == "history" && history.is_none() { return None; }
@@ -7434,6 +7434,7 @@ impl RootWindow {
 
     fn publish_launcher_provider_results(&mut self, query: String, raw_provider_actions: Vec<(String, Action)>, scroll_to_search: bool) {
         self.external_launch.retire_timer_before_effect();
+        self.external_launch.retire_history_before_effect();
         let raw_provider_results_empty = raw_provider_actions.is_empty();
         let omni_projection = self.search_catalog.providers.omni.projection(&query);
         let history_projection = self.search_catalog.providers.history.projection(&query);
@@ -7443,7 +7444,7 @@ impl RootWindow {
                 if self.plugin_membership_pending.is_some_and(|plugin| plugin.id() == provider) { return false; }
                 if provider == "history" {
                     history_projection.as_ref().and_then(|projection| projection.receipt(
-                        action, self.search_catalog.canonical_saved.clone(), self.search_catalog.canonical_revision,
+                        action, self.search_catalog.canonical_saved.clone(), self.search_catalog.canonical_revision, &self.search_catalog.verified_folders,
                     )).is_some()
                 } else if provider == "windows" {
                     window_search::action_is_operation(provider, action)

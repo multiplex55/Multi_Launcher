@@ -518,6 +518,24 @@ fn checked_saved_url_with(
     launch(&command.target)
 }
 
+fn checked_saved_association_with(
+    kind: AssociationKind, action: &Action, command: &ExternalCommand,
+    launch: impl FnOnce(&str) -> anyhow::Result<()>,
+    shortcut: impl FnOnce(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match kind {
+        AssociationKind::SavedFolder => super::saved_folder::checked_association_with(action, command, launch),
+        AssociationKind::SavedDocument => checked_document_association_with(action, command, launch),
+        AssociationKind::SavedUrl => checked_saved_url_with(action, command, launch),
+        #[cfg(windows)]
+        AssociationKind::SavedShortcut => {
+            anyhow::ensure!(saved_shortcut(action).as_ref() == Some(command), "Invalid saved shortcut");
+            shortcut(&command.target)
+        }
+        _ => { let _ = shortcut; anyhow::bail!("Unsupported saved association") }
+    }
+}
+
 fn checked_web_association_with(
     provider: super::search_providers::WebProvider,
     action: &Action,
@@ -691,7 +709,8 @@ struct Pending {
     omni_gate: Option<Arc<EffectGate>>,
     omni_category_effect: bool,
     query_retire_lease: bool,
-    tempfile_handoff: bool,
+    shell_handoff: bool,
+    history_effect: bool,
 }
 
 #[derive(Default)]
@@ -738,7 +757,7 @@ impl ExternalLaunch {
     pub fn retire_on_os_deactivation(&self) {
         if let Some(pending) = &self.pending && pending.query_retire_lease {
             let revoked = pending.omni_gate.as_ref().is_some_and(|gate| gate.revoke_pending());
-            if (!pending.tempfile_handoff || revoked) && let Some(lease) = &pending.omni_lease {
+            if (!pending.shell_handoff || revoked) && let Some(lease) = &pending.omni_lease {
                 lease.store(false, Ordering::Release);
             }
         }
@@ -762,6 +781,12 @@ impl ExternalLaunch {
 
     pub(super) fn retire_omni_before_effect(&self) {
         if let Some(pending) = &self.pending
+            && pending.omni_gate.as_ref().is_some_and(|gate| gate.revoke_pending())
+            && let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
+    }
+
+    pub(super) fn retire_history_before_effect(&self) {
+        if let Some(pending) = &self.pending && pending.history_effect
             && pending.omni_gate.as_ref().is_some_and(|gate| gate.revoke_pending())
             && let Some(lease) = &pending.omni_lease { lease.store(false, Ordering::Release); }
     }
@@ -829,7 +854,9 @@ impl ExternalLaunch {
             omni_category_effect: match &request.command { RunCommand::Omni { target, .. } => !matches!(target, OmniTarget::Tempfile(_)), RunCommand::Todo { .. } | RunCommand::CalendarJump { .. } => true, _ => false },
             omni_gate: match &request.command { RunCommand::TimerCreate { guard, .. } | RunCommand::HistoryReplay { guard, .. } | RunCommand::Omni { guard, .. } | RunCommand::TempfileCreate { guard, .. } | RunCommand::TempfileMutation { guard, .. } | RunCommand::Todo { guard, .. } | RunCommand::CalendarJump { guard, .. } => Some(guard.effect_gate.clone()), _ => None },
             query_retire_lease: matches!(&request.command, RunCommand::TimerCreate { .. } | RunCommand::TempfileCreate { .. }),
-            tempfile_handoff: matches!(&request.command, RunCommand::TempfileCreate { .. }),
+            shell_handoff: matches!(&request.command, RunCommand::TempfileCreate { .. })
+                || matches!(&request.command, RunCommand::HistoryReplay { receipt, .. } if receipt.kind != super::history_search::SavedKind::Executable),
+            history_effect: matches!(&request.command, RunCommand::HistoryReplay { .. }),
         });
         Some(ticket)
     }
@@ -928,20 +955,14 @@ impl ExternalCommandHost for OmniHost<'_> {
                     }))
             }
             OmniTarget::Indexed(authority) => checked_indexed_effect(action, authority, current, || self.guard.effect_current()),
-            OmniTarget::Saved(Some(AssociationKind::SavedFolder)) => super::saved_folder::checked_association_with(action, command,
-                |target| multi_launcher::actions::exec::launch_association_if_current(target, || self.guard.effect_current())),
-            OmniTarget::Saved(Some(AssociationKind::SavedDocument)) => checked_document_association_with(action, command,
-                |target| multi_launcher::actions::exec::launch_association_if_current(target, || self.guard.effect_current())),
-            OmniTarget::Saved(Some(AssociationKind::SavedUrl)) => checked_saved_url_with(action, command,
-                |target| multi_launcher::actions::exec::launch_association_if_current(target, || self.guard.effect_current())),
-            #[cfg(windows)]
-            OmniTarget::Saved(Some(AssociationKind::SavedShortcut)) => {
-                anyhow::ensure!(saved_shortcut(action).as_ref() == Some(command), "Invalid saved shortcut");
-                multi_launcher::actions::exec::launch_shortcut_if_current(&command.target, || self.guard.effect_current())
-            }
+            OmniTarget::Saved(Some(kind)) => checked_saved_association_with(*kind, action, command,
+                |target| multi_launcher::actions::exec::launch_association_if_current(target, || self.guard.effect_current()),
+                |target| {
+                    #[cfg(windows)] { multi_launcher::actions::exec::launch_shortcut_if_current(target, || self.guard.effect_current()) }
+                    #[cfg(not(windows))] { let _ = target; anyhow::bail!("Shortcuts require Windows") }
+                }),
             OmniTarget::Saved(None) => multi_launcher::actions::exec::launch_with_identity_if_current(
                 &command.target, command.args.as_deref(), || self.guard.effect_current()).map(|_| ()),
-            OmniTarget::Saved(Some(_)) => anyhow::bail!("Unsupported Omni target"),
         }
     }
     fn external_clear_query_after_run(&self) -> bool { self.host.external_clear_query_after_run() }
@@ -1077,19 +1098,53 @@ fn execute_request(
                 && epoch.load(Ordering::Acquire) == receipt.canonical_revision;
             let effect = (|| -> anyhow::Result<()> {
                 anyhow::ensure!(current(), "History result changed; search History again");
-                let command = saved_external(&receipt.inner)
-                    .ok_or_else(|| anyhow::anyhow!("Saved application is no longer available"))?;
-                #[cfg(windows)]
-                multi_launcher::actions::exec::checked_local_file(std::path::Path::new(&command.target))?;
+                use super::history_search::SavedKind;
+                let action = &receipt.inner;
+                let (command, association) = match receipt.kind {
+                    SavedKind::Executable => (saved_external(action), None),
+                    SavedKind::Document => (saved_document(action), Some(AssociationKind::SavedDocument)),
+                    SavedKind::Folder => (super::saved_folder::candidate(action), Some(AssociationKind::SavedFolder)),
+                    SavedKind::Url => (saved_url(action), Some(AssociationKind::SavedUrl)),
+                    SavedKind::Shortcut => {
+                        #[cfg(windows)] { (saved_shortcut(action), Some(AssociationKind::SavedShortcut)) }
+                        #[cfg(not(windows))] { (None, None) }
+                    }
+                };
+                let command = command.ok_or_else(|| anyhow::anyhow!("Saved target is no longer available"))?;
                 super::history_search::checked_launch_with(
                     receipt,
                     std::path::Path::new(super::add_action::ACTIONS_FILE),
                     std::path::Path::new(multi_launcher::history::HISTORY_FILE),
                     current,
+                    |shortcut_paths| {
+                        #[cfg(windows)]
+                        match receipt.kind {
+                            SavedKind::Executable | SavedKind::Document => multi_launcher::actions::exec::checked_local_file(std::path::Path::new(&command.target))?,
+                            SavedKind::Folder => multi_launcher::actions::exec::checked_local_directory(std::path::Path::new(&command.target))?,
+                            SavedKind::Shortcut => {
+                                multi_launcher::actions::exec::checked_local_file(std::path::Path::new(&command.target))?;
+                                let (target, directory) = shortcut_paths.ok_or_else(|| anyhow::anyhow!("Shortcut target is unavailable"))?;
+                                multi_launcher::actions::exec::checked_local_file(target)?;
+                                multi_launcher::actions::exec::checked_local_directory(directory)?;
+                            }
+                            SavedKind::Url => {},
+                        }
+                        #[cfg(not(windows))]
+                        let _ = shortcut_paths;
+                        Ok(())
+                    },
                     || guard.effect_current(),
-                    |entry| multi_launcher::actions::exec::launch_with_identity_if_current(
-                        &command.target, command.args.as_deref(), entry,
-                    ).map(|_| ()),
+                    |entry| {
+                        let Some(kind) = association else {
+                            return multi_launcher::actions::exec::launch_with_identity_if_current(&command.target, command.args.as_deref(), || entry(None)).map(|_| ());
+                        };
+                        checked_saved_association_with(kind, action, &command,
+                            |target| multi_launcher::actions::exec::launch_association_if_current(target, || entry(None)),
+                            |target| {
+                                #[cfg(windows)] { multi_launcher::actions::exec::launch_shortcut_if_current_with_paths(target, |target, directory| entry(Some((target, directory)))) }
+                                #[cfg(not(windows))] { let _ = target; anyhow::bail!("Shortcuts require Windows") }
+                            })
+                    },
                 )
             })();
             CommandBus.complete_checked_history_replay(
@@ -1861,11 +1916,12 @@ impl RootWindow {
                 let lease = guard.lease.clone();
                 let effect_gate = guard.effect_gate.clone();
                 let strict_focus = matches!(&request.command, RunCommand::CalendarJump { .. } | RunCommand::TimerCreate { .. });
-                let tempfile_focus = matches!(&request.command, RunCommand::TempfileCreate { .. });
+                let shell_focus = matches!(&request.command, RunCommand::TempfileCreate { .. })
+                    || matches!(&request.command, RunCommand::HistoryReplay { receipt, .. } if receipt.kind != super::history_search::SavedKind::Executable);
                 let native = guard.native;
                 let subscription = cx.on_blur(&focus, window, move |_, _, _| {
                     if effect_gate.revoke_pending() || strict_focus
-                        || (tempfile_focus && current_foreground_identity() == Some(native.identity)) {
+                        || (shell_focus && current_foreground_identity() == Some(native.identity)) {
                         lease.store(false, Ordering::Release);
                     }
                 });
@@ -2106,7 +2162,9 @@ impl RootWindow {
         let focus_owned = receipt
             .stamp
             .may_refocus(root.window_id(), window.is_window_active())
-            && local_focus_owned;
+            && local_focus_owned
+            && (!matches!(&receipt.request.command, RunCommand::HistoryReplay { .. })
+                || self.native_window.is_some_and(|native| current_foreground_identity() == Some(native.identity)));
         let settings = &receipt.request.settings;
         let mut changed_query = None;
         let mut deferred_inline = None;
@@ -2470,7 +2528,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "o".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_gate: Some(Arc::new(EffectGate::default())), omni_category_effect: true, query_retire_lease: false, tempfile_handoff: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(Arc::new(EffectGate::default())), omni_category_effect: true, query_retire_lease: false, shell_handoff: false, history_effect: false,
         });
         assert!(owner.defer_notes_wake_for_omni());
         assert!(owner.defer_notes_wake_for_omni());
@@ -2494,7 +2552,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "timer add 5m".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, query_retire_lease: true, tempfile_handoff: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, query_retire_lease: true, shell_handoff: false, history_effect: false,
         });
         assert!(!owner.defer_notes_wake_for_omni());
         owner.retire_omni_categories_before_effect();
@@ -2514,7 +2572,7 @@ mod tests {
     }
 
     #[test]
-    fn os_deactivation_preserves_only_entered_tempfile_handoff() {
+    fn os_deactivation_preserves_only_entered_shell_handoff() {
         let admission = Arc::new(RestartAdmission::default());
         let lease = Arc::new(AtomicBool::new(true));
         let gate = Arc::new(EffectGate::default());
@@ -2524,7 +2582,7 @@ mod tests {
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
             omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false,
-            query_retire_lease: true, tempfile_handoff: true,
+            query_retire_lease: true, shell_handoff: true, history_effect: false,
         });
         owner.retire_on_os_deactivation();
         assert!(!lease.load(Ordering::Acquire));
@@ -2540,9 +2598,49 @@ mod tests {
         assert!(!live.load(Ordering::Acquire));
         let timer_live = Arc::new(AtomicBool::new(true));
         let pending = owner.pending.as_mut().unwrap();
-        pending.tempfile_handoff = false; pending.omni_lease = Some(timer_live.clone());
+        pending.shell_handoff = false; pending.omni_lease = Some(timer_live.clone());
         owner.retire_on_os_deactivation();
         assert!(!timer_live.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn history_publication_revokes_only_unentered_history_effect() {
+        let admission = Arc::new(RestartAdmission::default());
+        let lease = Arc::new(AtomicBool::new(true));
+        let gate = Arc::new(EffectGate::default());
+        let mut owner = ExternalLaunch::default();
+        owner.pending = Some(Pending {
+            ticket: 1, stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "hi".into(), focus: None },
+            permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
+            clipboard_lease: None, focus_guard: None, snippet_effect: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: true,
+            query_retire_lease: false, shell_handoff: true, history_effect: true,
+        });
+        owner.retire_history_before_effect();
+        assert!(!lease.load(Ordering::Acquire));
+        let entered = Arc::new(EffectGate::default()); assert!(claim_omni_effect(&entered, || true));
+        let live = Arc::new(AtomicBool::new(true));
+        let pending = owner.pending.as_mut().unwrap(); pending.omni_gate = Some(entered); pending.omni_lease = Some(live.clone());
+        owner.retire_history_before_effect();
+        assert!(live.load(Ordering::Acquire));
+        let pending = owner.pending.as_mut().unwrap(); pending.history_effect = false;
+        let unrelated = Arc::new(EffectGate::default()); pending.omni_gate = Some(unrelated.clone());
+        owner.retire_history_before_effect();
+        assert!(live.load(Ordering::Acquire));
+        assert_eq!(unrelated.0.load(Ordering::Acquire), EFFECT_PENDING);
+    }
+
+    #[test]
+    fn saved_association_dispatch_forwards_exact_url_and_rejects_changed_action() {
+        let action = multi_launcher::actions::Action { label: "site".into(), desc: "saved".into(), action: "https://example.com/path".into(), args: None };
+        let command = super::saved_url(&action).unwrap();
+        let calls = std::cell::RefCell::new(Vec::new());
+        super::checked_saved_association_with(super::AssociationKind::SavedUrl, &action, &command,
+            |target| { calls.borrow_mut().push(target.to_owned()); Ok(()) }, |_| panic!("shortcut invoked")).unwrap();
+        assert_eq!(*calls.borrow(), vec![action.action.clone()]);
+        let mut changed = action.clone(); changed.action.push_str("/changed");
+        assert!(super::checked_saved_association_with(super::AssociationKind::SavedUrl, &changed, &command,
+            |_| panic!("stale association invoked"), |_| panic!("shortcut invoked")).is_err());
     }
 
     #[test]
@@ -2556,7 +2654,7 @@ mod tests {
             stamp: Stamp { root: WindowId::from(1), generation: 1, visibility_revision: 1, query: "tmp list".into(), focus: None },
             permit: admission.admit().unwrap(), window_catalog: false, clipboard_effect: false,
             clipboard_lease: None, focus_guard: None, snippet_effect: false,
-            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, query_retire_lease: false, tempfile_handoff: false,
+            omni_lease: Some(lease.clone()), omni_gate: Some(gate.clone()), omni_category_effect: false, query_retire_lease: false, shell_handoff: false, history_effect: false,
         });
         owner.retire_omni_categories_before_effect();
         assert!(lease.load(Ordering::Acquire));
