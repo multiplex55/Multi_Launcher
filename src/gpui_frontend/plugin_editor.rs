@@ -968,10 +968,10 @@ mod tests {
 
     #[test]
     fn membership_edit_admits_only_supported_installed_ids() {
-        for name in ["date_arithmetic", "base_convert", "unit_convert", "web_search", "wikipedia", "youtube", "reddit", "runescape_search", "weather"] {
+        for name in ["date_arithmetic", "base_convert", "unit_convert", "web_search", "wikipedia", "youtube", "reddit", "runescape_search", "weather", "history", "tempfile", "timer"] {
             assert_eq!(editable_membership(name).unwrap().id(), name);
         }
-        assert!(editable_membership("timer").is_none());
+        assert!(editable_membership("uninstalled_plugin").is_none());
         assert!(editable_membership("Date_Arithmetic").is_none());
     }
 
@@ -979,10 +979,21 @@ mod tests {
     fn disabled_membership_does_not_remove_installed_editor_rows() {
         let providers = super::super::search_providers::InstalledLauncherProviders::test_without_persisted_providers();
         let disabled = std::collections::HashSet::<String>::new();
-        for name in ["date_arithmetic", "base_convert", "unit_convert", "web_search", "wikipedia", "youtube", "reddit", "runescape_search", "weather"] {
+        for name in ["date_arithmetic", "base_convert", "unit_convert", "web_search", "wikipedia", "youtube", "reddit", "runescape_search", "weather", "history", "tempfile", "timer"] {
             assert!(!disabled.contains(name));
             assert!(providers.plugins().any(|provider| provider.name() == name));
             assert!(editable_membership(name).is_some());
+        }
+    }
+
+    #[test]
+    fn pending_history_tempfile_timer_fences_only_the_exact_provider() {
+        let canonical = HashSet::from(["history".to_owned(), "tempfile".to_owned(), "timer".to_owned()]);
+        for (pending, id) in [(StatelessPlugin::History, "history"), (StatelessPlugin::Tempfile, "tempfile"), (StatelessPlugin::Timer, "timer")] {
+            let effective = effective_membership(Some(&canonical), Some(pending)).unwrap();
+            assert!(!effective.contains(id));
+            assert_eq!(effective.len(), 2);
+            assert_eq!(canonical.len(), 3);
         }
     }
 

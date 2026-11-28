@@ -77,14 +77,19 @@ impl Plugin for Rows<'_> {
 impl RootWindow {
     pub(super) fn start_tempfile_search(&mut self, query: String, other: Vec<(String, Action)>, scroll: bool, cx: &mut Context<Self>) {
         self.publish_launcher_provider_results(query.clone(), other.clone(), scroll);
+        let enabled = super::plugin_editor::effective_membership(self.enabled_plugins.as_ref(), self.plugin_membership_pending)
+            .map(|membership| membership.into_owned());
+        if !self::enabled(enabled.as_ref(), self.enabled_capabilities.as_ref()) { return; }
         self.tempfile_search.pending = Some(Request { query, generation: self.launcher_results.generation,
-            revision: self.tempfile_search.revision, other, enabled: self.enabled_plugins.clone(), caps: self.enabled_capabilities.clone() });
+            revision: self.tempfile_search.revision, other, enabled, caps: self.enabled_capabilities.clone() });
         self.launch_tempfile_search(cx);
     }
     fn launch_tempfile_search(&mut self, cx: &mut Context<Self>) {
         if self.tempfile_search.active { return; }
         if self.restart_admission.is_fenced() { self.tempfile_search.retire(); return; }
         let Some(request) = self.tempfile_search.pending.take() else { return; };
+        let effective = super::plugin_editor::effective_membership(self.enabled_plugins.as_ref(), self.plugin_membership_pending);
+        if !enabled(effective.as_deref(), self.enabled_capabilities.as_ref()) { return; }
         self.tempfile_search.active = true;
         let query = request.query.clone();
         let plugin_set = request.enabled.clone();
@@ -108,7 +113,9 @@ impl RootWindow {
                     && root.launcher_results.generation == request.generation && root.launcher_results.query == request.query
                     && root.query.read(cx).value().as_str() == request.query
                     && root.root_visibility.active.load(Ordering::Acquire) && root.root_visibility.visible.load(Ordering::Acquire)
-                    && !root.restart_admission.is_fenced() && enabled(root.enabled_plugins.as_ref(), root.enabled_capabilities.as_ref());
+                    && !root.restart_admission.is_fenced() && enabled(
+                        super::plugin_editor::effective_membership(root.enabled_plugins.as_ref(), root.plugin_membership_pending).as_deref(),
+                        root.enabled_capabilities.as_ref());
                 if current { match rows { Ok(rows) => {
                     root.tempfile_search.diagnostic = None;
                     let mut combined = request.other;

@@ -15,6 +15,9 @@ pub enum StatelessPlugin {
     Reddit,
     Runescape,
     Weather,
+    History,
+    Tempfile,
+    Timer,
 }
 
 impl StatelessPlugin {
@@ -35,12 +38,16 @@ impl StatelessPlugin {
             Self::Reddit => <crate::plugins::reddit::RedditPlugin as BuiltinIdentity>::ID,
             Self::Runescape => <crate::plugins::runescape::RunescapeSearchPlugin as BuiltinIdentity>::ID,
             Self::Weather => <crate::plugins::weather::WeatherPlugin as BuiltinIdentity>::ID,
+            Self::History => <crate::plugins::history::HistoryPlugin as BuiltinIdentity>::ID,
+            Self::Tempfile => <crate::plugins::tempfile::TempfilePlugin as BuiltinIdentity>::ID,
+            Self::Timer => <crate::plugins::timer::TimerPlugin as BuiltinIdentity>::ID,
         }
     }
 
     pub fn from_id(id: &str) -> Option<Self> {
         [Self::DateArithmetic, Self::BaseConvert, Self::UnitConvert, Self::Google,
-         Self::Wikipedia, Self::Youtube, Self::Reddit, Self::Runescape, Self::Weather]
+         Self::Wikipedia, Self::Youtube, Self::Reddit, Self::Runescape, Self::Weather,
+         Self::History, Self::Tempfile, Self::Timer]
             .into_iter().find(|plugin| plugin.id() == id)
     }
 }
@@ -379,6 +386,27 @@ mod tests {
             plugin,
             enabled: false,
             reviewed_all_to_explicit: reviewed,
+        }
+    }
+
+    #[test]
+    fn supported_history_tempfile_timer_membership_preserves_capabilities() {
+        for (plugin, id) in [(StatelessPlugin::History, "history"), (StatelessPlugin::Tempfile, "tempfile"), (StatelessPlugin::Timer, "timer")] {
+            assert_eq!(plugin.id(), id);
+            assert_eq!(StatelessPlugin::from_id(id), Some(plugin));
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let original = format!(r#"{{"enabled_plugins":["{id}","custom"],"enabled_capabilities":{{"{id}":["search"],"other":[]}},"opaque":{{"wide":123456789012345678901}}}}"#);
+            std::fs::write(&path, &original).unwrap();
+            let before = Settings::plugin_membership_snapshot(&path).unwrap();
+            let disabled = Settings::save_plugin_membership_checked(&path, &before, disable(plugin, false), || true).unwrap();
+            assert_eq!(disabled.snapshot.enabled, Some(HashSet::from(["custom".into()])));
+            let enabled = Settings::save_plugin_membership_checked(&path, &disabled.snapshot, PluginMembershipRequest { plugin, enabled: true, reviewed_all_to_explicit: false }, || true).unwrap();
+            assert!(enabled.snapshot.enabled.unwrap().contains(id));
+            let saved = std::fs::read_to_string(&path).unwrap();
+            assert!(saved.contains("123456789012345678901"));
+            let settings = Settings::read_current(&path).unwrap();
+            assert_eq!(settings.enabled_capabilities.unwrap().get(id), Some(&vec!["search".to_owned()]));
         }
     }
 

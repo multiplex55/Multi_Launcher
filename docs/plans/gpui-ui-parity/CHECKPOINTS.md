@@ -2302,3 +2302,15 @@ The locked `fast-dev` library check passed in 1m 16s. Integrated library and lau
 P0.09 remains Stage 2. Paired 1516 × 937 Windows replay remains open with the same owned Unicode CRLF note and both Paste Sequence shortcuts disabled. Check Ctrl+F, offscreen selection, forward and reverse wrap, Find focus, Escape, Split preview, one-step Undo and Redo, and Save or Discard. Preview-side match highlighting, Render-only Find and the remaining G12 behavior stay open.
 
 Continue P0.14 checked Enabled controls for History, Temporary Files, and Timers and Alarms.
+
+### P0.14 checked membership for History, Temporary Files and Timers
+
+The retained Plugin Editor now exposes checked Enabled controls for launcher History, Temporary Files, and Timers and Alarms. Each row stays discoverable while disabled. The existing membership transaction changes the exact installed provider ID, preserves other Settings values and independent capabilities, and applies a matching acknowledgement to the live launcher. The first disable from an implicit catalog still requires conversion review. Configured plugin directories retain the checked write restriction.
+
+Search and command completion suppress a provider while its membership is pending or a write remains unverified. Typed History replay and Temporary Files scan admission and publication check that fence. Existing History recording, temporary file storage, and the application-owned timer schedule and Dashboard stay active independently of Search membership.
+
+The locked `fast-dev` library check passed in 1m 13s and the integrated library and launcher check in 23.28s. Independent review checked stock provider identity, pending and uncertain projections, History admission, and Temporary Files scan and publication. The grouped link took 6m 33s. Nextest run `16846df7-3899-41d1-87fa-0b662c00e5d0` passed all 11 selected cases across two binaries in 3.392s with 9628 skipped.
+
+P0.14 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned History, Temporary Files and silent timer profiles with both Paste Sequence shortcuts disabled. Toggle each provider, check Search and completion, and read back the settings in egui. Verify existing countdown completion and the History and temporary file witnesses. Exercise Search capability separately from Enabled.
+
+Continue P0.01/P0.02 checked History replay of saved Open targets.

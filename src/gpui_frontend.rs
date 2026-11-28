@@ -7394,7 +7394,7 @@ impl RootWindow {
             .take_clipboard_modify_projection().map(|(effective, catalog)| (query.clone(), effective, catalog));
         self.snippets_search.projection = self.search_catalog.providers.take_snippets_projection()
             .map(|(effective, snapshot)| (query.clone(), effective, snapshot));
-        if tempfile_search::supported_query(&query) && tempfile_search::enabled(self.enabled_plugins.as_ref(), self.enabled_capabilities.as_ref()) {
+        if tempfile_search::supported_query(&query) && tempfile_search::enabled(effective.as_deref(), self.enabled_capabilities.as_ref()) {
             self.start_tempfile_search(query, raw_provider_actions, scroll_to_search, cx);
             return;
         }
@@ -8287,7 +8287,8 @@ impl RootWindow {
             return;
         }
         if let LauncherResultOrigin::History(receipt) = &result.origin {
-            if self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains("history"))
+            if self.plugin_membership_pending.is_some_and(|plugin| plugin.id() == "history")
+                || self.enabled_plugins.as_ref().is_some_and(|enabled| !enabled.contains("history"))
                 || !multi_launcher::settings::provider_search_capability_enabled(self.enabled_capabilities.as_ref(), "history")
                 || self.search_catalog.canonical_revision != receipt.canonical_revision
                 || self.restart_admission.is_fenced() || window.has_active_dialog(cx)
