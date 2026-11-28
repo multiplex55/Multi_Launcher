@@ -2348,3 +2348,13 @@ The Alarm picker accepts a blank starting draft and preserves the date kind and 
 Locked `fast-dev` launcher checks passed in 13.36s and 5.41s, and the final mounted event and composition correction passed in 4.47s. Independent review confirmed exact mounted updates, composition handling and the shared scheduler handoff. The grouped launcher link took 29.71s. Nextest run `2effff61-dd27-4f59-b1cd-3a8738eec38b` passed all eight selected cases in 3.768s with 604 skipped.
 
 P0.17 remains Stage 2. Paired 1516 × 937 Windows replay remains open with both Paste Sequence shortcuts disabled. Use the owned silent countdown and relative-date alarm drafts. Check exact picker and typing synchronization, the resolved local preview, IME composition, Cancel with no scheduling, Start once, and canonical alarm restore after relaunch. Remembered hosts, scoped Jump and the remaining G23 behavior stay open.
+
+### P0.10 checked MultiManager window layout authoring
+
+Expanded workspace Details offers Edit Window for each exact member. The retained draft edits Alias and signed Home and Target coordinates with bounded dimensions. Swap exchanges the actual optional rectangles. Apply updates the workspace draft and preserves native matching metadata. Untouched absent or legacy rectangles and legacy Alias values retain their exact stored data. Cancel, Escape and unchanged Apply preserve current placement evidence and allow a pending startup Reconnect result to settle.
+
+The edit and Apply bind the current mount, workspace revision, exact workspace and member ordinal. A changed Apply advances the draft revision and retires stale placement and Startup evidence. Toolbar Save uses the existing checked workspace store. An accepted edit can be used by the existing Reconnect and placement workflow after Save.
+
+Locked `fast-dev` launcher checks passed in 6.52s and 5.20s. Independent review checked the exact Details entry, stale receipts, optional and legacy values, no-op settlement and shared render receipts. The final grouped launcher link took 19.72s after correcting test-only imports. Nextest run `277a3180-c82a-4670-b26a-63c601164186` passed all nine selected cases in 3.803s with 606 skipped.
+
+P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open. Use the owned Alpha and Beta profiles with both Paste Sequence shortcuts disabled. Author distinct Home and Target rectangles on the exact Alpha row, exercise Swap and Cancel, Apply and Save, reopen and read back in egui, Reconnect and verify both exact placements. Confirm Beta and binding data remain intact. Other capture, runtime and cross-desktop controls retain their own gates.

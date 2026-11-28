@@ -1,5 +1,6 @@
 //! Retained, inactive MultiManager workspace authoring.
 use super::*;
+mod member_edit;
 use multi_launcher::multi_manager::checked;
 use multi_launcher::multi_manager::{
     model::{MmWorkspace, new_workspace_id},
@@ -252,6 +253,8 @@ pub(super) struct MultiManagerView {
     restore_intent: Option<RestoreIntent>,
     restore_lease: Option<Arc<AtomicBool>>,
     rename: Option<(usize, MmWorkspace, u64)>,
+    member_edit: Option<member_edit::MemberDraft>,
+    member_edit_epoch: u64,
     name: Entity<InputState>,
     _name_sub: Subscription,
     review: Option<Review>,
@@ -860,6 +863,8 @@ impl MultiManagerView {
             restore_intent: None,
             restore_lease: None,
             rename: None,
+            member_edit: None,
+            member_edit_epoch: 0,
             name,
             _name_sub: name_sub,
             review: None,
@@ -880,6 +885,7 @@ impl MultiManagerView {
         view.reload(cx);
         view
     }
+    fn editing(&self) -> bool { self.rename.is_some() || self.member_edit.is_some() }
     fn dirty(&self) -> bool {
         self.snapshot
             .as_ref()
@@ -887,7 +893,7 @@ impl MultiManagerView {
     }
     fn adopt_auto_reconnect(&mut self, cx: &mut Context<Self>) {
         if !self.open || !self.mount.is_current() || self.admission.is_fenced()
-            || self.pending || self.dirty() || self.rename.is_some() || self.review.is_some()
+            || self.pending || self.dirty() || self.editing() || self.review.is_some()
         {
             return;
         }
@@ -917,10 +923,15 @@ impl MultiManagerView {
         }
         cx.notify();
     }
+    fn adopt_pending_auto_after_edit(&mut self, cx: &mut Context<Self>) {
+        if !self.overlays.iter().any(|overlay| matches!(&overlay.source, OverlaySource::Startup(_, _))) {
+            self.adopt_auto_reconnect(cx);
+        }
+    }
     pub(super) fn blocks_close(&self) -> bool {
         self.open
             && self.mount.is_current()
-            && (self.pending || self.dirty() || self.rename.is_some() || self.review.is_some())
+            && (self.pending || self.dirty() || self.editing() || self.review.is_some())
     }
     fn settle_wait(&self, cx: &mut Context<Self>) {
         let root = self.root.clone();
@@ -1013,7 +1024,7 @@ impl MultiManagerView {
     ) {
         let Some(kind) = workspace_operation(&action) else { return; };
         if self.restore_intent.is_some()
-            || self.rename.is_some()
+            || self.editing()
             || self.review.is_some()
             || self.capture_slot.is_some()
             || self.dirty()
@@ -1079,7 +1090,7 @@ impl MultiManagerView {
             return;
         };
         if self.pending
-            || self.rename.is_some()
+            || self.editing()
             || self.review.is_some()
             || self.dirty()
             || !self.restore_origin_current(&intent, window, cx)
@@ -1207,7 +1218,7 @@ impl MultiManagerView {
         cx.notify();
     }
     fn start_catalog(&mut self, mut intent: Option<RestoreIntent>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.pending || self.dirty() || self.rename.is_some() || self.review.is_some() || self.capture_slot.is_some() || !self.current(window, cx) { return; }
+        if self.pending || self.dirty() || self.editing() || self.review.is_some() || self.capture_slot.is_some() || !self.current(window, cx) { return; }
         let Some(snapshot) = self.snapshot.clone() else { self.message = Some("Load workspaces before reconnecting.".into()); cx.notify(); return; };
         let Some(native) = self.native else { return; };
         let (permit, lease, receipt, visibility_revision) = if let Some(origin) = intent.as_mut() {
@@ -1361,20 +1372,20 @@ impl MultiManagerView {
     }
 
     fn snapshot_receipts(&self) -> Option<(Vec<checked::BindingRowReceipt>, Vec<Arc<super::multi_manager_auto::Owner>>)> {
-        if !self.workspace_ready || self.pending || self.dirty() || self.rename.is_some()
+        if !self.workspace_ready || self.pending || self.dirty() || self.editing()
             || self.review.is_some() || self.capture_slot.is_some() { return None; }
         self.binding_source.as_ref()?;
         self.placement_receipts(self.binding_source.as_ref())
     }
 
     fn placement_receipts(&self, binding_source: Option<&checked::CheckedBindingSource>) -> Option<(Vec<checked::BindingRowReceipt>, Vec<Arc<super::multi_manager_auto::Owner>>)> {
-        if !self.workspace_ready || self.pending || self.dirty() || self.rename.is_some()
+        if !self.workspace_ready || self.pending || self.dirty() || self.editing()
             || self.review.is_some() || self.capture_slot.is_some() { return None; }
         binding_receipts(self.snapshot.as_ref()?, binding_source, &self.rows, &self.overlays, self.revision)
     }
 
     fn snapshot_available(&self) -> bool {
-        self.workspace_ready && !self.pending && !self.dirty() && self.rename.is_none()
+        self.workspace_ready && !self.pending && !self.dirty() && !self.editing()
             && self.review.is_none() && self.capture_slot.is_none()
             && self.snapshot.is_some() && self.binding_source.is_some()
             && self.rows.iter().enumerate().any(|(index, row)| {
@@ -1502,7 +1513,7 @@ impl MultiManagerView {
     }
     fn save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.pending
-            || self.rename.is_some()
+            || self.editing()
             || self.review.is_some()
             || !self.dirty()
             || !self.current(window, cx)
@@ -1646,11 +1657,11 @@ impl MultiManagerView {
         if !self.current(window, cx)
             || self.pending
             || self.review.is_some()
-            || self.rename.is_some()
+            || self.editing()
         {
             return;
         }
-        if self.dirty() || self.rename.is_some() {
+        if self.dirty() || self.editing() {
             self.review_epoch = self.review_epoch.wrapping_add(1);
             self.review = Some(Review::Close);
             self.review_cancel.focus(window, cx);
@@ -1671,6 +1682,11 @@ impl MultiManagerView {
         if !held && !self.pending {
             if self.review.take().is_some() {
                 self.review_epoch = self.review_epoch.wrapping_add(1);
+                self.settle_wait(cx);
+                self.focus.focus(window, cx);
+                cx.notify();
+            } else if self.member_edit.take().is_some() {
+                self.adopt_pending_auto_after_edit(cx);
                 self.settle_wait(cx);
                 self.focus.focus(window, cx);
                 cx.notify();
@@ -1720,7 +1736,7 @@ impl MultiManagerView {
     ) {
         if self.pending
             || self.review.is_some()
-            || self.rename.is_some()
+            || self.editing()
             || !self.current(window, cx)
             || !row_current(&self.rows, index, expected, revision, self.revision)
         {
@@ -1996,12 +2012,51 @@ impl Render for MultiManagerView {
                 );
             return panel;
         }
+        if let Some(draft) = &self.member_edit {
+            let receipt = self.mount.clone();
+            let epoch = self.member_edit_epoch;
+            let row = draft.row; let member = draft.member; let revision = draft.revision;
+            let expected_row = draft.expected_row.clone(); let expected = draft.expected.clone();
+            let mut fields = div().flex().flex_wrap().gap_2();
+            for (i, label) in ["Alias", "Home X", "Home Y", "Home width", "Home height", "Target X", "Target Y", "Target width", "Target height"].into_iter().enumerate() {
+                fields = fields.child(div().flex().flex_col().w(px(if i == 0 { 200.0 } else { 100.0 })).child(Label::new(label)).child(Input::new(&draft.inputs[i]).aria_label(label)));
+            }
+            panel = panel.child(Label::new(format!("Edit window {}", member + 1))).child(fields)
+                .child(div().flex().gap_2()
+                    .child(Button::new("mm-member-swap").label("Swap Home / Target").on_click(cx.listener(move |view, _, window, cx| {
+                        if view.member_edit_epoch != epoch || !view.current(window, cx) || view.pending { return; }
+                        if view.member_edit.as_ref().is_some_and(|draft| draft.inputs.iter().any(|input| input.update(cx, |input, cx| input.marked_text_range(window, cx).is_some()))) { return; }
+                        if let Some(mut draft) = view.member_edit.take() {
+                            if let Err(error) = draft.swap(window, cx) { view.message = Some(error.into()); }
+                            view.member_edit = Some(draft); cx.notify();
+                        }
+                    })))
+                    .child(Button::new("mm-member-apply").label("Apply").on_click(cx.listener(move |view, _, window, cx| {
+                        if view.pending || view.member_edit_epoch != epoch || !receipt.is_current() || !receipt.matches(&view.mount) || !view.current(window, cx)
+                            || !member_edit::member_current(&view.rows, row, &expected_row, member, &expected, revision, view.revision) { return; }
+                        let Some(draft) = view.member_edit.as_ref() else { return; };
+                        if draft.row != row || draft.member != member || draft.revision != revision || draft.expected != expected || draft.expected_row != expected_row { return; }
+                        if draft.inputs.iter().any(|input| input.update(cx, |input, cx| input.marked_text_range(window, cx).is_some())) { return; }
+                        match draft.result(cx) {
+                            Ok(updated) => {
+                                if updated != expected { view.retire_auto_reconnect(); view.overlays.clear(); view.rows[row].windows[member] = updated; view.revision = view.revision.wrapping_add(1); }
+                                view.member_edit = None; view.message = None; view.adopt_pending_auto_after_edit(cx); view.settle_wait(cx); view.focus.focus(window, cx);
+                            }
+                            Err(error) => view.message = Some(error.into()),
+                        }
+                        cx.notify();
+                    })))
+                    .child(Button::new("mm-member-cancel").label("Cancel").on_click(cx.listener(move |view, _, window, cx| {
+                        if view.member_edit_epoch == epoch && view.current(window, cx) && !view.pending { view.member_edit = None; view.message = None; view.adopt_pending_auto_after_edit(cx); view.settle_wait(cx); view.focus.focus(window, cx); cx.notify(); }
+                    }))));
+            return panel;
+        }
         let issued_revision = self.revision;
         let issued_attempt = self.attempt;
         let issued_overlay_revision = self.overlay_revision;
         let snapshot_available = self.snapshot_available();
         let all_home_available = self.workspace_ready && !self.pending && !self.dirty()
-            && self.rename.is_none() && self.review.is_none() && self.capture_slot.is_none()
+            && !self.editing() && self.review.is_none() && self.capture_slot.is_none()
             && self.snapshot.is_some() && self.rows.iter().enumerate().any(|(index, row)|
                 select_overlay(&self.overlays, index, row, self.revision).is_some());
         let mount = self.mount.clone();
@@ -2022,7 +2077,7 @@ impl Render for MultiManagerView {
                                     && view.revision == issued_revision
                                     && !view.pending
                                     && view.review.is_none()
-                                    && view.rename.is_none()
+                                    && !view.editing()
                                     && view.snapshot.is_some()
                                     && view.current(window, cx)
                                 {
@@ -2067,7 +2122,7 @@ impl Render for MultiManagerView {
                                     || view.revision != issued_revision
                                     || view.pending
                                     || view.review.is_some()
-                                    || view.rename.is_some()
+                                    || view.editing()
                                     || !view.current(window, cx)
                                 {
                                     return;
@@ -2274,7 +2329,27 @@ impl Render for MultiManagerView {
                         hotkey.sequence().unwrap_or_default()
                     )));
                 }
+                let shared_row = Arc::new(row.clone());
                 for (window_index, entry) in row.windows.iter().enumerate() {
+                    let expected_row = shared_row.clone();
+                    let expected_member = entry.clone();
+                    let receipt = mount.clone();
+                    card = card.child(Button::new(SharedString::from(format!("mm-member-edit-{index}-{window_index}")))
+                        .label(format!("Edit window {}", window_index + 1))
+                        .disabled(self.pending || self.capture_slot.is_some())
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            if view.pending || view.capture_slot.is_some() || view.review.is_some() || view.editing()
+                                || !receipt.is_current() || !receipt.matches(&view.mount) || !view.current(window, cx)
+                                || !member_edit::member_current(&view.rows, index, &expected_row, window_index, &expected_member, issued_revision, view.revision)
+                                || view.root.upgrade().is_none_or(|root| {
+                                    let root = root.read(cx);
+                                    root.multi_manager_paths_uncertain || root.multi_manager_paths.as_ref().is_some_and(|paths| paths.read(cx).blocks_close(cx))
+                                }) { return; }
+                            let draft = member_edit::MemberDraft::new(index, expected_row.as_ref().clone(), issued_revision, window_index, window, cx);
+                            draft.inputs[0].focus_handle(cx).focus(window, cx);
+                            view.member_edit_epoch = view.member_edit_epoch.wrapping_add(1);
+                            view.member_edit = Some(draft); view.message = None; cx.notify();
+                        })));
                     card = card.child(Label::new(format!(
                         "{}: {} · {} · home {:?} · target {:?}",
                         window_index + 1,
@@ -2407,6 +2482,8 @@ impl RootWindow {
                 }
                 if view.review.is_some() {
                     view.review_cancel.focus(window, cx);
+                } else if let Some(draft) = &view.member_edit {
+                    draft.inputs[0].focus_handle(cx).focus(window, cx);
                 } else if view.rename.is_some() {
                     view.name.focus_handle(cx).focus(window, cx);
                 } else {
