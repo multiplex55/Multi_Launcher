@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScopedSetting {
+    PreserveCommand,
     ClearQueryAfterRun,
     HideAfterRun,
     EnableToasts,
@@ -76,6 +77,7 @@ impl std::error::Error for ScopedSettingsError {}
 impl ScopedSetting {
     fn keys(self) -> (&'static str, Option<&'static str>) {
         match self {
+            Self::PreserveCommand => ("preserve_command", None),
             Self::ClearQueryAfterRun => ("clear_query_after_run", None),
             Self::HideAfterRun => ("hide_after_run", None),
             Self::EnableToasts => ("enable_toasts", None),
@@ -106,6 +108,7 @@ impl ScopedSetting {
     pub fn value(self, settings: &Settings) -> ScopedSettingValue {
         use ScopedSettingValue::*;
         match self {
+            Self::PreserveCommand => Bool(settings.preserve_command),
             Self::ClearQueryAfterRun => Bool(settings.clear_query_after_run),
             Self::HideAfterRun => Bool(settings.hide_after_run),
             Self::EnableToasts => Bool(settings.enable_toasts),
@@ -146,7 +149,8 @@ impl ScopedSetting {
             (Self::GridPluginOptOut, Strings(_)) => true,
             (Self::StaticPosition | Self::StaticSize, OptionalPair(_)) => true,
             (
-                Self::ClearQueryAfterRun
+                Self::PreserveCommand
+                | Self::ClearQueryAfterRun
                 | Self::HideAfterRun
                 | Self::EnableToasts
                 | Self::ShowInlineErrors
@@ -284,6 +288,7 @@ impl Settings {
         let placement = [ScopedSetting::FollowMouse, ScopedSetting::StaticLocationEnabled, ScopedSetting::StaticPosition, ScopedSetting::StaticSize];
         let grouped = placement.iter().any(|field| seen.contains(field));
         let clipboard_group = seen.contains(&ScopedSetting::ClipboardModifyHideAfterApply);
+        let strict_group = clipboard_group || seen.contains(&ScopedSetting::PreserveCommand);
         let mouse_group = seen.contains(&ScopedSetting::MouseGesturesEnabled) || seen.contains(&ScopedSetting::MouseGesturesPracticeMode);
         if grouped && !placement.iter().all(|field| seen.contains(field)) {
             return Err(ScopedSettingsError::Invalid(ScopedSetting::FollowMouse));
@@ -292,7 +297,7 @@ impl Settings {
         if token.is_some_and(SettingsBooleanSaveToken::is_canceled) {
             return Err(ScopedSettingsError::Cancelled);
         }
-        let original = if clipboard_group {
+        let original = if strict_group {
             match std::fs::read(path) {
                 Ok(bytes) => Some(bytes),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
@@ -302,7 +307,7 @@ impl Settings {
         let bytes = original.clone().unwrap_or_default();
         let settings = parse_effective_settings(path, &bytes)
             .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
-        let positional = if clipboard_group && bytes.iter().copied().find(|byte| !byte.is_ascii_whitespace()) == Some(b'[') {
+        let positional = if strict_group && bytes.iter().copied().find(|byte| !byte.is_ascii_whitespace()) == Some(b'[') {
             Some(serde_json::from_slice::<Vec<Box<serde_json::value::RawValue>>>(&bytes)
                 .map_err(|error| ScopedSettingsError::Store(error.to_string()))?)
         } else { None };
@@ -314,6 +319,10 @@ impl Settings {
             for ((name, _), value) in fields.iter().zip(values) { root.insert(name.clone(), value.clone()); }
             Some(root)
         } else { None };
+        if seen.contains(&ScopedSetting::PreserveCommand) && positional.is_none() && !bytes.iter().all(u8::is_ascii_whitespace) {
+            super::omni_preferences::unique_object(std::str::from_utf8(&bytes).map_err(|error| ScopedSettingsError::Store(error.to_string()))?)
+                .map_err(|error| ScopedSettingsError::Store(error.to_string()))?;
+        }
         if clipboard_group {
             let root = if let Some(root) = &positional_root { root.clone() }
                 else if bytes.iter().all(u8::is_ascii_whitespace) { RawSettingsObject::new() }
@@ -342,7 +351,7 @@ impl Settings {
             if token.is_some_and(SettingsBooleanSaveToken::is_canceled) {
                 return Err(ScopedSettingsError::Cancelled);
             }
-            if clipboard_group {
+            if strict_group {
                 let now = match std::fs::read(path) { Ok(value) => Some(value), Err(error) if error.kind() == std::io::ErrorKind::NotFound => None, Err(error) => return Err(ScopedSettingsError::Store(error.to_string())) };
                 if now != original { return Err(ScopedSettingsError::Store("Settings changed while reading; reload and retry".into())); }
             }
@@ -361,7 +370,7 @@ impl Settings {
         } else {
             bytes.clone()
         };
-        let mut root: RawSettingsObject = if let Some(root) = positional_root { root } else if clipboard_group && bytes.iter().all(u8::is_ascii_whitespace) { RawSettingsObject::new() } else { match serde_json::from_slice(&raw_source) {
+        let mut root: RawSettingsObject = if let Some(root) = positional_root { root } else if strict_group && bytes.iter().all(u8::is_ascii_whitespace) { RawSettingsObject::new() } else { match serde_json::from_slice(&raw_source) {
             Ok(root) => root,
             Err(_) => raw_object(
                 raw_value(&settings)
@@ -433,7 +442,7 @@ impl Settings {
                 "Settings patch did not produce the requested values".into(),
             ));
         }
-        if clipboard_group {
+        if strict_group {
             use std::io::Write;
             let claimed = std::cell::Cell::new(false);
             let failure = std::cell::RefCell::new(None);
@@ -444,7 +453,7 @@ impl Settings {
                 }
                 claimed.set(true);
                 let now = match std::fs::read(path) { Ok(value) => Some(value), Err(error) if error.kind() == std::io::ErrorKind::NotFound => None, Err(error) => { *failure.borrow_mut() = Some(ScopedSettingsError::Store(error.to_string())); return false; } };
-                if now != original { *failure.borrow_mut() = Some(ScopedSettingsError::Conflict(ScopedSetting::ClipboardModifyHideAfterApply)); return false; }
+                if now != original { *failure.borrow_mut() = Some(ScopedSettingsError::Conflict(if clipboard_group { ScopedSetting::ClipboardModifyHideAfterApply } else { ScopedSetting::PreserveCommand })); return false; }
                 true
             };
             let result = if original.is_some() {
@@ -511,6 +520,65 @@ mod tests {
             desired,
         }
     }
+    #[test]
+    fn preserve_command_sparse_roundtrip_retains_opaque_siblings_and_exact_ack() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("settings.json");
+        std::fs::write(&path, br#"{"opaque":{"number":123456789012345678901},"hide_after_run":true}"#).unwrap();
+        assert!(!Settings::read_current(&path).unwrap().preserve_command);
+        let enable = change(Field::PreserveCommand, Value::Bool(false), Value::Bool(true));
+        let ack = Settings::save_scoped_preferences_checked(&path, &[enable.clone()]).unwrap();
+        assert!(ack.persisted); assert_eq!(ack.values, vec![(Field::PreserveCommand, Value::Bool(true))]);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(saved.contains("123456789012345678901")); assert!(Settings::read_current(&path).unwrap().hide_after_run);
+        let no_op = Settings::save_scoped_preferences_checked(&path, &[enable]).unwrap();
+        assert!(!no_op.persisted); assert_eq!(no_op.values, vec![(Field::PreserveCommand, Value::Bool(true))]);
+        let disable = change(Field::PreserveCommand, Value::Bool(true), Value::Bool(false));
+        let ack = Settings::save_scoped_preferences_checked(&path, &[disable]).unwrap();
+        assert!(ack.persisted); assert_eq!(ack.values, vec![(Field::PreserveCommand, Value::Bool(false))]);
+        assert!(!Settings::read_current(&path).unwrap().preserve_command);
+    }
+
+    #[test]
+    fn preserve_command_refuses_duplicate_opaque_keys_without_rewrite() {
+        let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("settings.json");
+        let raw = br#"{"preserve_command":false,"opaque":1,"opaque":2}"#;
+        std::fs::write(&path, raw).unwrap();
+        let edit = change(Field::PreserveCommand, Value::Bool(false), Value::Bool(true));
+        assert!(Settings::save_scoped_preferences_checked(&path, &[edit]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), raw);
+    }
+
+    #[test]
+    fn preserve_command_legacy_and_mixed_conflict_are_checked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let defaults = Settings::default();
+        assert!(!defaults.preserve_command);
+        let positional = super::super::legacy_positional_settings(&defaults);
+        std::fs::write(&path, &positional).unwrap();
+        let enable = change(Field::PreserveCommand, Value::Bool(false), Value::Bool(true));
+        let ack = Settings::save_scoped_preferences_checked(&path, &[enable]).unwrap();
+        assert_eq!(ack.values, vec![(Field::PreserveCommand, Value::Bool(true))]);
+        assert!(Settings::read_current(&path).unwrap().preserve_command);
+        let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(json.is_array());
+        let before = std::fs::read(&path).unwrap();
+        let disable = change(Field::PreserveCommand, Value::Bool(true), Value::Bool(false));
+        let other = change(Field::ToastDuration, Value::Float(4.0), Value::Float(2.0));
+        assert_eq!(
+            Settings::save_scoped_preferences_checked(&path, &[disable.clone(), other]),
+            Err(ScopedSettingsError::Conflict(Field::ToastDuration))
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let token = SettingsBooleanSaveToken::new(42);
+        assert!(token.request_cancel());
+        assert_eq!(
+            Settings::save_scoped_preferences_cancellable(&path, &[disable], &token),
+            Err(ScopedSettingsError::Cancelled)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+    }
+
     #[test]
     fn mixed_conflict_keeps_exact_source_and_commits_nothing() {
         let dir = tempfile::tempdir().unwrap();

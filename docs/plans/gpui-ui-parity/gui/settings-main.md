@@ -75,7 +75,7 @@ Existing JSON object roots keep unowned raw member values. A legacy positional r
 
 ## Live Actions and Feedback
 
-The retained GPUI Settings pane offers Clear Query, Hide Window, Enable Toasts, Toast Duration, Inline Errors and Error Toasts. Save Actions and Feedback writes the changed fields in one checked transaction. Its acknowledgement applies the values to later launch admissions. Existing launch attempts keep their captured preferences.
+The retained GPUI Settings pane offers Preserve command after run, Clear Query, Hide Window, Enable Toasts, Toast Duration, Inline Errors and Error Toasts. Save Actions and Feedback writes the changed fields in one checked transaction. Its acknowledgement applies the values to later launch admissions. Existing launch attempts keep their captured preferences. The stock search `settings preserve command` targets the checkbox. Paired replay remains open for saving both states, performing an owned Bookmark Add with Clear query enabled, and reading the setting back in egui. [Preserve command checkpoint](../CHECKPOINTS.md#p014-live-preserve-command-after-run)
 
 Use paired owned profiles at 1516 × 937 with matching display scale and both Paste Sequences shortcuts disabled. Open Settings through Menu and Search, change two preferences, and check a subsequent owned application launch for the resulting query, visibility and feedback. Toggle toast notifications and edit duration using the visible control. Exercise Cancel and a controlled read-sharing replacement failure with a retry. Reopen the same owned profile through egui and compare the touched values and raw unowned siblings. Native replay remains open.
 

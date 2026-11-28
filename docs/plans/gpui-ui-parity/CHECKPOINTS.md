@@ -2418,3 +2418,13 @@ The locked `fast-dev` library check passed in 26.32s and the integrated library 
 Paired 1516 × 937 Windows replay remains open. Use the owned confirmation and opt-out profiles with both Paste Sequence shortcuts disabled. Verify Cancel, Escape, held Enter, stale authority, exact audit and Usage, and unchanged pin bytes and unrelated entries. No live History was cleared in this checkpoint.
 
 Continue P0.14 live Preserve command after run.
+
+### P0.14 live Preserve command after run
+
+The retained Actions and Feedback checkbox is reachable through `settings preserve command`. The shared scoped save checks the exact Boolean, rejects ambiguous duplicate root keys, and keeps opaque sibling values and the legacy positional shape. Only an exact current acknowledgement updates later launch admissions. Previously admitted effects keep their captured settings. Stock Folder Add, Bookmark Add, Temporary File creation and Timer creation continue to own their query outcomes.
+
+The scoped locked `fast-dev` shared check passed in 26.74s and the integrated check passed in 28.75s. Independent review covered scoped persistence, typed focus, checkbox presentation and live acknowledgement. The grouped Nextest link took 9m 26s. All three launcher tests passed in run `66da52ce-7a98-4d3f-8e6f-5c57a9d3ea98`. The initial mixed-conflict fixture used the durable duration as its requested value and received a valid idempotent acknowledgement. After correcting that fixture, the library-only link took 1m 12s and run `740677ab-96f4-4350-9936-8f837689186b` passed all nine library tests in 1.950s.
+
+Stage 2. Paired Windows replay at 1516 × 937 remains open with both Paste Sequences shortcuts disabled. In each owned Bookmark profile, save on, add an owned URL and check for `bm add `. Save off, add a second owned URL and check that the query clears. Read back both saved states and keep the profiles separate.
+
+Continue P0.11 Calculation Pad Go to line and result-to-source navigation.

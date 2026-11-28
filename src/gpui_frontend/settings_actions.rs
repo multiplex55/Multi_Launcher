@@ -9,6 +9,7 @@ pub(super) const WAIT: &str = "Wait for Actions and Feedback settings to finish.
 
 #[derive(Clone, Debug, PartialEq)]
 struct Values {
+    preserve: bool,
     clear: bool,
     hide: bool,
     clipboard_hide: bool,
@@ -20,6 +21,7 @@ struct Values {
 impl Values {
     fn from_settings(settings: &Settings) -> Self {
         Self {
+            preserve: settings.preserve_command,
             clear: settings.clear_query_after_run,
             hide: settings.hide_after_run,
             clipboard_hide: matches!(Field::ClipboardModifyHideAfterApply.value(settings), Value::Bool(true)),
@@ -31,6 +33,7 @@ impl Values {
     }
     fn changes(&self, desired: &Self) -> Vec<Change> {
         [
+            (Field::PreserveCommand, Value::Bool(self.preserve), Value::Bool(desired.preserve)),
             (
                 Field::ClearQueryAfterRun,
                 Value::Bool(self.clear),
@@ -136,6 +139,7 @@ impl ActionsSettings {
             }
         });
         let checkbox_focus = [
+            Field::PreserveCommand,
             Field::ClearQueryAfterRun,
             Field::HideAfterRun,
             Field::ClipboardModifyHideAfterApply,
@@ -171,7 +175,7 @@ impl ActionsSettings {
             return false;
         };
         match target {
-            ClearQuery | HideWindow | ClipboardHideAfterApply | Toasts | Inline | ErrorToasts => true,
+            PreserveCommand | ClearQuery | HideWindow | ClipboardHideAfterApply | Toasts | Inline | ErrorToasts => true,
             Duration => draft.toasts,
             _ => false,
         }
@@ -187,19 +191,20 @@ impl ActionsSettings {
             return false;
         }
         let (index, focus) = match target {
+            PreserveCommand => (1, self.checkbox_focus.get(&Field::PreserveCommand).cloned()),
             ClearQuery => (
-                1,
+                2,
                 self.checkbox_focus.get(&Field::ClearQueryAfterRun).cloned(),
             ),
-            HideWindow => (2, self.checkbox_focus.get(&Field::HideAfterRun).cloned()),
-            ClipboardHideAfterApply => (3, self.checkbox_focus.get(&Field::ClipboardModifyHideAfterApply).cloned()),
-            Toasts => (4, self.checkbox_focus.get(&Field::EnableToasts).cloned()),
+            HideWindow => (3, self.checkbox_focus.get(&Field::HideAfterRun).cloned()),
+            ClipboardHideAfterApply => (4, self.checkbox_focus.get(&Field::ClipboardModifyHideAfterApply).cloned()),
+            Toasts => (5, self.checkbox_focus.get(&Field::EnableToasts).cloned()),
             Inline => (
-                5,
+                6,
                 self.checkbox_focus.get(&Field::ShowInlineErrors).cloned(),
             ),
-            ErrorToasts => (6, self.checkbox_focus.get(&Field::ShowErrorToasts).cloned()),
-            Duration => (8, Some(self.duration.focus_handle(cx))),
+            ErrorToasts => (7, self.checkbox_focus.get(&Field::ShowErrorToasts).cloned()),
+            Duration => (9, Some(self.duration.focus_handle(cx))),
             _ => return false,
         };
         let Some(focus) = focus else {
@@ -670,6 +675,7 @@ fn apply_if_acknowledged(
 fn apply_acknowledged(settings: &mut external_launch::Settings, changes: &[Change]) {
     for change in changes {
         match (&change.field, &change.desired) {
+            (Field::PreserveCommand, Value::Bool(value)) => settings.preserve_command = *value,
             (Field::ClearQueryAfterRun, Value::Bool(value)) => {
                 settings.clear_query_after_run = *value
             }
@@ -715,6 +721,7 @@ impl Render for ActionsSettings {
             .child(Label::new("Actions and Feedback"));
         if let Some(draft) = &self.draft {
             for (field, label, checked) in [
+                (Field::PreserveCommand, "Preserve command after run", draft.preserve),
                 (
                     Field::ClearQueryAfterRun,
                     "Clear query after run",
@@ -760,6 +767,7 @@ impl Render for ActionsSettings {
                                 if let Some(draft) = &mut view.draft {
                                     let value = state == CheckboxState::Checked;
                                     match field {
+                                        Field::PreserveCommand => draft.preserve = value,
                                         Field::ClearQueryAfterRun => draft.clear = value,
                                         Field::HideAfterRun => draft.hide = value,
                                         Field::ClipboardModifyHideAfterApply => draft.clipboard_hide = value,
@@ -778,7 +786,7 @@ impl Render for ActionsSettings {
                                 .flex()
                                 .gap_2()
                                 .child(CheckboxIndicator::new().checked(checked)
-                                    .when(field == Field::ClipboardModifyHideAfterApply, |indicator| {
+                                    .when(matches!(field, Field::PreserveCommand | Field::ClipboardModifyHideAfterApply), |indicator| {
                                         indicator.size(px(18.0)).rounded(px(3.0)).border_1()
                                             .border_color(appearance::to_hsla(if focused { palette.focus } else { palette.control_border }))
                                             .when(checked, |indicator| indicator.bg(appearance::to_hsla(palette.accent)).text_color(appearance::to_hsla(palette.primary_text)))
@@ -879,6 +887,23 @@ mod tests {
         assert!(apply_if_acknowledged(&mut settings, &changes, &right));
         assert!(settings.hide_after_run);
         assert!(settings.enable_toasts);
+    }
+
+    #[test]
+    fn preserve_command_requires_exact_ack_before_live_adoption() {
+        let mut settings = super::external_launch::Settings {
+            preserve_command: false, clear_query_after_run: false, hide_after_run: false,
+            history_limit: 10, enable_toasts: true, show_error_toasts: true,
+            show_inline_errors: true, toast_duration: 2.0, clipboard_modify_hide_after_apply: true,
+        };
+        let changes = vec![Change { field: Field::PreserveCommand, baseline: Value::Bool(false), desired: Value::Bool(true) }];
+        let wrong = ScopedSettingsAcknowledgement { values: vec![(Field::PreserveCommand, Value::Bool(false))], persisted: true };
+        assert!(!apply_if_acknowledged(&mut settings, &changes, &wrong)); assert!(!settings.preserve_command);
+        let right = ScopedSettingsAcknowledgement { values: vec![(Field::PreserveCommand, Value::Bool(true))], persisted: true };
+        assert!(apply_if_acknowledged(&mut settings, &changes, &right)); assert!(settings.preserve_command);
+        let disable = vec![Change { field: Field::PreserveCommand, baseline: Value::Bool(true), desired: Value::Bool(false) }];
+        let ack = ScopedSettingsAcknowledgement { values: vec![(Field::PreserveCommand, Value::Bool(false))], persisted: true };
+        assert!(apply_if_acknowledged(&mut settings, &disable, &ack)); assert!(!settings.preserve_command);
     }
 
     #[test]

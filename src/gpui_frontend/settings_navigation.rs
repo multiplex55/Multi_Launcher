@@ -14,6 +14,7 @@ pub(super) enum Target {
     Grid,
     Columns,
     Respect,
+    PreserveCommand,
     ClearQuery,
     HideWindow,
     ClipboardHideAfterApply,
@@ -41,6 +42,7 @@ impl Target {
             ids::SEARCH_GRID_LAYOUT => Self::Grid,
             "search.grid_columns" => Self::Columns,
             ids::SEARCH_RESPECT_PLUGIN_CAPABILITY => Self::Respect,
+            ids::ACTIONS_PRESERVE_COMMAND => Self::PreserveCommand,
             ids::ACTIONS_CLEAR_QUERY => Self::ClearQuery,
             ids::ACTIONS_HIDE_AFTER_RUN => Self::HideWindow,
             "plugin.clipboard_modify.hide_after_apply" => Self::ClipboardHideAfterApply,
@@ -475,6 +477,12 @@ mod tests {
     use super::{Target, current_provider, navigation_receipt_current};
     use multi_launcher::plugin::Plugin;
     use std::collections::{HashMap, HashSet};
+    #[test]
+    fn preserve_command_catalog_maps_to_actions_control() {
+        assert_eq!(Target::from_id(multi_launcher::settings_editor::catalog::ids::ACTIONS_PRESERVE_COMMAND), Some(Target::PreserveCommand));
+        assert!(multi_launcher::settings_editor::catalog::SettingsCatalog::default().search("preserve command").iter().any(|entry| Target::from_id(entry.id.as_str()) == Some(Target::PreserveCommand)));
+    }
+
     #[test]
     fn clipboard_modify_catalog_maps_to_visibility_control() {
         assert_eq!(Target::from_id("plugin.clipboard_modify.hide_after_apply"), Some(Target::ClipboardHideAfterApply));
