@@ -2182,3 +2182,15 @@ The locked `fast-dev` library check passed in 1m 09s. Integrated launcher and li
 The registered History plugin is Stage 2 for this scoped workflow. Paired 1516 × 937 Windows replay remains open with both Paste Sequence shortcuts disabled. Check one launch each with the exact executable, quoted and empty Args, inherited working directory and outer History and Usage. Replay twice with Clear After Run off. Replace the owned History seed after publication to verify stale refusal without a launch or success record. Clear and additional replay types retain their original requirements.
 
 Continue P0.10 launcher-owned automatic MultiManager Reconnect on load.
+
+### P0.10 automatic MultiManager Reconnect on launcher load
+
+The GPUI launcher starts one checked workspace Reconnect when the saved `auto_reconnect_on_load` option enables it. The launcher lifetime owns the worker and retains the plan before the pane opens. It reads only the canonical workspace source and uses the stock matcher. Native enumeration is serialized and rechecks the workspace source and current authority after acquiring the lane. No mapping changes saved workspace or binding data, and window movement remains an explicit Home or Target action.
+
+The clean pane can adopt the exact plan when either source arrives first. The plan preserves matching for legacy synthetic IDs through exact raw source and ordinal. Startup overlays carry their own authority and retire on an accepted manual operation, workspace edit, path change, Reload or shutdown. Independent manual overlays keep their existing behavior. Opening and reopening the pane do not enumerate again. Errors and no matches have distinct results.
+
+Locked `fast-dev` library and launcher checks passed in 1m 44s and 28.76s. Independent review cleared exact source ownership, overlay retirement, fallible launcher lifetime ownership and post-read enumeration authority. The grouped library and launcher link took 10m 15s. Nextest run `fe10bd83-e0bb-4fe0-ae97-c7f7d054d490` passed nine of nine in 2.811s with 9585 skipped.
+
+P0.10 remains Stage 2. Paired 1516 × 937 Windows replay remains open. The owned on/off profiles have the same workspace data and both Paste Sequence shortcuts disabled. Start both owned target windows before starting the launcher. Check that matches are available on the first pane open after startup, with unchanged geometry and GPUI store bytes. Then invoke one explicit Home or Target. Check manual Reconnect with startup disabled. Stock egui binding persistence, explicit Reload scheduling and the remaining G24 runtime retain their criteria.
+
+Continue P0.10 Auto-reconnect windows on load in `mm settings`.

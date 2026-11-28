@@ -1,6 +1,6 @@
 # G24 — MultiManager and system-control interfaces
 
-**Status: not started.** All checkpoints are not started. Work on the initiative's single branch. egui remains the no-argument default and GPUI remains native and opt-in.
+**Status: In implementation.** MultiManager has focused evidence for authoring, checked placement and capture, source paths and automatic startup Reconnect. Matched Windows replay and the remaining system tools stay open. [Startup Reconnect checkpoint](../CHECKPOINTS.md#p010-automatic-multimanager-reconnect-on-launcher-load)
 
 ## Objective and dependencies
 
@@ -47,7 +47,7 @@ Preserve layout save/load/flags, process actions, OS Task Manager launch, media/
 
 ### G24-B — Complete MultiManager and layout integration
 
-**Status: not started.** **Owner:** GPUI MultiManager adapters; existing workspace/runtime services.
+**Status: In implementation.** **Owner:** GPUI MultiManager adapters and the existing workspace and runtime services.
 
 **Work:** recreate manager/settings/cards, capture/reconnect flows, geometry, desktop/hotkey children, statuses, confirmations, and saved-layout entry points.
 

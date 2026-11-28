@@ -323,6 +323,7 @@ impl PathsView {
                         Ok(Ok(ack)) if ack.snapshot.paths == desired => {
                             let adopted = root.update(cx, |root, cx| {
                                 if root.settings_path != path || !root.multi_manager_paths.as_ref().is_some_and(|v| v.entity_id() == entity.entity_id()) || root.multi_manager_view.as_ref().is_some_and(|v| v.read(cx).open || v.read(cx).blocks_close()) { return false; }
+                                root.multi_manager_auto.retire();
                                 root.search_catalog.multi_manager_settings.workspaces_path = desired.workspaces.clone(); root.search_catalog.multi_manager_settings.bindings_path = desired.bindings.clone(); root.multi_manager_view = None; cx.notify(); true
                             }).unwrap_or(false);
                             if adopted { view.baseline = Some(ack.snapshot); view.status = Some("MultiManager paths saved.".into()); } else { view.uncertain = true; view.status = Some("Paths saved; close and relaunch to apply them.".into()); }
@@ -331,10 +332,10 @@ impl PathsView {
                         Ok(Err(error)) => view.status = Some(error.to_string()),
                         Ok(Ok(_)) | Err(_) => { view.uncertain = true; view.status = Some("Save acknowledgement is uncertain. Cancel and relaunch.".into()); }
                     }
-                    if view.uncertain { let _ = root.update(cx, |root, _| root.multi_manager_paths_uncertain = true); }
+                    if view.uncertain { let _ = root.update(cx, |root, _| { root.multi_manager_auto.retire(); root.multi_manager_paths_uncertain = true; }); }
                     view.clear_wait(cx); cx.notify();
                 });
-                if delivered.is_err() { let _ = entity.update(cx, |view, cx| { if fallback.is_current() && fallback.matches(&view.mount) && view.pending && view.attempt == attempt { view.pending = false; view.uncertain = true; view.lease = None; view.blur = None; view.active = None; view.status = Some("Save settled after window delivery failed. Cancel and relaunch to reconcile.".into()); let _ = view.root.update(cx, |root, _| root.multi_manager_paths_uncertain = true); view.clear_wait(cx); cx.notify(); } }); }
+                if delivered.is_err() { let _ = entity.update(cx, |view, cx| { if fallback.is_current() && fallback.matches(&view.mount) && view.pending && view.attempt == attempt { view.pending = false; view.uncertain = true; view.lease = None; view.blur = None; view.active = None; view.status = Some("Save settled after window delivery failed. Cancel and relaunch to reconcile.".into()); let _ = view.root.update(cx, |root, _| { root.multi_manager_auto.retire(); root.multi_manager_paths_uncertain = true; }); view.clear_wait(cx); cx.notify(); } }); }
             }).detach();
         }); });
         cx.notify();

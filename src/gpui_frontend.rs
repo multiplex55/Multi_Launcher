@@ -11,6 +11,7 @@ mod add_action;
 mod appearance;
 mod external_launch;
 mod history_search;
+mod multi_manager_auto;
 mod file_search;
 mod folder_size;
 mod file_lock;
@@ -2604,6 +2605,7 @@ struct RootWindow {
     quick_notes_view: Option<Entity<quick_notes::QuickNotesView>>,
     note_editor_view: Option<Entity<note_editor::NoteEditor>>,
     multi_manager_view: Option<Entity<multi_manager::MultiManagerView>>,
+    multi_manager_auto: Arc<multi_manager_auto::Owner>,
     multi_manager_paths: Option<Entity<multi_manager_paths::PathsView>>,
     multi_manager_paths_uncertain: bool,
     calculation_pad_view: Option<Entity<calculation_pad::CalculationPadView>>,
@@ -13661,6 +13663,8 @@ pub(crate) fn run_foundation_window(
     let calendar_wake = Arc::new(HashWakeSignal::default());
     let dashboard_wake = Arc::new(HashWakeSignal::default());
     let dashboard_source = Arc::new(dashboard::Source::start(dashboard_settings, dashboard_wake.clone()));
+    let multi_manager_auto = Arc::new(multi_manager_auto::Owner::default());
+    let multi_manager_auto_for_root = multi_manager_auto.clone();
     let dashboard_source_for_root = dashboard_source.clone();
     let dashboard_wake_for_root = dashboard_wake.clone();
     let calendar_wake_for_root = calendar_wake.clone();
@@ -14002,6 +14006,7 @@ pub(crate) fn run_foundation_window(
                 quick_notes_view: None,
                 note_editor_view: None,
                 multi_manager_view: None,
+                multi_manager_auto: multi_manager_auto_for_root.clone(),
                 multi_manager_paths: None,
                 multi_manager_paths_uncertain: false,
                 calculation_pad_view: None,
@@ -14660,6 +14665,7 @@ pub(crate) fn run_foundation_window(
                 }
             };
 
+        root_view.update(cx, |root, cx| root.start_auto_multi_manager(cx));
         let root_id = root_window.window_id();
         let root_for_window_close = root_view.downgrade();
         let hash_window_revision_for_root_close = Arc::clone(&hash_window_revision_for_app);
@@ -15494,6 +15500,7 @@ pub(crate) fn run_foundation_window(
     });
 
     restart_admission.fence();
+    multi_manager_auto.shutdown();
     dashboard_source.shutdown();
     for worker in notes_worker.lock().unwrap_or_else(std::sync::PoisonError::into_inner).drain(..) { let _ = worker.join(); }
     notes_owner.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();

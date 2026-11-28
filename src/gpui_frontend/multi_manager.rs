@@ -20,13 +20,14 @@ struct PlacementOverlay {
 enum OverlaySource {
     Reconnect(checked::ReconnectedWorkspace),
     Catalog(Arc<checked::ReconnectCatalogPlan>),
+    Startup(Arc<checked::ReconnectCatalogPlan>, Arc<super::multi_manager_auto::Owner>),
     Restore(Arc<checked::RestorePlan>),
 }
 impl PlacementOverlay {
     fn bound_count(&self) -> usize {
         match &self.source {
             OverlaySource::Reconnect(value) => value.identities.len(),
-            OverlaySource::Catalog(plan) => plan.rows().iter().find(|row| row.index == self.index).map_or(0, |row| row.identities.len()),
+            OverlaySource::Catalog(plan) | OverlaySource::Startup(plan, _) => plan.rows().iter().find(|row| row.index == self.index).map_or(0, |row| row.identities.len()),
             OverlaySource::Restore(plan) => plan
                 .rows()
                 .iter()
@@ -43,6 +44,7 @@ fn overlay_current(
     revision: u64,
 ) -> bool {
     overlay.index == index && overlay.revision == revision && &overlay.expected == expected
+        && match &overlay.source { OverlaySource::Startup(_, owner) => owner.is_current(), _ => true }
 }
 
 fn select_overlay<'a>(
@@ -84,7 +86,7 @@ fn overlay_has_live_identity(
                     .identities
                     .values()
                     .any(|item| item.native == identity && is_live(item.native)),
-                OverlaySource::Catalog(plan) => plan.rows().iter().find(|row| row.index == overlay.index).is_some_and(|row| row.identities.values().any(|item| item.native == identity && is_live(identity))),
+                OverlaySource::Catalog(plan) | OverlaySource::Startup(plan, _) => plan.rows().iter().find(|row| row.index == overlay.index).is_some_and(|row| row.identities.values().any(|item| item.native == identity && is_live(identity))),
                 OverlaySource::Restore(plan) => plan
                     .rows()
                     .iter()
@@ -229,9 +231,14 @@ pub(super) struct MultiManagerView {
     capture_identities: Vec<multi_launcher::window_catalog::WindowNativeIdentity>,
     ignore_launcher_capture: bool,
     overlays: Vec<PlacementOverlay>,
+    auto: Arc<super::multi_manager_auto::Owner>,
 }
 
 impl MultiManagerView {
+    fn retire_auto_reconnect(&mut self) {
+        self.auto.retire();
+        self.overlays.retain(|overlay| !matches!(&overlay.source, OverlaySource::Startup(_, _)));
+    }
     pub(super) fn revoke_operation(&mut self) {
         self.revoke_restore();
         if let Some(lease) = &self.operation_lease {
@@ -521,12 +528,15 @@ impl MultiManagerView {
             pid: native.identity.process_id,
             tid: native.identity.thread_id,
         };
+        let startup_owner = match &overlay.source { OverlaySource::Startup(_, owner) => Some(owner.clone()), _ => None };
         let current: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
             worker_receipt.is_current()
+                && startup_owner.as_ref().is_none_or(|owner| owner.is_current())
                 && !admission.is_fenced()
                 && lease.load(Ordering::Acquire)
                 && store::checked_workspace_source_is_current(&snapshot)
                 && worker_receipt.is_current()
+                && startup_owner.as_ref().is_none_or(|owner| owner.is_current())
                 && !admission.is_fenced()
                 && lease.load(Ordering::Acquire)
                 && json_utility::native_host_current(
@@ -545,7 +555,7 @@ impl MultiManagerView {
                 OverlaySource::Reconnect(ref reconnect) => {
                     checked::place_checked(reconnect, issuer, destination, current, &mut backend)
                 }
-                OverlaySource::Catalog(plan) => checked::place_catalog_checked(plan, overlay.index, issuer, destination, current, &mut backend),
+                OverlaySource::Catalog(plan) | OverlaySource::Startup(plan, _) => checked::place_catalog_checked(plan, overlay.index, issuer, destination, current, &mut backend),
                 OverlaySource::Restore(plan) => checked::place_restored_checked(
                     plan,
                     overlay.index,
@@ -614,6 +624,7 @@ impl MultiManagerView {
         let Some(permit) = self.admission.admit() else {
             return;
         };
+        self.retire_auto_reconnect();
         self.focus.focus(window, cx);
         self.pending = true;
         self.attempt = self.attempt.wrapping_add(1);
@@ -742,6 +753,7 @@ impl MultiManagerView {
         admission: Arc<RestartAdmission>,
         settings: &multi_launcher::settings::MultiManagerSettings,
         settings_path: &std::path::Path,
+        auto: Arc<super::multi_manager_auto::Owner>,
     ) -> Self {
         let base = settings_path
             .parent()
@@ -794,6 +806,7 @@ impl MultiManagerView {
             capture_identities: Vec::new(),
             ignore_launcher_capture: settings.ignore_launcher_window_on_capture,
             overlays: Vec::new(),
+            auto,
         };
         view.reload(cx);
         view
@@ -802,6 +815,37 @@ impl MultiManagerView {
         self.snapshot
             .as_ref()
             .is_some_and(|snapshot| snapshot.workspaces() != self.rows.as_slice())
+    }
+    fn adopt_auto_reconnect(&mut self, cx: &mut Context<Self>) {
+        if !self.open || !self.mount.is_current() || self.admission.is_fenced()
+            || self.pending || self.dirty() || self.rename.is_some() || self.review.is_some()
+        {
+            return;
+        }
+        let Some(plan) = self.auto.plan() else {
+            if let Some(error) = self.auto.error() {
+                self.message = Some(error);
+                cx.notify();
+            }
+            return;
+        };
+        let Some(snapshot) = &self.snapshot else { return; };
+        if !plan.matches_raw_source(snapshot) { return; }
+        let rows = plan.rows().iter().filter_map(|row| {
+            self.rows.get(row.index).cloned().map(|expected| PlacementOverlay {
+                index: row.index,
+                revision: self.revision,
+                expected,
+                source: OverlaySource::Startup(plan.clone(), self.auto.clone()),
+            })
+        }).collect::<Vec<_>>();
+        replace_restore_entries(&mut self.overlays, rows, |old| {
+            matches!(&old.source, OverlaySource::Startup(_, _))
+        });
+        if plan.outcome == checked::ReconnectCatalogOutcome::NoMatch {
+            self.message = Some("Automatic reconnect found no matching windows.".into());
+        }
+        cx.notify();
     }
     pub(super) fn blocks_close(&self) -> bool {
         self.open
@@ -910,6 +954,7 @@ impl MultiManagerView {
         let Some(permit) = self.admission.admit() else {
             return;
         };
+        self.retire_auto_reconnect();
         let lease = Arc::new(AtomicBool::new(true));
         let blur = lease.clone();
         self.focus_guard = Some(cx.on_focus_out(&self.focus, window, move |_, _, _, _| {
@@ -984,6 +1029,7 @@ impl MultiManagerView {
             cx.notify();
             return;
         };
+        self.retire_auto_reconnect();
         if intent.kind == WorkspaceOperationKind::CatalogReconnect {
             self.start_catalog(Some(intent), window, cx);
             return;
@@ -1107,6 +1153,7 @@ impl MultiManagerView {
             self.activation_guard = Some(cx.observe_window_activation(window, move |_, window, _| { if !window.is_window_active() { active.store(false, Ordering::Release); } }));
             (permit, lease, self.mount.clone(), self.visibility.request_revision.load(Ordering::Acquire))
         };
+        self.retire_auto_reconnect();
         self.operation_lease = Some(lease.clone()); self.pending = true;
         self.attempt = self.attempt.wrapping_add(1); let attempt = self.attempt; let revision = self.revision;
         let worker_mount = receipt.clone(); let worker_lease = lease.clone(); let visibility = self.visibility.clone(); let admission = self.admission.clone(); let host = self.host;
@@ -1205,6 +1252,7 @@ impl MultiManagerView {
                                 Some(format!("Could not load window bindings: {error}"))
                         }
                     }
+                    if loaded && view.restore_intent.is_none() { view.adopt_auto_reconnect(cx); }
                     if !loaded {
                         view.revoke_restore();
                     }
@@ -1462,6 +1510,12 @@ impl MultiManagerView {
             || !row_current(&self.rows, index, expected, revision, self.revision)
         {
             return;
+        }
+        if matches!(action, RowAction::Rename | RowAction::Toggle | RowAction::Delete | RowAction::Capture)
+            || matches!(action, RowAction::Up) && index > 0
+            || matches!(action, RowAction::Down) && index + 1 < self.rows.len()
+        {
+            self.retire_auto_reconnect();
         }
         match action {
             RowAction::Rename => {
@@ -1750,6 +1804,7 @@ impl Render for MultiManagerView {
                                     && view.snapshot.is_some()
                                     && view.current(window, cx)
                                 {
+                                    view.retire_auto_reconnect();
                                     view.rows.push(MmWorkspace {
                                         id: new_workspace_id(),
                                         name: "New Workspace".into(),
@@ -1801,6 +1856,7 @@ impl Render for MultiManagerView {
                                     view.review_cancel.focus(window, cx);
                                     cx.notify();
                                 } else {
+                                    view.retire_auto_reconnect();
                                     view.reload(cx);
                                 }
                             })
@@ -1937,9 +1993,7 @@ impl Render for MultiManagerView {
             }
             card = card.child(controls);
             if let Some(overlay) = self.overlays.iter().rev().find(|overlay| {
-                overlay.index == index
-                    && overlay.revision == self.revision
-                    && overlay.expected == *row
+                overlay_current(overlay, index, row, self.revision)
             }) {
                 card = card.child(Label::new(format!(
                     "{} of {} windows {}",
@@ -1947,7 +2001,7 @@ impl Render for MultiManagerView {
                     row.windows.len(),
                     match &overlay.source {
                         OverlaySource::Reconnect(_) => "reconnected",
-                        OverlaySource::Catalog(_) => "reconnected",
+                        OverlaySource::Catalog(_) | OverlaySource::Startup(_, _) => "reconnected",
                         OverlaySource::Restore(_) => "restored",
                     }
                 )));
@@ -2001,6 +2055,27 @@ impl Render for MultiManagerView {
 }
 
 impl RootWindow {
+    pub(super) fn start_auto_multi_manager(&mut self, cx: &mut Context<Self>) {
+        let settings = &self.search_catalog.multi_manager_settings;
+        let base = self.search_catalog.multi_manager_settings_path.parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let path = state::resolve_relative_to(base, &settings.workspaces_path);
+        self.multi_manager_auto.start(
+            settings.auto_reconnect_on_load, path, self.restart_admission.clone(),
+        );
+        let wake = self.multi_manager_auto.wake.clone();
+        cx.spawn(async move |root, cx| {
+            while wake.wait().await {
+                if root.update(cx, |root, cx| {
+                    if let Some(view) = &root.multi_manager_view {
+                        view.update(cx, |view, cx| view.adopt_auto_reconnect(cx));
+                    }
+                }).is_err() {
+                    break;
+                }
+            }
+        }).detach();
+    }
     pub(super) fn restore_multi_manager(
         &mut self,
         query: String,
@@ -2089,6 +2164,7 @@ impl RootWindow {
             let admission = self.restart_admission.clone();
             let settings = self.search_catalog.multi_manager_settings.clone();
             let settings_path = self.search_catalog.multi_manager_settings_path.clone();
+            let auto = self.multi_manager_auto.clone();
             let view = cx.new(|cx| {
                 MultiManagerView::new(
                     window,
@@ -2099,6 +2175,7 @@ impl RootWindow {
                     admission,
                     &settings,
                     &settings_path,
+                    auto,
                 )
             });
             view.update(cx, |view, cx| view.focus.focus(window, cx));
@@ -2183,8 +2260,10 @@ mod tests {
         restore_busy, row_current, select_overlay,
     };
     use multi_launcher::multi_manager::model::MmWorkspace;
+    use multi_launcher::multi_manager::{checked, store};
     use multi_launcher::plugin::Plugin;
     use std::collections::HashSet;
+    use std::sync::Arc;
     #[test]
     fn stock_bare_provider_rejects_forged_disabled_and_typed_actions() {
         let stock = multi_launcher::plugins::multi_manager::MultiManagerPlugin.search("mm");
@@ -2310,6 +2389,23 @@ mod tests {
         let mut changed = row;
         changed.name.push('!');
         assert!(!overlay_current(&overlay, 2, &changed, 4));
+    }
+
+    #[test]
+    fn startup_overlay_loses_authority_without_retiring_manual_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        std::fs::write(&path, br#"[{"id":"one","name":"Saved"}]"#).unwrap();
+        let snapshot = store::load_checked_workspaces(&path, || true).unwrap();
+        let plan = Arc::new(checked::reconnect_catalog_checked(&snapshot, || true, &checked::NativeReconnect).unwrap());
+        let row = snapshot.workspaces()[0].clone();
+        let owner = Arc::new(super::super::multi_manager_auto::Owner::default());
+        let startup = PlacementOverlay { index: 0, revision: 1, expected: row.clone(), source: OverlaySource::Startup(plan.clone(), owner.clone()) };
+        let manual = PlacementOverlay { index: 0, revision: 1, expected: row.clone(), source: OverlaySource::Catalog(plan) };
+        assert!(overlay_current(&startup, 0, &row, 1));
+        owner.retire();
+        assert!(!overlay_current(&startup, 0, &row, 1));
+        assert!(overlay_current(&manual, 0, &row, 1));
     }
 
     #[test]

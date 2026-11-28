@@ -224,6 +224,10 @@ pub fn place_restored_checked(plan: Arc<RestorePlan>, row: usize, issuer: Window
 /// Enumeration is injected so a real failure cannot be confused with an empty desktop.
 pub trait ReconnectBackend {
     fn enumerate(&self) -> Result<Vec<(EnumeratedWindow, WindowSwitchIdentity)>>;
+    fn enumerate_if_current(&self, current: &dyn Fn() -> bool) -> Result<Vec<(EnumeratedWindow, WindowSwitchIdentity)>> {
+        anyhow::ensure!(current(), "Reconnect superseded");
+        self.enumerate()
+    }
 }
 
 /// A catalog reconnect owns its original workspace source and row ordinals.
@@ -244,8 +248,23 @@ pub struct ReconnectedCatalogRow {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconnectCatalogOutcome { Complete, Partial, NoMatch }
 
+/// Load only the committed workspace store and reconnect it without writing.
+pub fn reconnect_catalog_from_path_checked(
+    path: &Path,
+    current: impl Fn() -> bool,
+    backend: &impl ReconnectBackend,
+) -> Result<ReconnectCatalogPlan> {
+    let _permit = crate::common::repair_watch::require_path_read(path)?;
+    let source = store::load_checked_workspaces(path, &current)?;
+    reconnect_catalog_checked_inner(&source, current, backend)
+}
+
 impl ReconnectCatalogPlan {
     pub fn rows(&self) -> &[ReconnectedCatalogRow] { &self.rows }
+    /// Exact raw source identity also supports legacy rows with synthesized IDs.
+    pub fn matches_raw_source(&self, snapshot: &CheckedWorkspaceSnapshot) -> bool {
+        self.source.path() == snapshot.path() && self.source.source() == snapshot.source()
+    }
     /// Compare the retained committed receipt without reading the filesystem.
     pub fn matches_snapshot(&self, snapshot: &CheckedWorkspaceSnapshot) -> bool {
         self.source.path() == snapshot.path() && self.source.source() == snapshot.source() && self.source.workspaces() == snapshot.workspaces()
@@ -264,6 +283,21 @@ pub fn reconnect_catalog_checked(
     backend: &impl ReconnectBackend,
 ) -> Result<ReconnectCatalogPlan> {
     let _permit = crate::common::repair_watch::require_path_read(source.path())?;
+    reconnect_catalog_checked_inner(source, current, backend)
+}
+
+fn enumeration_source_current(
+    source_current: impl FnOnce() -> bool,
+    current: impl FnOnce() -> bool,
+) -> bool {
+    source_current() && current()
+}
+
+fn reconnect_catalog_checked_inner(
+    source: &CheckedWorkspaceSnapshot,
+    current: impl Fn() -> bool,
+    backend: &impl ReconnectBackend,
+) -> Result<ReconnectCatalogPlan> {
     let source_current = || current() && store::checked_workspace_source_is_current(source);
     anyhow::ensure!(source_current(), "Reconnect source changed or request superseded");
     let original = source.workspaces();
@@ -282,7 +316,9 @@ pub fn reconnect_catalog_checked(
     let skipped = original.len() - indices.len();
     let snapshot = reconnect::collect_reconnect_snapshot(&shadow);
     let observations = if snapshot.windows.iter().any(|window| !window.fingerprint.disabled) {
-        backend.enumerate().context("Could not enumerate windows")?
+        backend
+            .enumerate_if_current(&|| enumeration_source_current(&source_current, &current))
+            .context("Could not enumerate windows")?
     } else { Vec::new() };
     anyhow::ensure!(source_current(), "Reconnect source changed or request superseded");
     let mut captured = HashMap::new();
@@ -338,6 +374,11 @@ fn observation_is_current(
 }
 impl ReconnectBackend for NativeReconnect {
     fn enumerate(&self) -> Result<Vec<(EnumeratedWindow, WindowSwitchIdentity)>> {
+        self.enumerate_if_current(&|| true)
+    }
+    fn enumerate_if_current(&self, current: &dyn Fn() -> bool) -> Result<Vec<(EnumeratedWindow, WindowSwitchIdentity)>> {
+        static ENUMERATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        with_enumeration_lane(&ENUMERATION, current, || {
         let mut checked = Vec::new();
         for candidate in win::enumerate_top_level_windows()? {
             if let Some(observation) = fresh_candidate(candidate.hwnd) {
@@ -345,7 +386,14 @@ impl ReconnectBackend for NativeReconnect {
             }
         }
         Ok(checked)
+        })
     }
+}
+
+fn with_enumeration_lane<T>(lane: &std::sync::Mutex<()>, current: &dyn Fn() -> bool, enumerate: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _guard = lane.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    anyhow::ensure!(current(), "Reconnect superseded");
+    enumerate()
 }
 
 #[cfg(windows)]
@@ -434,7 +482,7 @@ pub fn reconnect_checked(
     let captured = RefCell::new(HashMap::<usize, WindowSwitchIdentity>::new());
     let error = RefCell::new(None::<String>);
     let duplicate = RefCell::new(false);
-    let enumerate = || match backend.enumerate() {
+    let enumerate = || match backend.enumerate_if_current(&current) {
         Ok(rows) => rows
             .into_iter()
             .filter_map(|(window, identity)| {
@@ -1217,12 +1265,66 @@ mod tests {
     }
 
     #[test]
+    fn enumeration_rejects_retirement_during_source_check() {
+        let current = std::cell::Cell::new(true);
+        assert!(!enumeration_source_current(
+            || {
+                current.set(false);
+                true
+            },
+            || current.get(),
+        ));
+    }
+
+    #[test]
+    fn queued_enumeration_rechecks_authority_after_lane_acquisition() {
+        use std::sync::{Arc, atomic::{AtomicBool, AtomicUsize, Ordering}};
+        let lane = Arc::new(std::sync::Mutex::new(()));
+        let hold = lane.lock().unwrap();
+        let current = Arc::new(AtomicBool::new(true));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (ready, waiting) = std::sync::mpsc::channel();
+        let worker_lane = lane.clone();
+        let worker_current = current.clone();
+        let worker_calls = calls.clone();
+        let worker = std::thread::spawn(move || {
+            ready.send(()).unwrap();
+            with_enumeration_lane(&worker_lane, &|| worker_current.load(Ordering::Acquire), || {
+                worker_calls.fetch_add(1, Ordering::AcqRel);
+                Ok(())
+            })
+        });
+        waiting.recv().unwrap();
+        current.store(false, Ordering::Release);
+        drop(hold);
+        assert!(worker.join().unwrap().is_err());
+        assert_eq!(calls.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn startup_catalog_loads_only_workspace_and_refuses_retired_authority() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("workspaces.json");
+        let bytes = serde_json::to_vec(&[workspace()]).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        let backend = FakeReconnect { fail: false, rows: vec![] };
+        let plan = reconnect_catalog_from_path_checked(&path, || true, &backend).unwrap();
+        assert_eq!(plan.rows().len(), 1);
+        assert!(plan.rows()[0].identities.is_empty());
+        assert!(reconnect_catalog_from_path_checked(&path, || false, &backend).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        assert!(!dir.path().join("bindings.json").exists());
+    }
+
+    #[test]
     fn catalog_legacy_row_has_source_ordinal_and_never_trusts_saved_handle() {
         let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("legacy.json");
         let bytes = br#"[{"name":"Legacy","windows":[{"title":"Editor","hwnd":999,"binding_verified":true}]}]"#;
         std::fs::write(&path, bytes).unwrap();
         let source = store::load_checked_workspaces(&path, || true).unwrap();
         let plan = reconnect_catalog_checked(&source, || true, &FakeReconnect { fail: false, rows: vec![] }).unwrap();
+        let reopened = store::load_checked_workspaces(&path, || true).unwrap();
+        assert!(plan.matches_raw_source(&reopened));
         assert_eq!(plan.rows()[0].index, 0);
         assert!(plan.rows()[0].identities.is_empty());
         assert_eq!(plan.rows()[0].workspace.windows[0].hwnd, 0);
